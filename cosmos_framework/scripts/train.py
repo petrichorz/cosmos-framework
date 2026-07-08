@@ -28,6 +28,11 @@ import os
 import traceback
 
 import torch
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+except:
+    print("Use GPU or CPU Platform")
 from loguru import logger as logging
 
 from cosmos_framework.utils.config import Config
