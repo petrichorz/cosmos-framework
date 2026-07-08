@@ -165,6 +165,29 @@ vllm = [
   "vllm==0.19.1",
   "torch==2.10.0",
 ]
+# suit for Ascend (Huawei NPU). Mirrors cu128 but drops CUDA/nvidia packages.
+# Requires CANN toolkit on the host. torch_npu must match the torch version.
+# torch/torchvision/torchcodec use +cpu builds to avoid pulling nvidia CUDA deps;
+# NPU acceleration is provided by torch_npu + CANN.
+ascend = [
+  "torch==2.10.0+cpu",
+  "torch_npu==2.10.0", # Ascend NPU support; must match torch version (requires matching CANN)
+  "torchcodec==0.10.0+cpu", # https://github.com/meta-pytorch/torchcodec/releases
+  "torchvision==0.25.0+cpu", # https://github.com/pytorch/vision/releases
+  # CUDA/nvidia-only packages removed for Ascend (kept as comments for parity with cu128):
+  # "flash-attn-3-nv==1.0.3+cu128.torch210; platform_machine == 'x86_64'",
+  # "flash-attn==2.7.4.post1+cu128.torch210; platform_machine == 'x86_64'",
+  # "natten==0.21.6.dev6+cu128.torch210; platform_machine == 'x86_64'",
+  # nvidia-*-cu12 runtime libs (cublas/cudnn/cufft/curand/cusolver/cusparse/nccl/npp/nvjitlink/nvshmem/nvtx/cuda-*)
+  # are not required on Ascend; NPU ops come from torch_npu + CANN.
+]
+ascend-train = [
+  {include-group = "ascend"},
+  "torchao==0.16.0+cpu", # https://github.com/pytorch/ao/issues/2919
+  # CUDA/nvidia-only packages removed for Ascend (kept as comments for parity with cu128-train):
+  # "transformer-engine==2.12.0+cu128.torch210",
+  # "triton==3.6.0",
+]
 # Match nvcr.io/nvidia/pytorch:25.11-py3: https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-26-01.html
 cu128 = [
   "flash-attn-3-nv==1.0.3+cu128.torch210; platform_machine == 'x86_64'",
@@ -278,6 +301,8 @@ conflicts = [
     {group = "cu128-train"},
     {group = "cu130"},
     {group = "cu130-train"},
+    {group = "ascend"},
+    {group = "ascend-train"},
   ],
 ]
 override-dependencies = [
