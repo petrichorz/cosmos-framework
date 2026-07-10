@@ -47,12 +47,7 @@ def init() -> int | None:
         timeout_seconds = os.getenv("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", 1800)
         # Convert the timeout to an integer (if it isn't already) and then to a timedelta
         timeout_timedelta = timedelta(seconds=int(timeout_seconds))
-        backend = DIST_BACKEND
-        dist.init_process_group(backend=backend, init_method="env://", timeout=timeout_timedelta)
-        log.critical(
-            f"Initialized distributed training with local rank {local_rank} using {backend} with timeout {timeout_seconds}",
-            rank0_only=False,
-        )
+        dist.init_process_group(backend=DIST_BACKEND, init_method="env://", timeout=timeout_timedelta)
     # Increase the L2 fetch granularity for faster speed (CUDA only).
     if INTERNAL and IS_CUDA:
         _libcudart = ctypes.CDLL("libcudart.so")
