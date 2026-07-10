@@ -51,6 +51,7 @@ Sets parameters to minimum values (e.g. num_steps=1, num_layers=2).
 
 class Device(StrEnum):
     CUDA = "cuda"
+    NPU = "npu"
     CPU = "cpu"
     META = "meta"
 
