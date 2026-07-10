@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import psutil
-import pynvml
 import torch
 import wandb
 
@@ -14,6 +13,7 @@ from cosmos_framework.callbacks.every_n import EveryN
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.trainer import ImaginaireTrainer
 from cosmos_framework.utils import distributed, log
+from cosmos_framework.utils.device_backend import BACKEND, MemoryInfo  # noqa: F401
 from cosmos_framework.utils.easy_io import easy_io
 
 
@@ -102,7 +102,8 @@ class DeviceMonitor(EveryN):
             log.info(f"{self.name} callback: local_dir: {self.local_dir}")
 
         local_rank = int(os.getenv("LOCAL_RANK", 0))
-        self.handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
+        BACKEND.init()
+        self.handle = BACKEND.get_handle(local_rank)
 
     def every_n_impl(
         self,
@@ -124,18 +125,28 @@ class DeviceMonitor(EveryN):
 
         peak_gpu_mem_gb = torch.cuda.max_memory_allocated() / (1024**3)
         peak_gpu_mem_reserved_gb = torch.cuda.max_memory_reserved() / (1024**3)
-        temp = torch.cuda.temperature()
-        try:
-            power = torch.cuda.power_draw()
-        except Exception as e:
-            log.warning(f"Failed to get power draw with error {e}")
-            power = 0
-        util = torch.cuda.utilization()
-        clock = torch.cuda.clock_rate()
 
-        memory_info = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
-        nvml_used_gpu_mem_gb = memory_info.used / (1024**3)
-        nvml_free_gpu_mem_gb = memory_info.free / (1024**3)
+        def _safe_cuda(fn_name: str, default=0):
+            # torch.cuda.temperature/power_draw/utilization/clock_rate are absent or
+            # unsupported on non-CUDA backends (e.g. Ascend NPU); degrade gracefully.
+            try:
+                return getattr(torch.cuda, fn_name)()
+            except Exception as e:
+                log.warning(f"Failed to get {fn_name} with error {e}")
+                return default
+
+        temp = _safe_cuda("temperature")
+        power = _safe_cuda("power_draw")
+        util = _safe_cuda("utilization")
+        clock = _safe_cuda("clock_rate")
+
+        memory_info = BACKEND.get_memory_info(self.handle)
+        if memory_info is None:
+            nvml_used_gpu_mem_gb = 0.0
+            nvml_free_gpu_mem_gb = 0.0
+        else:
+            nvml_used_gpu_mem_gb = memory_info.used / (1024**3)
+            nvml_free_gpu_mem_gb = memory_info.free / (1024**3)
 
         prof_data = {
             "cpu_mem_gb": cpu_mem_gb,
