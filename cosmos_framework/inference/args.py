@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self, cast, override
 
 import pydantic
-import pynvml
+import torch
 from typing_extensions import assert_never
 from tyro.conf import Suppress
+
+from cosmos_framework.utils.device_backend import BACKEND
 
 from cosmos_framework.inference.common.args import (
     IMAGE_EXTENSIONS,
@@ -1409,28 +1411,22 @@ def _get_dp_shard_size(
 @cache
 def _get_device_memory_bytes() -> int:
     try:
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        info = _get_nvml_device_memory_info(handle)
-        return info.total
+        BACKEND.init()
+        handle = BACKEND.get_handle(0)
+        info = BACKEND.get_memory_info(handle)
+        if info is not None:
+            return info.total
+        # Backend returned None (e.g. CPU): fall back to torch device properties.
+        if torch.cuda.is_available():
+            return int(torch.cuda.get_device_properties(0).total_memory)
+        return 128 * 1024**3  # Default 128GB
     except Exception:
-        # Fallback for unified memory architectures (e.g., GB10) where
-        # nvmlDeviceGetMemoryInfo is not supported.
-        import torch
+        # Fallback for unified memory architectures where memory info is unsupported.
         if torch.cuda.is_available():
             return int(torch.cuda.get_device_properties(0).total_memory)
         return 128 * 1024**3  # Default 128GB
     finally:
         try:
-            pynvml.nvmlShutdown()
+            BACKEND.shutdown()
         except Exception:
             pass
-
-
-def _get_nvml_device_memory_info(handle: Any) -> Any:
-    try:
-        return pynvml.nvmlDeviceGetMemoryInfo_v2(handle)
-    except AttributeError:
-        return pynvml.nvmlDeviceGetMemoryInfo(handle)
-    except pynvml.NVMLError_NotSupported:
-        return pynvml.nvmlDeviceGetMemoryInfo(handle)
