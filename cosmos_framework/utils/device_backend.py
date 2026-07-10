@@ -47,6 +47,15 @@ _KIND = select_backend_kind()
 IS_NPU: bool = _KIND == "npu"
 IS_CUDA: bool = _KIND == "cuda"
 DIST_BACKEND: str = "hccl" if IS_NPU else ("nccl" if IS_CUDA else "gloo")
+DEVICE_TYPE: str = "npu" if IS_NPU else ("cuda" if IS_CUDA else "cpu")
+"""Runtime accelerator device type for DeviceMesh / DTensor placement.
+
+Use this (not ``flags.DEVICE``) as the ``device_type`` for
+``init_device_mesh`` / ``build_meshes`` so the FSDP/HSDP mesh is built on
+``"npu"`` under Ascend (and ``"cuda"`` under NVIDIA). ``flags.DEVICE`` stays
+``"cuda"`` and is still used for ``torch.device(...)`` - ``transfer_to_npu``
+redirects those - but DeviceMesh dispatch needs the real backend string.
+"""
 
 
 @dataclass

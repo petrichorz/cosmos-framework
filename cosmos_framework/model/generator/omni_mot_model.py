@@ -17,6 +17,7 @@ from torch.distributed._composable.fsdp import FSDPModule
 from torch.nn.modules.module import _IncompatibleKeys
 
 from cosmos_framework.utils.flags import DEVICE, TRAINING, Device
+from cosmos_framework.utils.device_backend import DEVICE_TYPE
 from cosmos_framework.utils.lazy_config import LazyDict
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
 from cosmos_framework.model._base import ImaginaireModel
@@ -418,7 +419,7 @@ class OmniMoTModel(ImaginaireModel):
             cfgp=self.config.parallelism.cfg_parallel_shard_degree,
             cp=self.config.parallelism.context_parallel_shard_degree,
         )
-        self.parallel_dims.build_meshes(device_type=DEVICE)
+        self.parallel_dims.build_meshes(device_type=DEVICE_TYPE)
 
     def set_up_scheduler_and_sampler(self):
         # Get shift value - support both int and dict-based resolution lookup

@@ -28,6 +28,7 @@ import torch.nn as nn
 from cosmos_framework.utils.lazy_config import instantiate
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import log
+from cosmos_framework.utils.device_backend import DEVICE_TYPE
 from cosmos_framework.model.generator.algorithm.loss.cross_entropy import cross_entropy_loss, weighted_cross_entropy_loss
 from cosmos_framework.configs.base.defaults.parallelism import PRECISION_TO_TORCH_DTYPE
 from cosmos_framework.configs.base.reasoner.defaults.policy_config import VLMModelConfig
@@ -371,7 +372,7 @@ class VLMModel(ImaginaireModel):
         assert parallel_dims.cfgp == 1, f"VLM does not support CFGP (got cfgp={parallel_dims.cfgp})"
 
         if torch.distributed.is_initialized():
-            parallel_dims.build_meshes(device_type="cuda")
+            parallel_dims.build_meshes(device_type=DEVICE_TYPE)
 
         # Replicate-only (DDP) is not implemented in Phase 2's parallelize().
         # Raise early rather than running with no gradient synchronization and
