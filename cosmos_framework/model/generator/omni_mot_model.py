@@ -259,7 +259,7 @@ class OmniMoTModel(ImaginaireModel):
         with misc.timer("meta to cuda and broadcast model states"):
             net = net.to(dtype=dtype)
             net.to_empty(device=DEVICE)
-            if DEVICE == Device.CUDA:
+            if DEVICE in (Device.CUDA, Device.NPU):
                 # Weight initialization is not needed for other devices (cpu,
                 # meta), since they are only for checkpoint conversion and smoke
                 # tests.
