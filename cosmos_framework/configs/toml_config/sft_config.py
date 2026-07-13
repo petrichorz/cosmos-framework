@@ -435,6 +435,15 @@ class OptimizerConfig(BaseModel):
             "base lr. Substrings not in the dict default to 1.0."
         ),
     )
+    optimizer_type: str = Field(
+        default="FusedAdam",
+        description=(
+            "Optimizer class selected by build_optimizer. 'FusedAdam' "
+            "(transformer_engine, CUDA-only) or 'AdamW' (torch.optim.AdamW). "
+            "On Ascend NPU use 'AdamW' with fused=false (FusedAdam's TE "
+            "kernels and fused=True are CUDA-only)."
+        ),
+    )
     weight_decay: float = Field(
         default=0.0,
         description="AdamW decoupled weight decay. 0 disables.",
