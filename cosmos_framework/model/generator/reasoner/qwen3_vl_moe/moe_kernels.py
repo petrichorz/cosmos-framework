@@ -4,8 +4,14 @@
 from typing import Callable, Literal
 
 import torch
-import triton
-import triton.language as tl
+try:
+    import triton
+    import triton.language as tl
+    _HAS_TRITON = True
+except ImportError:
+    triton = None
+    tl = None
+    _HAS_TRITON = False
 
 # Set the token group alignment size for experts in MoE. This is implemented by
 # padding each expert size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
@@ -84,46 +90,47 @@ def indices_padding_wrapper(func: Callable) -> Callable:
 
     return wrapper
 
+if _HAS_TRITON:
+    @triton.jit
+    def _fill_indices_kernel(
+        num_tokens_per_expert_ptr,
+        start_index_values_ptr,
+        write_offsets_ptr,
+        output_ptr,
+        num_experts: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,  # Number of threads per block
+    ):
+        pid = tl.program_id(axis=0)
+        num_programs = tl.num_programs(axis=0)
 
-@triton.jit
-def _fill_indices_kernel(
-    num_tokens_per_expert_ptr,
-    start_index_values_ptr,
-    write_offsets_ptr,
-    output_ptr,
-    num_experts: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,  # Number of threads per block
-):
-    pid = tl.program_id(axis=0)
-    num_programs = tl.num_programs(axis=0)
+        # map programs (blocks) to the experts and loop (grid stride) if needed
+        for expert_id in range(pid, num_experts, num_programs):
+            # read this experts write offset
+            write_offset = tl.load(write_offsets_ptr + expert_id)
 
-    # map programs (blocks) to the experts and loop (grid stride) if needed
-    for expert_id in range(pid, num_experts, num_programs):
-        # read this experts write offset
-        write_offset = tl.load(write_offsets_ptr + expert_id)
+            # load number of tokens for this expert
+            start_index = tl.load(start_index_values_ptr + expert_id)
+            length = tl.load(num_tokens_per_expert_ptr + expert_id)
 
-        # load number of tokens for this expert
-        start_index = tl.load(start_index_values_ptr + expert_id)
-        length = tl.load(num_tokens_per_expert_ptr + expert_id)
+            # each thread in block processes tokens in parallel
+            offsets = tl.arange(0, BLOCK_SIZE)
 
-        # each thread in block processes tokens in parallel
-        offsets = tl.arange(0, BLOCK_SIZE)
+            # tokens are processed in chunks of BLOCK_SIZE
+            for chunk_start in range(0, length, BLOCK_SIZE):
+                chunk_offsets = chunk_start + offsets
 
-        # tokens are processed in chunks of BLOCK_SIZE
-        for chunk_start in range(0, length, BLOCK_SIZE):
-            chunk_offsets = chunk_start + offsets
+                # mask valid indices
+                mask = chunk_offsets < length
 
-            # mask valid indices
-            mask = chunk_offsets < length
+                values = start_index + chunk_offsets
 
-            values = start_index + chunk_offsets
+                # destination
+                dest_indices = write_offset + chunk_offsets
 
-            # destination
-            dest_indices = write_offset + chunk_offsets
-
-            # store
-            tl.store(output_ptr + dest_indices, values, mask=mask)
-
+                # store
+                tl.store(output_ptr + dest_indices, values, mask=mask)
+else:
+    _fill_indices_kernel = None
 
 def _fill_indices_wrapper(
     num_tokens_per_expert: torch.Tensor,
