@@ -31,6 +31,24 @@ _CUSTOM_PAYLOAD = {
 # 1. pydantic schema validation                                               #
 # --------------------------------------------------------------------------- #
 class TestSchemaValidation:
+    def test_teacher_forcing_model_fields_validate(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge"},
+            "model": {
+                "causal_training_strategy": "teacher_forcing",
+                "teacher_forcing_block_size_min": 1,
+                "teacher_forcing_block_size_max": 4,
+                "teacher_forcing_history_blocks_min": 1,
+                "teacher_forcing_history_blocks_max": 32,
+                "teacher_forcing_max_mask_elements": 123456,
+            },
+        }
+
+        cfg = SFTExperimentConfig.model_validate(raw)
+
+        assert cfg.model.causal_training_strategy == "teacher_forcing"
+        assert cfg.model.teacher_forcing_max_mask_elements == 123456
+
     def test_custom_section_validates_arbitrary_nested_content(self) -> None:
         """Arbitrary nested [custom] content passes through untouched."""
         raw = {
@@ -81,6 +99,46 @@ class TestSchemaValidation:
 # 2. build_hydra_overrides must NOT emit [custom] as per-leaf overrides        #
 # --------------------------------------------------------------------------- #
 class TestBuildHydraOverrides:
+    def test_teacher_forcing_model_fields_route_to_vfm_model_config(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge"},
+            "model": {
+                "causal_training_strategy": "teacher_forcing",
+                "teacher_forcing_block_size_min": 1,
+                "teacher_forcing_block_size_max": 4,
+                "teacher_forcing_history_blocks_min": 1,
+                "teacher_forcing_history_blocks_max": 32,
+                "teacher_forcing_max_mask_elements": 123456,
+            },
+        }
+
+        overrides = build_hydra_overrides(raw)
+
+        assert "model.config.causal_training_strategy=teacher_forcing" in overrides
+        assert "model.config.teacher_forcing_block_size_min=1" in overrides
+        assert "model.config.teacher_forcing_block_size_max=4" in overrides
+        assert "model.config.teacher_forcing_history_blocks_min=1" in overrides
+        assert "model.config.teacher_forcing_history_blocks_max=32" in overrides
+        assert "model.config.teacher_forcing_max_mask_elements=123456" in overrides
+
+    def test_teacher_forcing_model_fields_are_skipped_for_vlm(self) -> None:
+        raw = {
+            "job": {"task": "vlm", "experiment": "llava_ov"},
+            "model": {
+                "causal_training_strategy": "teacher_forcing",
+                "teacher_forcing_block_size_min": 1,
+                "teacher_forcing_block_size_max": 4,
+                "teacher_forcing_history_blocks_min": 1,
+                "teacher_forcing_history_blocks_max": 32,
+                "teacher_forcing_max_mask_elements": 123456,
+            },
+        }
+
+        overrides = build_hydra_overrides(raw)
+
+        assert all("teacher_forcing" not in override for override in overrides)
+        assert all("causal_training_strategy" not in override for override in overrides)
+
     def test_custom_not_emitted_as_overrides(self) -> None:
         raw = {
             "job": {"task": "vfm", "experiment": "vision_sft_nano"},
@@ -145,12 +203,12 @@ weight = 2.0
 """
 
 
-def _load_or_skip(toml_path: Path):
+def _load_or_skip(toml_path: Path, extra_overrides: list[str] | None = None):
     """Run the real loader, skipping if the training stack can't be imported."""
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
 
     try:
-        return load_experiment_from_toml(str(toml_path))
+        return load_experiment_from_toml(str(toml_path), extra_overrides=extra_overrides)
     except ImportError as exc:  # pragma: no cover — env-dependent
         pytest.skip(f"training stack not importable here: {exc!r}")
 
@@ -164,6 +222,46 @@ def _dummy_recipe_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestEndToEndLoader:
+    def test_load_causal_model_group_with_teacher_forcing_toml(
+        self,
+        tmp_path: Path,
+        _dummy_recipe_env: None,
+    ) -> None:
+        from cosmos_framework.model.generator.omni_mot_causal_model import OmniMoTCausalModel
+
+        toml_path = tmp_path / "causal.toml"
+        toml_path.write_text(
+            """\
+[job]
+task       = "vfm"
+experiment = "vision_sft_nano"
+
+[model]
+causal_training_strategy                 = "teacher_forcing"
+teacher_forcing_block_size_min           = 1
+teacher_forcing_block_size_max           = 4
+teacher_forcing_history_blocks_min       = 1
+teacher_forcing_history_blocks_max       = 32
+teacher_forcing_max_mask_elements        = 123456
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+"""
+        )
+
+        config = _load_or_skip(toml_path, extra_overrides=["model=mot_causal_fsdp"])
+
+        assert config.model._target_ is OmniMoTCausalModel
+        assert config.model.config.causal_training_strategy == "teacher_forcing"
+        assert config.model.config.teacher_forcing_block_size_min == 1
+        assert config.model.config.teacher_forcing_block_size_max == 4
+        assert config.model.config.teacher_forcing_history_blocks_min == 1
+        assert config.model.config.teacher_forcing_history_blocks_max == 32
+        assert config.model.config.teacher_forcing_max_mask_elements == 123456
+
     def test_load_with_custom_section(self, tmp_path: Path, _dummy_recipe_env: None) -> None:
         toml_path = tmp_path / "with_custom.toml"
         toml_path.write_text(_BASE_TOML + _CUSTOM_TOML_BLOCK)

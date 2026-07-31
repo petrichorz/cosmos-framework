@@ -325,6 +325,43 @@ class ModelConfig(BaseModel):
             "data_setting.max_tokens and policy.qwen_max_video_token_length."
         ),
     )
+    causal_training_strategy: str = Field(
+        default="none",
+        description=(
+            "VFM causal-training mode. Scheme-B causal training requires "
+            "'teacher_forcing' together with the mot_causal_ddp or "
+            "mot_causal_fsdp Hydra model group."
+        ),
+    )
+    teacher_forcing_block_size_min: int = Field(
+        default=1,
+        ge=1,
+        description="Inclusive minimum number of VAE latent-frame chunks per causal block.",
+    )
+    teacher_forcing_block_size_max: int = Field(
+        default=4,
+        ge=1,
+        description="Inclusive maximum number of VAE latent-frame chunks per causal block.",
+    )
+    teacher_forcing_history_blocks_min: int = Field(
+        default=1,
+        ge=1,
+        description="Inclusive minimum clean-history window measured in causal blocks.",
+    )
+    teacher_forcing_history_blocks_max: int = Field(
+        default=32,
+        ge=1,
+        description="Inclusive maximum clean-history window measured in causal blocks.",
+    )
+    teacher_forcing_max_mask_elements: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Required Dense teacher-forcing safety limit for query-by-key boolean "
+            "mask elements. No default is chosen because the safe value depends on "
+            "the training resolution, clip length, and device memory."
+        ),
+    )
     joint_attn_implementation: str = Field(
         default="two_way",
         description=(
