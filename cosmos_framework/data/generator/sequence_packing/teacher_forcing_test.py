@@ -9,6 +9,7 @@ import torch
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     TeacherForcingLayout,
     TeacherForcingStream,
+    build_teacher_forcing_layout,
     sample_teacher_forcing_parameters,
 )
 
@@ -68,3 +69,156 @@ def test_sample_teacher_forcing_parameters_rejects_invalid_ranges(
 ):
     with pytest.raises(ValueError, match=invalid_field):
         sample_teacher_forcing_parameters(**kwargs)
+
+
+def test_build_teacher_forcing_layout_maps_both_streams_to_the_original_tokens():
+    layout = build_teacher_forcing_layout(
+        und_token_counts=[2],
+        vision_token_shapes=[(5, 1, 1)],
+        block_size=2,
+        history_blocks=1,
+    )
+
+    assert layout.original_sample_lens == (7,)
+    assert layout.sample_lens == (12,)
+    assert layout.split_lens == (2, 10)
+    assert layout.attn_modes == ("causal", "full")
+    assert layout.source_sequence_indexes.tolist() == [0, 1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6]
+    assert layout.sample_ids.tolist() == [0] * 12
+    assert layout.stream_ids.tolist() == [-1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+    assert layout.block_ids.tolist() == [-1, -1, 0, 0, 1, 1, 2, 0, 0, 1, 1, 2]
+    assert layout.gen_query_indexes.tolist() == list(range(2, 12))
+    assert layout.clean_token_indexes.tolist() == list(range(2, 7))
+    assert layout.noisy_output_indexes.tolist() == list(range(7, 12))
+
+
+def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample_offsets():
+    layout = build_teacher_forcing_layout(
+        und_token_counts=[1, 2],
+        vision_token_shapes=[(3, 1, 2), (2, 2, 1)],
+        block_size=2,
+        history_blocks=3,
+    )
+
+    assert layout.original_sample_lens == (7, 6)
+    assert layout.sample_lens == (13, 10)
+    assert layout.split_lens == (1, 12, 2, 8)
+    assert layout.attn_modes == ("causal", "full", "causal", "full")
+    assert layout.source_sequence_indexes.tolist() == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        9,
+        10,
+        11,
+        12,
+    ]
+    assert layout.block_ids.tolist() == [
+        -1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert layout.sample_ids.tolist() == [0] * 13 + [1] * 10
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "invalid_field"),
+    [
+        (
+            {
+                "und_token_counts": [1],
+                "vision_token_shapes": [(2, 1, 1), (2, 1, 1)],
+                "block_size": 1,
+                "history_blocks": 1,
+            },
+            "same number",
+        ),
+        (
+            {
+                "und_token_counts": [],
+                "vision_token_shapes": [],
+                "block_size": 1,
+                "history_blocks": 1,
+            },
+            "empty",
+        ),
+        (
+            {
+                "und_token_counts": [0],
+                "vision_token_shapes": [(2, 1, 1)],
+                "block_size": 1,
+                "history_blocks": 1,
+            },
+            "und_token_counts",
+        ),
+        (
+            {
+                "und_token_counts": [1],
+                "vision_token_shapes": [(2, 0, 1)],
+                "block_size": 1,
+                "history_blocks": 1,
+            },
+            "vision_token_shapes",
+        ),
+        (
+            {
+                "und_token_counts": [1],
+                "vision_token_shapes": [(2, 1, 1)],
+                "block_size": 0,
+                "history_blocks": 1,
+            },
+            "block_size",
+        ),
+        (
+            {
+                "und_token_counts": [1],
+                "vision_token_shapes": [(2, 1, 1)],
+                "block_size": 1,
+                "history_blocks": 0,
+            },
+            "history_blocks",
+        ),
+    ],
+)
+def test_build_teacher_forcing_layout_rejects_invalid_geometry(
+    kwargs: dict[str, object],
+    invalid_field: str,
+):
+    with pytest.raises(ValueError, match=invalid_field):
+        build_teacher_forcing_layout(**kwargs)
