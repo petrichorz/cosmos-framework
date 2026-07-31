@@ -9,6 +9,8 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
+from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
 from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
 from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_last_hidden_state,
@@ -17,8 +19,6 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
 from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAwareLinear
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
 from cosmos_framework.model.generator.utils.memory import MemoryState
-from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
-from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
 
 
 class Cosmos3VFMNetworkConfig(PretrainedConfig):
@@ -49,6 +49,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         temporal_compression_factor_action=1,
         natten_parameter_list=None,
         video_temporal_causal=False,
+        teacher_forcing_max_mask_elements: int | None = None,
         # Sound generation parameters
         sound_dim: int | None = None,
         temporal_compression_factor_sound=1,
@@ -77,6 +78,12 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.temporal_compression_factor_vision = temporal_compression_factor_vision
         self.natten_parameter_list = natten_parameter_list
         self.video_temporal_causal = video_temporal_causal
+        if teacher_forcing_max_mask_elements is not None and teacher_forcing_max_mask_elements < 1:
+            raise ValueError(
+                "teacher_forcing_max_mask_elements must be >= 1 when configured, "
+                f"got {teacher_forcing_max_mask_elements}"
+            )
+        self.teacher_forcing_max_mask_elements = teacher_forcing_max_mask_elements
         self.enable_input_bias = enable_input_bias
 
         # action related parameters
@@ -601,6 +608,33 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         )  # packed_tokens_vision: [total_vision_patches,patch_latent_dim]
         packed_tokens_vision = self.vae2llm(packed_tokens_vision.to(target_dtype))  # [total_vision_patches,hidden_size]
 
+        if packed_seq.teacher_forcing is not None:
+            teacher_forcing = packed_seq.teacher_forcing
+            packed_clean_tokens, clean_original_latent_shapes = self.patchify_and_pack_latents(
+                teacher_forcing.clean_vision_tokens,
+                vision.token_shapes,
+            )
+            if clean_original_latent_shapes != original_latent_shapes:
+                raise ValueError(
+                    "teacher-forcing clean/noisy payloads must produce identical latent shapes, "
+                    f"got {clean_original_latent_shapes} and {original_latent_shapes}"
+                )
+            packed_clean_tokens = self.vae2llm(packed_clean_tokens.to(target_dtype))
+            clean_timesteps = torch.zeros(
+                packed_clean_tokens.shape[0],
+                device=packed_clean_tokens.device,
+                dtype=torch.float32,
+            )
+            packed_clean_timestep_embeds = self._embed_packed_timesteps(clean_timesteps, packed_seq).to(target_dtype)
+            packed_clean_tokens = packed_clean_tokens + packed_clean_timestep_embeds
+            clean_sequence_indexes = teacher_forcing.layout.clean_token_indexes
+            if clean_sequence_indexes.numel() != packed_clean_tokens.shape[0]:
+                raise ValueError(
+                    "teacher-forcing clean sequence indexes must match patchified clean tokens, "
+                    f"got {clean_sequence_indexes.numel()} and {packed_clean_tokens.shape[0]}"
+                )
+            packed_sequence[clean_sequence_indexes] = packed_clean_tokens
+
         has_noisy_vision = vision.mse_loss_indexes.numel() > 0
 
         if has_noisy_vision:
@@ -948,7 +982,9 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # Condition tokens still need to be routed to diffusion experts; they are excluded from
         # LOSS computation, not from routing.
         all_gen_indexes = []
-        if packed_seq.vision is not None:
+        if packed_seq.teacher_forcing is not None:
+            all_gen_indexes.append(packed_seq.teacher_forcing.layout.gen_query_indexes)
+        elif packed_seq.vision is not None:
             assert packed_seq.vision.token_shapes is not None
             assert isinstance(packed_seq.vision.sequence_indexes, torch.Tensor)
             all_gen_indexes.append(packed_seq.vision.sequence_indexes)
@@ -966,6 +1002,16 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 vision_sequence_indexes = vision_sequence_indexes.sort().values  # [N_gen_tokens]
 
         vision_token_shapes = packed_seq.vision.token_shapes if packed_seq.vision else None
+        teacher_forcing_layout = packed_seq.teacher_forcing.layout if packed_seq.teacher_forcing is not None else None
+        if teacher_forcing_layout is not None:
+            if use_video_temporal_causal:
+                raise ValueError("teacher-forcing block causality cannot be combined with video_temporal_causal")
+            if self.config.teacher_forcing_max_mask_elements is None:
+                raise ValueError(
+                    "teacher_forcing_max_mask_elements must be configured when teacher-forcing data is present"
+                )
+            if self.parallel_dims is not None and self.parallel_dims.cp_enabled:
+                raise ValueError("teacher-forcing Dense attention does not support context parallelism")
 
         # The packer is the single source of truth for the supertoken layout.
         # ``num_action_tokens_per_supertoken`` is stamped onto ``packed_seq`` by
@@ -1013,6 +1059,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             num_action_tokens_per_supertoken=num_action_tokens_per_supertoken,
             null_action_supertokens=packed_seq.null_action_supertokens,
             pad_for_cuda_graphs=self.pad_for_cuda_graphs,
+            teacher_forcing_layout=teacher_forcing_layout,
+            teacher_forcing_max_mask_elements=self.config.teacher_forcing_max_mask_elements,
         )
 
         # ── Multi-control transfer: annotate SplitInfo with per-item ranges ──────
