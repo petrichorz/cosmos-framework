@@ -16,6 +16,7 @@ from cosmos_framework.data.generator.sequence_packing.mrope import (
     get_3d_mrope_ids_text_tokens,
     get_3d_mrope_ids_vae_tokens,
 )
+from cosmos_framework.data.generator.sequence_packing.teacher_forcing import TeacherForcingData
 
 if TYPE_CHECKING:
     from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
@@ -887,6 +888,7 @@ class PackedSequence:
         vision: Finalized vision modality data, or ``None`` if no vision is present.
         action: Finalized action modality data, or ``None`` if no action is present.
         sound: Finalized sound modality data, or ``None`` if no sound is present.
+        teacher_forcing: Optional clean-stream payloads and causal layout metadata.
         vision_item_split_lens: Per-sample per-vision-item token counts for multi-control
             transfer.
         control_weights: Per-sample per-control weights for multi-control weighted V-scaling.
@@ -926,6 +928,7 @@ class PackedSequence:
     vision: ModalityData | None = None
     action: ModalityData | None = None
     sound: ModalityData | None = None
+    teacher_forcing: TeacherForcingData | None = None
 
     # Multi-control transfer: per-sample list of per-vision-item token counts.
     # For a multi-control transfer sample with N controls + 1 noisy target,
@@ -953,6 +956,9 @@ class PackedSequence:
             assert modality is None or isinstance(modality, ModalityData), (
                 "PackedSequence modality fields must be finalized ModalityData"
             )
+        assert self.teacher_forcing is None or isinstance(self.teacher_forcing, TeacherForcingData), (
+            "PackedSequence.teacher_forcing must be finalized TeacherForcingData"
+        )
 
     def to_cuda(self) -> None:
         """Move all tensor fields to CUDA in-place."""
@@ -971,6 +977,8 @@ class PackedSequence:
             self.action.to_cuda()
         if self.sound is not None:
             self.sound.to_cuda()
+        if self.teacher_forcing is not None:
+            self.teacher_forcing.to_cuda()
 
 
 @dataclass
