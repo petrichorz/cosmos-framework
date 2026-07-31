@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # Maps ``job.task`` to the base Hydra config that ``make_config()`` lives in.
 TASK_TO_BASE_CONFIG: dict[str, str] = {
     "vfm": "cosmos_framework/configs/base/config.py",
@@ -72,6 +71,12 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         # No VLM analog — skip these leaves
         ("model", "max_num_tokens_after_packing"): None,
         ("model", "joint_attn_implementation"): None,
+        ("model", "causal_training_strategy"): None,
+        ("model", "teacher_forcing_block_size_min"): None,
+        ("model", "teacher_forcing_block_size_max"): None,
+        ("model", "teacher_forcing_history_blocks_min"): None,
+        ("model", "teacher_forcing_history_blocks_max"): None,
+        ("model", "teacher_forcing_max_mask_elements"): None,
         ("model", "lora_enabled"): None,
         ("model", "lora_rank"): None,
         ("model", "lora_alpha"): None,
@@ -208,5 +213,3 @@ def _hydra_format(v: Any, in_list: bool = False) -> str:
             return f"'{v}'"
         return v
     return str(v)
-
-
