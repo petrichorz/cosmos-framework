@@ -11,20 +11,26 @@ from cosmos_framework.data.generator.sequence_packing.sequence import (
     build_sequence_plans_from_data_batch,
 )
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    TeacherForcingData,
     TeacherForcingLayout,
     build_dense_teacher_forcing_gen_mask,
     build_teacher_forcing_layout,
+    expand_packed_sequence_for_teacher_forcing,
     sample_teacher_forcing_parameters,
+    select_teacher_forcing_noisy_outputs,
 )
 
 __all__ = [
     "ModalityData",
     "PackedSequence",
     "SequencePlan",
+    "TeacherForcingData",
     "TeacherForcingLayout",
     "build_dense_teacher_forcing_gen_mask",
     "build_sequence_plans_from_data_batch",
     "build_teacher_forcing_layout",
+    "expand_packed_sequence_for_teacher_forcing",
     "pack_input_sequence",
     "sample_teacher_forcing_parameters",
+    "select_teacher_forcing_noisy_outputs",
 ]
