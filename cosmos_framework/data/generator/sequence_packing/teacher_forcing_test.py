@@ -308,3 +308,12 @@ def test_dense_mask_rejects_und_queries_in_gen_query_indexes():
 
     with pytest.raises(ValueError, match="GEN queries"):
         build_dense_teacher_forcing_gen_mask(corrupted, max_mask_elements=3)
+
+
+def test_teacher_forcing_api_is_exported():
+    from cosmos_framework.data.generator import sequence_packing
+
+    assert sequence_packing.TeacherForcingLayout is TeacherForcingLayout
+    assert sequence_packing.build_teacher_forcing_layout is build_teacher_forcing_layout
+    assert sequence_packing.build_dense_teacher_forcing_gen_mask is build_dense_teacher_forcing_gen_mask
+    assert sequence_packing.sample_teacher_forcing_parameters is sample_teacher_forcing_parameters
