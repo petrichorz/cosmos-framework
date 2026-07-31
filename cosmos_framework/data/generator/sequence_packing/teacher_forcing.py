@@ -162,3 +162,56 @@ def build_teacher_forcing_layout(
         clean_token_indexes=torch.tensor(clean_token_indexes, dtype=torch.long),
         noisy_output_indexes=torch.tensor(noisy_output_indexes, dtype=torch.long),
     )
+
+
+def build_dense_teacher_forcing_gen_mask(
+    layout: TeacherForcingLayout,
+    *,
+    max_mask_elements: int,
+) -> torch.BoolTensor:
+    """Build the reference GEN-query mask over all dual-stream KV tokens."""
+
+    if max_mask_elements < 1:
+        raise ValueError(f"max_mask_elements must be >= 1, got {max_mask_elements}")
+
+    num_queries = layout.gen_query_indexes.numel()
+    num_keys = layout.source_sequence_indexes.numel()
+    num_elements = num_queries * num_keys
+    if num_elements > max_mask_elements:
+        raise ValueError(
+            f"Dense teacher-forcing mask needs {num_elements} elements, exceeding "
+            f"max_mask_elements={max_mask_elements}"
+        )
+
+    query_indexes = layout.gen_query_indexes[:, None]
+    query_sample_ids = layout.sample_ids[query_indexes]
+    query_stream_ids = layout.stream_ids[query_indexes]
+    query_block_ids = layout.block_ids[query_indexes]
+
+    is_gen_query = (query_stream_ids == int(TeacherForcingStream.CLEAN)) | (
+        query_stream_ids == int(TeacherForcingStream.NOISY)
+    )
+    if not bool(is_gen_query.all()):
+        raise ValueError("gen_query_indexes must contain only CLEAN or NOISY GEN queries")
+
+    key_sample_ids = layout.sample_ids[None, :]
+    key_stream_ids = layout.stream_ids[None, :]
+    key_block_ids = layout.block_ids[None, :]
+
+    same_sample = query_sample_ids == key_sample_ids
+    key_is_und = key_stream_ids == int(TeacherForcingStream.UND)
+    key_is_clean = key_stream_ids == int(TeacherForcingStream.CLEAN)
+    key_is_noisy = key_stream_ids == int(TeacherForcingStream.NOISY)
+
+    inside_history = key_block_ids >= query_block_ids - layout.history_blocks
+    clean_query_visible = key_is_clean & inside_history & (key_block_ids <= query_block_ids)
+    noisy_query_visible = (key_is_clean & inside_history & (key_block_ids < query_block_ids)) | (
+        key_is_noisy & (key_block_ids == query_block_ids)
+    )
+
+    allowed_by_stream = torch.where(
+        query_stream_ids == int(TeacherForcingStream.CLEAN),
+        clean_query_visible,
+        noisy_query_visible,
+    )
+    return same_sample & (key_is_und | allowed_by_stream)
