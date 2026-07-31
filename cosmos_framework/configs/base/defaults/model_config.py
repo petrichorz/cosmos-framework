@@ -5,12 +5,12 @@ from typing import Any
 
 import attrs
 
-from cosmos_framework.utils.lazy_config import LazyDict
 from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
 from cosmos_framework.configs.base.defaults.ema import EMAConfig
 from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
 from cosmos_framework.configs.base.defaults.reasoner import VLMConfig
+from cosmos_framework.utils.lazy_config import LazyDict
 
 
 @attrs.define(slots=False)
@@ -237,6 +237,16 @@ class OmniMoTModelConfig:
         default="none",
         validator=attrs.validators.in_({"none", "teacher_forcing", "diffusion_forcing", "teacher_forcing_dcm"}),
     )
+    # Scheme-B teacher-forcing block geometry. One base chunk is one VAE latent
+    # temporal frame and all of its spatial tokens. Ranges are inclusive and one
+    # S/K pair is sampled for the entire forward.
+    teacher_forcing_block_size_min: int = 1
+    teacher_forcing_block_size_max: int = 4
+    teacher_forcing_history_blocks_min: int = 1
+    teacher_forcing_history_blocks_max: int = 32
+    # Required by OmniMoTCausalModel. Kept explicit because Dense attention is
+    # a small-scale correctness backend, not a safe default for real resolutions.
+    teacher_forcing_max_mask_elements: int | None = None
 
     # Load balancing loss config.
     lbl: LBLConfig = LBLConfig()
