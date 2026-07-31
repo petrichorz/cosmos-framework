@@ -59,9 +59,7 @@ def sample_teacher_forcing_parameters(
     _validate_inclusive_range("block_size", block_size_min, block_size_max)
     _validate_inclusive_range("history_blocks", history_blocks_min, history_blocks_max)
 
-    block_size = int(
-        torch.randint(block_size_min, block_size_max + 1, (1,), generator=generator, device="cpu").item()
-    )
+    block_size = int(torch.randint(block_size_min, block_size_max + 1, (1,), generator=generator, device="cpu").item())
     history_blocks = int(
         torch.randint(history_blocks_min, history_blocks_max + 1, (1,), generator=generator, device="cpu").item()
     )
@@ -107,9 +105,7 @@ def build_teacher_forcing_layout(
         if und_count < 1:
             raise ValueError(f"und_token_counts[{sample_id}] must be >= 1, got {und_count}")
         if len(vision_shape) != 3:
-            raise ValueError(
-                f"vision_token_shapes[{sample_id}] must contain exactly (T, H, W), got {vision_shape}"
-            )
+            raise ValueError(f"vision_token_shapes[{sample_id}] must contain exactly (T, H, W), got {vision_shape}")
         num_frames, height, width = vision_shape
         if num_frames < 1 or height < 1 or width < 1:
             raise ValueError(f"vision_token_shapes[{sample_id}] must be positive, got {vision_shape}")
@@ -179,8 +175,7 @@ def build_dense_teacher_forcing_gen_mask(
     num_elements = num_queries * num_keys
     if num_elements > max_mask_elements:
         raise ValueError(
-            f"Dense teacher-forcing mask needs {num_elements} elements, exceeding "
-            f"max_mask_elements={max_mask_elements}"
+            f"Dense teacher-forcing mask needs {num_elements} elements, exceeding max_mask_elements={max_mask_elements}"
         )
 
     query_indexes = layout.gen_query_indexes[:, None]
