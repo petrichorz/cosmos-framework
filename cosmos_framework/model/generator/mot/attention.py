@@ -3,12 +3,17 @@
 
 import torch
 
+from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    TeacherForcingLayout,
+    build_dense_teacher_forcing_gen_mask,
+)
 from cosmos_framework.model.attention import (
     attention,
     merge_attentions,
     multi_dimensional_attention_varlen,
 )
 from cosmos_framework.model.attention.masks import CausalType
+from cosmos_framework.model.generator.mot.teacher_forcing_attention import teacher_forcing_dense_attention
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
 
@@ -63,6 +68,31 @@ class SplitInfo:
         self.noisy_token_range: tuple[int, int] | None = None
         # Per-control scalar weights; parallel to control_stream_token_ranges.
         self.control_weights: list[float] | None = None
+
+
+class TeacherForcingAttentionInfo(SplitInfo):
+    """Split metadata plus the authoritative unified GEN dense mask."""
+
+    def __init__(
+        self,
+        *,
+        layout: TeacherForcingLayout,
+        dense_gen_mask: torch.BoolTensor,
+        split_lens: list[int],
+        attn_modes: list[str],
+        sample_lens: list[int],
+        actual_len: int,
+        is_three_way: bool,
+    ) -> None:
+        super().__init__(
+            split_lens=split_lens,
+            attn_modes=attn_modes,
+            sample_lens=sample_lens,
+            actual_len=actual_len,
+            is_three_way=is_three_way,
+        )
+        self.layout = layout
+        self.dense_gen_mask = dense_gen_mask
 
 
 AttentionMaskType = SplitInfo
@@ -211,6 +241,46 @@ def two_way_attention(
 
     out_all = from_mode_splits(causal_out, full_out, packed_query_states)
     return out_all
+
+
+def teacher_forcing_attention(
+    packed_query_states: SequencePack,
+    packed_key_states: SequencePack,
+    packed_value_states: SequencePack,
+    attention_meta: TeacherForcingAttentionInfo,
+    packed_key_states_normalized: SequencePack | None = None,
+) -> SequencePack:
+    """Run UND causal attention and one unified masked GEN attention."""
+
+    causal_q, causal_q_offsets = get_causal_seq(packed_query_states)
+    causal_k, causal_k_offsets = get_causal_seq(packed_key_states)
+    causal_v, _ = get_causal_seq(packed_value_states)
+    use_dont_care_mask = causal_q_offsets is causal_k_offsets
+    causal_res = attention(
+        causal_q.unsqueeze(0),
+        causal_k.unsqueeze(0),
+        causal_v.unsqueeze(0),
+        cumulative_seqlen_Q=causal_q_offsets,
+        cumulative_seqlen_KV=causal_k_offsets,
+        max_seqlen_Q=packed_query_states["max_causal_len"],
+        max_seqlen_KV=packed_query_states["max_causal_len"],
+        is_causal=True,
+        causal_type=CausalType.DontCare if use_dont_care_mask else CausalType.TopLeft,
+    )
+    causal_out = causal_res.squeeze(0).flatten(-2, -1)  # type: ignore[union-attr]
+
+    full_q, _ = get_full_only_seq(packed_query_states)
+    num_gen_queries = attention_meta.dense_gen_mask.shape[0]
+    key_pack_for_gen = packed_key_states_normalized if packed_key_states_normalized is not None else packed_key_states
+    full_res = teacher_forcing_dense_attention(
+        full_q[:num_gen_queries],
+        get_all_seq(key_pack_for_gen),
+        get_all_seq(packed_value_states),
+        attention_meta.dense_gen_mask,
+    )
+    full_out = full_q.new_zeros((full_q.shape[0], full_res.shape[1] * full_res.shape[2]))
+    full_out[:num_gen_queries] = full_res.flatten(-2, -1)
+    return from_mode_splits(causal_out, full_out, packed_query_states)
 
 
 def three_way_attention(
@@ -529,7 +599,15 @@ def dispatch_attention(
     assert memory_value is None, "Base dispatch_attention does not handle MemoryValue"
     if not _is_split_info_compatible(attention_mask):
         raise TypeError(f"Unsupported attention metadata: {type(attention_mask)}")
-    if attention_mask.control_stream_token_ranges is not None:
+    if isinstance(attention_mask, TeacherForcingAttentionInfo):
+        output = teacher_forcing_attention(
+            packed_query_states,
+            packed_key_states,
+            packed_value_states,
+            attention_meta=attention_mask,
+            packed_key_states_normalized=packed_key_states_normalized,
+        )
+    elif attention_mask.control_stream_token_ranges is not None:
         output = multi_control_two_way_attention(
             packed_query_states,
             packed_key_states,
@@ -578,6 +656,8 @@ def build_packed_sequence(
     num_action_tokens_per_supertoken: int = 0,
     null_action_supertokens: bool = False,
     pad_for_cuda_graphs: bool = False,
+    teacher_forcing_layout: TeacherForcingLayout | None = None,
+    teacher_forcing_max_mask_elements: int | None = None,
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
     Build the model input pack and attention meta for joint attention.
@@ -585,7 +665,36 @@ def build_packed_sequence(
     """
     device = packed_sequence.device
     natten_metadata_list = None
-    if joint_attn_implementation == "two_way":
+    if joint_attn_implementation not in {"two_way", "three_way"}:
+        raise ValueError(
+            f"Invalid joint_attn_implementation: {joint_attn_implementation}. Must be 'two_way' or 'three_way'."
+        )
+    if teacher_forcing_layout is not None:
+        if teacher_forcing_max_mask_elements is None:
+            raise ValueError("teacher_forcing_max_mask_elements is required with teacher_forcing_layout")
+        if cp_world_size != 1:
+            raise ValueError("teacher-forcing Dense attention does not support context parallelism")
+        if (
+            tuple(sample_lens) != teacher_forcing_layout.sample_lens
+            or tuple(split_lens) != teacher_forcing_layout.split_lens
+            or tuple(attn_modes) != teacher_forcing_layout.attn_modes
+        ):
+            raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
+        dense_gen_mask = build_dense_teacher_forcing_gen_mask(
+            teacher_forcing_layout,
+            max_mask_elements=teacher_forcing_max_mask_elements,
+        ).to(device=device)
+        attention_meta = TeacherForcingAttentionInfo(
+            layout=teacher_forcing_layout,
+            dense_gen_mask=dense_gen_mask,
+            split_lens=split_lens,
+            attn_modes=attn_modes,
+            sample_lens=sample_lens,
+            actual_len=int(packed_sequence.shape[0]),
+            is_three_way=joint_attn_implementation == "three_way",
+        )
+        make_pack = sequence_pack_from_packed_sequence
+    elif joint_attn_implementation == "two_way":
         attention_meta = SplitInfo(
             split_lens=split_lens,
             attn_modes=attn_modes,
@@ -630,10 +739,6 @@ def build_packed_sequence(
                     requires_grad=packed_sequence.requires_grad,
                     natten_parameter_list=natten_parameter_list,
                 )
-    else:
-        raise ValueError(
-            f"Invalid joint_attn_implementation: {joint_attn_implementation}. Must be 'two_way' or 'three_way'."
-        )
 
     input_pack = make_pack(
         packed_sequence=packed_sequence,
