@@ -29,8 +29,9 @@ class OmniMoTCausalModel(OmniMoTModel):
 
         if gen_data_clean.x0_tokens_vision is None:
             raise ValueError("teacher-forcing causal training requires clean vision tokens")
+        clean_vision_tokens = [token.to(dtype=self.precision) for token in gen_data_clean.x0_tokens_vision]
         return expand_teacher_forcing_training_sequence(
             packed_sequence,
-            clean_vision_tokens=gen_data_clean.x0_tokens_vision,
+            clean_vision_tokens=clean_vision_tokens,
             config=self.config,
         )
