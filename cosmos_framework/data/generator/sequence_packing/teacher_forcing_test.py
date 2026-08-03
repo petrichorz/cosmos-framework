@@ -501,6 +501,21 @@ def test_expand_packed_sequence_rejects_clean_payload_shape_mismatch():
         )
 
 
+def test_expand_packed_sequence_rejects_clean_payload_dtype_mismatch():
+    packed = _make_packed_video_sequence()
+    assert packed.vision is not None
+    packed.vision.tokens = [token.to(torch.bfloat16) for token in packed.vision.tokens]
+    clean_tokens = [torch.ones_like(token, dtype=torch.float32) for token in packed.vision.tokens]
+
+    with pytest.raises(ValueError, match="dtype"):
+        expand_packed_sequence_for_teacher_forcing(
+            packed,
+            clean_vision_tokens=clean_tokens,
+            block_size=1,
+            history_blocks=1,
+        )
+
+
 def test_select_teacher_forcing_noisy_outputs_preserves_order_and_gradient():
     packed = _make_packed_video_sequence()
     clean_tokens = [torch.zeros_like(token) for token in packed.vision.tokens]

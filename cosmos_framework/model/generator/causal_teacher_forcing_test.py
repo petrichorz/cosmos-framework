@@ -12,6 +12,8 @@ from cosmos_framework.model.generator.causal_teacher_forcing import (
     expand_teacher_forcing_training_sequence,
     validate_teacher_forcing_config,
 )
+from cosmos_framework.model.generator.omni_mot_causal_model import OmniMoTCausalModel
+from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 
 
 def _config(**overrides):
@@ -105,3 +107,23 @@ def test_expand_teacher_forcing_training_sequence_rejects_images():
             clean_vision_tokens=[torch.zeros(1, 1, 3, 1, 1)],
             config=_config(),
         )
+
+
+def test_post_noise_packing_hook_casts_clean_model_input_without_mutating_fp32_x0():
+    packed = _packed_noisy_video()
+    assert packed.vision is not None
+    packed.vision.tokens = [token.to(torch.bfloat16) for token in packed.vision.tokens]
+    clean_x0 = torch.tensor([[[[[1.0]], [[2.0]], [[3.0]]]]], dtype=torch.float32)
+    gen_data_clean = GenerationDataClean(
+        batch_size=1,
+        is_image_batch=False,
+        x0_tokens_vision=[clean_x0],
+    )
+    model = SimpleNamespace(config=_config(), precision=torch.bfloat16)
+
+    expanded = OmniMoTCausalModel.post_noise_packing_hook(model, packed, gen_data_clean)
+
+    assert expanded.teacher_forcing is not None
+    assert expanded.teacher_forcing.clean_vision_tokens[0].dtype == torch.bfloat16
+    assert gen_data_clean.x0_tokens_vision[0] is clean_x0
+    assert gen_data_clean.x0_tokens_vision[0].dtype == torch.float32
