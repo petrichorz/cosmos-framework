@@ -197,19 +197,18 @@ def build_teacher_forcing_layout(
 def build_dense_teacher_forcing_gen_mask(
     layout: TeacherForcingLayout,
     *,
-    max_mask_elements: int,
+    max_sequence_length: int,
 ) -> torch.BoolTensor:
     """Build the reference GEN-query mask over all dual-stream KV tokens."""
 
-    if max_mask_elements < 1:
-        raise ValueError(f"max_mask_elements must be >= 1, got {max_mask_elements}")
+    if max_sequence_length < 1:
+        raise ValueError(f"max_sequence_length must be >= 1, got {max_sequence_length}")
 
     num_queries = layout.gen_query_indexes.numel()
     num_keys = layout.source_sequence_indexes.numel()
-    num_elements = num_queries * num_keys
-    if num_elements > max_mask_elements:
+    if num_keys > max_sequence_length:
         raise ValueError(
-            f"Dense teacher-forcing mask needs {num_elements} elements, exceeding max_mask_elements={max_mask_elements}"
+            f"Teacher-forcing sequence has {num_keys} tokens, exceeding max_sequence_length={max_sequence_length}"
         )
 
     query_indexes = layout.gen_query_indexes[:, None]

@@ -28,7 +28,7 @@ class TeacherForcingConfig(Protocol):
     teacher_forcing_block_size_max: int
     teacher_forcing_history_blocks_min: int
     teacher_forcing_history_blocks_max: int
-    teacher_forcing_max_mask_elements: int | None
+    teacher_forcing_max_sequence_length: int | None
     parallelism: _ParallelismConfig
 
 
@@ -66,8 +66,8 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
             "teacher-forcing history_blocks range must satisfy 1 <= min <= max, "
             f"got {config.teacher_forcing_history_blocks_min}..{config.teacher_forcing_history_blocks_max}"
         )
-    if config.teacher_forcing_max_mask_elements is None or config.teacher_forcing_max_mask_elements < 1:
-        raise ValueError("teacher_forcing_max_mask_elements must be explicitly configured to a positive integer")
+    if config.teacher_forcing_max_sequence_length is None or config.teacher_forcing_max_sequence_length < 1:
+        raise ValueError("teacher_forcing_max_sequence_length must be explicitly configured to a positive integer")
 
 
 def expand_teacher_forcing_training_sequence(

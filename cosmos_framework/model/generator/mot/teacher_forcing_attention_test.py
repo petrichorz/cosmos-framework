@@ -142,7 +142,7 @@ def _make_teacher_forcing_packs():
         head_dim=3,
         num_layers=1,
         teacher_forcing_layout=layout,
-        teacher_forcing_max_mask_elements=layout.gen_query_indexes.numel() * layout.source_sequence_indexes.numel(),
+        teacher_forcing_max_sequence_length=layout.source_sequence_indexes.numel(),
     )
     query_pack, attention_meta, natten_metadata = build_packed_sequence(packed_sequence=query, **common_kwargs)
     key_pack, _, _ = build_packed_sequence(packed_sequence=key, **common_kwargs)
@@ -159,7 +159,7 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
         attention_meta.dense_gen_mask,
         build_dense_teacher_forcing_gen_mask(
             layout,
-            max_mask_elements=layout.gen_query_indexes.numel() * layout.source_sequence_indexes.numel(),
+            max_sequence_length=layout.source_sequence_indexes.numel(),
         ),
     )
     assert natten_metadata is None
@@ -209,7 +209,7 @@ def test_dispatch_teacher_forcing_attention_uses_normalized_und_keys_for_gen():
     torch.testing.assert_close(get_gen_seq(output_pack)[: expected_gen.shape[0]], expected_gen)
 
 
-def test_build_packed_sequence_applies_dense_mask_allocation_guard():
+def test_build_packed_sequence_applies_teacher_forcing_sequence_length_guard():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(2, 1, 1)],
@@ -218,7 +218,7 @@ def test_build_packed_sequence_applies_dense_mask_allocation_guard():
     )
     packed_sequence = torch.randn(sum(layout.sample_lens), 2, 4)
 
-    with pytest.raises(ValueError, match="max_mask_elements"):
+    with pytest.raises(ValueError, match="max_sequence_length"):
         build_packed_sequence(
             "three_way",
             packed_sequence=packed_sequence,
@@ -231,7 +231,7 @@ def test_build_packed_sequence_applies_dense_mask_allocation_guard():
             head_dim=4,
             num_layers=1,
             teacher_forcing_layout=layout,
-            teacher_forcing_max_mask_elements=1,
+            teacher_forcing_max_sequence_length=1,
         )
 
 
@@ -257,5 +257,5 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
             head_dim=4,
             num_layers=1,
             teacher_forcing_layout=layout,
-            teacher_forcing_max_mask_elements=20,
+            teacher_forcing_max_sequence_length=20,
         )

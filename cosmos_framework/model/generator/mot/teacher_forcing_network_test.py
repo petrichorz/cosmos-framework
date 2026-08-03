@@ -103,10 +103,10 @@ def test_encode_vision_fills_clean_and_noisy_streams_with_distinct_timesteps():
 
 
 def test_network_config_keeps_dense_mask_limit_explicit():
-    config = Cosmos3VFMNetworkConfig(teacher_forcing_max_mask_elements=123)
+    config = Cosmos3VFMNetworkConfig(teacher_forcing_max_sequence_length=123)
 
-    assert config.teacher_forcing_max_mask_elements == 123
-    assert Cosmos3VFMNetworkConfig().teacher_forcing_max_mask_elements is None
+    assert config.teacher_forcing_max_sequence_length == 123
+    assert Cosmos3VFMNetworkConfig().teacher_forcing_max_sequence_length is None
 
-    with pytest.raises(ValueError, match="teacher_forcing_max_mask_elements"):
-        Cosmos3VFMNetworkConfig(teacher_forcing_max_mask_elements=0)
+    with pytest.raises(ValueError, match="teacher_forcing_max_sequence_length"):
+        Cosmos3VFMNetworkConfig(teacher_forcing_max_sequence_length=0)

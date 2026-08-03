@@ -22,7 +22,7 @@ teacher_forcing_block_size_min           = 1
 teacher_forcing_block_size_max           = 4
 teacher_forcing_history_blocks_min       = 1
 teacher_forcing_history_blocks_max       = 32
-teacher_forcing_max_mask_elements        = 4194304
+teacher_forcing_max_sequence_length       = 4096
 
 [model.ema]
 enabled         = false

@@ -353,13 +353,12 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
     )
-    teacher_forcing_max_mask_elements: Optional[int] = Field(
+    teacher_forcing_max_sequence_length: Optional[int] = Field(
         default=None,
         ge=1,
         description=(
-            "Required Dense teacher-forcing safety limit for query-by-key boolean "
-            "mask elements. No default is chosen because the safe value depends on "
-            "the training resolution, clip length, and device memory."
+            "Required safety limit for the expanded one-dimensional "
+            "[UND|clean|noisy] teacher-forcing sequence."
         ),
     )
     joint_attn_implementation: str = Field(

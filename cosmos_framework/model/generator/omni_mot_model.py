@@ -221,7 +221,7 @@ class OmniMoTModel(ImaginaireModel):
                 temporal_compression_factor_vision=self.tokenizer_vision_gen.temporal_compression_factor,
                 natten_parameter_list=self.config.natten_parameter_list,
                 video_temporal_causal=self.config.video_temporal_causal,
-                teacher_forcing_max_mask_elements=self.config.teacher_forcing_max_mask_elements,
+                teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
                 # Sound generation parameters
                 sound_dim=self.config.sound_dim,
                 sound_latent_fps=self.config.sound_latent_fps,

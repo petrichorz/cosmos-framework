@@ -82,7 +82,7 @@ def _make_network() -> Cosmos3VFMNetwork:
         max_latent_w=1,
         max_latent_t=3,
         joint_attn_implementation="two_way",
-        teacher_forcing_max_mask_elements=1_000,
+        teacher_forcing_max_sequence_length=1_000,
     )
     return Cosmos3VFMNetwork(_TinyLanguageModel(), config)
 
