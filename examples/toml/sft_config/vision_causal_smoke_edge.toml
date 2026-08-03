@@ -91,6 +91,5 @@ load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter            = 100
 
 [dataloader_train]
-max_sequence_length  = 4096
 max_samples_per_batch = 1
 max_caption_tokens    = 512

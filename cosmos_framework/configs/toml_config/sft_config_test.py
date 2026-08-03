@@ -233,6 +233,7 @@ class TestEndToEndLoader:
             recipe_path,
             extra_overrides=[
                 "model=mot_causal_ddp",
+                "dataloader_train.max_sequence_length=null",
                 "~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}",
                 "+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0,1:0.0,2:0.0}",
                 "dataloader_train.dataloader.datasets.video.dataset.num_video_frames=17",
@@ -258,6 +259,7 @@ class TestEndToEndLoader:
         assert config.optimizer.optimizer_type == "AdamW"
         assert config.optimizer.fused is False
         assert config.dataloader_train.max_samples_per_batch == 1
+        assert config.dataloader_train.max_sequence_length is None
         dataset = config.dataloader_train.dataloader.datasets.video.dataset
         assert dataset.conditioning_config == {0: 1.0, 1: 0.0, 2: 0.0}
         assert dataset.num_video_frames == 17
