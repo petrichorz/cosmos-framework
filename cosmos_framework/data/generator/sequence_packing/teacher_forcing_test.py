@@ -272,6 +272,42 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
     assert mask[18].nonzero(as_tuple=True)[0].tolist() == [0, 5, 6, 7, 8, 19, 20]
 
 
+@pytest.mark.parametrize("block_size", [1, 2, 3, 4])
+@pytest.mark.parametrize("history_blocks", [1, 32])
+def test_dense_mask_matches_lingbot_full_video_boundaries(block_size: int, history_blocks: int):
+    num_frames = 7
+    layout = build_teacher_forcing_layout(
+        und_token_counts=[1],
+        vision_token_shapes=[(num_frames, 1, 1)],
+        block_size=block_size,
+        history_blocks=history_blocks,
+    )
+    mask = build_dense_teacher_forcing_gen_mask(
+        layout,
+        max_mask_elements=layout.gen_query_indexes.numel() * layout.source_sequence_indexes.numel(),
+    )
+
+    clean_columns = layout.clean_token_indexes
+    noisy_columns = layout.noisy_output_indexes
+    for frame_id in range(num_frames):
+        block_id = frame_id // block_size
+        oldest_visible_block = max(0, block_id - history_blocks)
+        expected_clean_for_clean = [
+            oldest_visible_block <= candidate // block_size <= block_id for candidate in range(num_frames)
+        ]
+        expected_clean_for_noisy = [
+            oldest_visible_block <= candidate // block_size < block_id for candidate in range(num_frames)
+        ]
+        expected_noisy_for_noisy = [candidate // block_size == block_id for candidate in range(num_frames)]
+
+        clean_row = frame_id
+        noisy_row = num_frames + frame_id
+        assert mask[clean_row, clean_columns].tolist() == expected_clean_for_clean
+        assert not mask[clean_row, noisy_columns].any()
+        assert mask[noisy_row, clean_columns].tolist() == expected_clean_for_noisy
+        assert mask[noisy_row, noisy_columns].tolist() == expected_noisy_for_noisy
+
+
 def test_dense_mask_isolates_packed_samples():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
