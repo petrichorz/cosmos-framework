@@ -222,6 +222,46 @@ def _dummy_recipe_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestEndToEndLoader:
+    def test_load_edge_causal_smoke_recipe(
+        self,
+        _dummy_recipe_env: None,
+    ) -> None:
+        from cosmos_framework.model.generator.omni_mot_causal_model import OmniMoTCausalModel
+
+        recipe_path = Path(__file__).parents[3] / "examples/toml/sft_config/vision_causal_smoke_edge.toml"
+        config = _load_or_skip(
+            recipe_path,
+            extra_overrides=[
+                "model=mot_causal_ddp",
+                "~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}",
+                "+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0,1:0.0,2:0.0}",
+                "dataloader_train.dataloader.datasets.video.dataset.num_video_frames=17",
+            ],
+        )
+
+        assert config.model._target_ is OmniMoTCausalModel
+        assert config.job.name == "vision_causal_smoke_edge"
+        assert config.trainer.distributed_parallelism == "ddp"
+        assert config.trainer.max_iter == 3
+        assert config.model.config.precision == "bfloat16"
+        assert config.model.config.causal_training_strategy == "teacher_forcing"
+        assert config.model.config.teacher_forcing_block_size_min == 1
+        assert config.model.config.teacher_forcing_block_size_max == 4
+        assert config.model.config.teacher_forcing_history_blocks_min == 1
+        assert config.model.config.teacher_forcing_history_blocks_max == 32
+        assert config.model.config.teacher_forcing_max_mask_elements == 4_194_304
+        assert config.model.config.parallelism.data_parallel_shard_degree == 1
+        assert config.model.config.parallelism.context_parallel_shard_degree == 1
+        assert config.model.config.compile.enabled is False
+        assert config.model.config.activation_checkpointing.mode == "none"
+        assert config.model.config.ema.enabled is False
+        assert config.optimizer.optimizer_type == "AdamW"
+        assert config.optimizer.fused is False
+        assert config.dataloader_train.max_samples_per_batch == 1
+        dataset = config.dataloader_train.dataloader.datasets.video.dataset
+        assert dataset.conditioning_config == {0: 1.0, 1: 0.0, 2: 0.0}
+        assert dataset.num_video_frames == 17
+
     def test_load_causal_model_group_with_teacher_forcing_toml(
         self,
         tmp_path: Path,

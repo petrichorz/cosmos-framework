@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# Minimal single-NPU BF16 smoke recipe for Scheme-B causal teacher forcing.
+# Launch with examples/launch_sft_vision_causal_smoke_edge.sh so the
+# mot_causal_ddp model group and T2V-only dataset overrides are applied.
+
+[job]
+task       = "vfm"
+experiment = "vision_sft_edge"
+project    = "cosmos3"
+group      = "causal_smoke"
+name       = "vision_causal_smoke_edge"
+wandb_mode = "disabled"
+
+[model]
+max_num_tokens_after_packing             = 4096
+joint_attn_implementation                = "two_way"
+precision                                = "bfloat16"
+causal_training_strategy                 = "teacher_forcing"
+teacher_forcing_block_size_min           = 1
+teacher_forcing_block_size_max           = 4
+teacher_forcing_history_blocks_min       = 1
+teacher_forcing_history_blocks_max       = 32
+teacher_forcing_max_mask_elements        = 4194304
+
+[model.ema]
+enabled         = false
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 1
+data_parallel_replicate_degree = 1
+context_parallel_shard_degree  = 1
+cfg_parallel_shard_degree      = 1
+
+[model.compile]
+enabled         = false
+compile_dynamic = false
+
+[model.activation_checkpointing]
+mode               = "none"
+save_ops_regex     = ["fmha"]
+preserve_rng_state = true
+determinism_check  = "default"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas          = [0.9, 0.95]
+eps            = 1.0e-6
+fused          = false
+optimizer_type = "AdamW"
+keys_to_select = [
+    "moe_gen",
+    "time_embedder",
+    "vae2llm",
+    "llm2vae",
+    "k_norm_und_for_gen",
+]
+lr           = 1.0e-4
+weight_decay = 0.0
+
+[scheduler]
+cycle_lengths      = [3]
+f_max              = [1.0]
+f_min              = [1.0]
+f_start            = [1.0]
+verbosity_interval = 0
+warm_up_steps      = [0]
+
+[trainer]
+distributed_parallelism = "ddp"
+grad_accum_iter         = 1
+logging_iter            = 1
+max_iter                = 3
+
+[trainer.callbacks.compile_tokenizer]
+compile_after_iterations = 3
+enabled                  = false
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 0.1
+force_finite = true
+
+[checkpoint]
+keys_to_skip_loading = ["net_ema."]
+load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter            = 100
+
+[dataloader_train]
+max_sequence_length  = 4096
+max_samples_per_batch = 1
+max_caption_tokens    = 512
