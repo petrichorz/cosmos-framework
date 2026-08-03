@@ -50,7 +50,7 @@ causal block:  0 0 0 | 1 1 1 | 2
 ```
 
 对应实现位置：
-`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_teacher_forcing_layout()`。
+[`teacher_forcing.py::build_teacher_forcing_layout()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L103)。
 
 最后一个 block 可以不完整，不要求视频长度能被 `S` 整除。block 始终从 latent
 frame 0 开始划分，不存在条件前缀边界或首帧特殊重切。
@@ -67,7 +67,7 @@ N2 -> 历史 clean blocks + N2
 ```
 
 对应实现位置：
-`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`。
+[`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)。
 
 第一个 noisy block `N0` 没有更早的 clean block，因此只能读取文字和当前 noisy
 block。Lingbot-VA 推理阶段固定第一个 latent frame 的行为，不属于本次
@@ -90,7 +90,7 @@ lo(i) = max(0, i - K)
 ```
 
 对应实现位置：
-`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`。
+[`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)。
 
 | Query | 可以读取的视觉 KV | 禁止读取 |
 | --- | --- | --- |
@@ -145,9 +145,9 @@ noisy block i -> clean block j 仅当 j < i
 
 对应代码位置：
 
-- `cosmos_framework/model/generator/omni_mot_causal_model.py::OmniMoTCausalModel.post_noise_packing_hook()`；
-- `cosmos_framework/model/generator/causal_teacher_forcing.py::validate_teacher_forcing_config()`；
-- `cosmos_framework/model/generator/causal_teacher_forcing.py::expand_teacher_forcing_training_sequence()`。
+- [`omni_mot_causal_model.py::OmniMoTCausalModel.post_noise_packing_hook()`](../cosmos_framework/model/generator/omni_mot_causal_model.py#L23)；
+- [`causal_teacher_forcing.py::validate_teacher_forcing_config()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L35)；
+- [`causal_teacher_forcing.py::expand_teacher_forcing_training_sequence()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L73)。
 
 ### 6.2 双流 packing
 
@@ -170,9 +170,9 @@ stream 当作更晚的一段视频。`PackedSequence.vision` 仍指向 noisy 目
 
 对应代码位置：
 
-- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::TeacherForcingLayout`；
-- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::TeacherForcingData`；
-- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::expand_packed_sequence_for_teacher_forcing()`。
+- [`teacher_forcing.py::TeacherForcingLayout`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L28)；
+- [`teacher_forcing.py::TeacherForcingData`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L61)；
+- [`teacher_forcing.py::expand_packed_sequence_for_teacher_forcing()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L349)。
 
 ### 6.3 时间步编码
 
@@ -181,7 +181,7 @@ stream 当作更晚的一段视频。`PackedSequence.vision` 仍指向 noisy 目
 - clean hidden states 不直接计算生成 loss，但允许梯度通过合法 attention 路径回传。
 
 对应代码位置：
-`cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._encode_vision()`
+[`cosmos3_vfm_network.py::Cosmos3VFMNetwork._encode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L574)
 中的 `packed_seq.teacher_forcing` 分支。
 
 ### 6.4 Dense attention
@@ -206,13 +206,13 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 对应代码位置：
 
 - mask 构造和一维上限：
-  `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`；
+  [`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)；
 - attention metadata 构造：
-  `cosmos_framework/model/generator/mot/attention.py::build_packed_sequence()`；
+  [`attention.py::build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L636)；
 - UND/GEN attention 分发：
-  `cosmos_framework/model/generator/mot/attention.py::teacher_forcing_attention()`；
+  [`attention.py::teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L246)；
 - 单次 SDPA：
-  `cosmos_framework/model/generator/mot/teacher_forcing_attention.py::teacher_forcing_dense_attention()`。
+  [`teacher_forcing_attention.py::teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L52)。
 
 ### 6.5 输出和 loss
 
@@ -222,11 +222,11 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 对应代码位置：
 
 - noisy hidden state 解码：
-  `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._decode_vision()`；
+  [`cosmos3_vfm_network.py::Cosmos3VFMNetwork._decode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L662)；
 - noisy 索引辅助函数：
-  `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::select_teacher_forcing_noisy_outputs()`；
+  [`teacher_forcing.py::select_teacher_forcing_noisy_outputs()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L449)；
 - 原 flow-matching loss：
-  `cosmos_framework/model/generator/omni_mot_model.py::OmniMoTModel._compute_flow_matching_loss()`。
+  [`omni_mot_model.py::OmniMoTModel._compute_flow_matching_loss()`](../cosmos_framework/model/generator/omni_mot_model.py#L1097)。
 
 ### 6.6 代码位置总索引
 
@@ -234,19 +234,19 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 
 | 功能 | 对应代码位置 |
 | --- | --- |
-| causal 模型入口 | `cosmos_framework/model/generator/omni_mot_causal_model.py::OmniMoTCausalModel` |
-| 参数合法性与 S/K 采样入口 | `cosmos_framework/model/generator/causal_teacher_forcing.py::validate_teacher_forcing_config()`、`expand_teacher_forcing_training_sequence()` |
-| S/K 随机采样 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::sample_teacher_forcing_parameters()` |
-| block/sample/stream 布局 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_teacher_forcing_layout()` |
-| clean/noisy 双流展开 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::expand_packed_sequence_for_teacher_forcing()` |
-| Dense mask 与一维长度保护 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()` |
-| clean timestep=0 | `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._encode_vision()` |
-| attention metadata | `cosmos_framework/model/generator/mot/attention.py::build_packed_sequence()` |
-| teacher-forcing attention 分发 | `cosmos_framework/model/generator/mot/attention.py::teacher_forcing_attention()` |
-| 单 softmax Dense SDPA | `cosmos_framework/model/generator/mot/teacher_forcing_attention.py::teacher_forcing_dense_attention()` |
-| noisy stream 输出与 loss | `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._decode_vision()`、`cosmos_framework/model/generator/omni_mot_model.py::OmniMoTModel._compute_flow_matching_loss()` |
-| Hydra causal 模型组 | `cosmos_framework/configs/base/defaults/model.py::MOT_CAUSAL_DDP_CONFIG`、`MOT_CAUSAL_FSDP_CONFIG` |
-| TOML causal 字段定义 | `cosmos_framework/configs/toml_config/sft_config.py::ModelConfig` |
+| causal 模型入口 | [`OmniMoTCausalModel`](../cosmos_framework/model/generator/omni_mot_causal_model.py#L16) |
+| 参数合法性与 S/K 采样入口 | [`validate_teacher_forcing_config()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L35)、[`expand_teacher_forcing_training_sequence()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L73) |
+| S/K 随机采样 | [`sample_teacher_forcing_parameters()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L83) |
+| block/sample/stream 布局 | [`build_teacher_forcing_layout()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L103) |
+| clean/noisy 双流展开 | [`expand_packed_sequence_for_teacher_forcing()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L349) |
+| Dense mask 与一维长度保护 | [`build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197) |
+| clean timestep=0 | [`Cosmos3VFMNetwork._encode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L574) |
+| attention metadata | [`build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L636) |
+| teacher-forcing attention 分发 | [`teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L246) |
+| 单 softmax Dense SDPA | [`teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L52) |
+| noisy stream 输出与 loss | [`Cosmos3VFMNetwork._decode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L662)、[`OmniMoTModel._compute_flow_matching_loss()`](../cosmos_framework/model/generator/omni_mot_model.py#L1097) |
+| Hydra causal 模型组 | [`MOT_CAUSAL_DDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L37)、[`MOT_CAUSAL_FSDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L50) |
+| TOML causal 字段定义 | [`ModelConfig`](../cosmos_framework/configs/toml_config/sft_config.py#L300) |
 
 ## 7. 为什么采用这种方案
 
@@ -375,11 +375,11 @@ smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
 
 | 内容 | 对应位置 |
 | --- | --- |
-| 正式 TOML | `../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml` |
+| 正式 TOML | [`vision_causal_edge.toml`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml) |
 | causal 参数 | 上述 TOML 的 `[model]` block |
 | FSDP/500 iterations | 上述 TOML 的 `[trainer]` block |
 | packing 45,056 | 上述 TOML 的 `[dataloader_train]` block |
-| 完整下载、转换和训练流程 | `../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh` |
+| 完整下载、转换和训练流程 | [`launch_sft_vision_causal_edge.sh`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh) |
 | causal 模型选择 | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp` |
 
 正式启动命令：
