@@ -288,6 +288,37 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 17 个 RGB frames 经 Wan VAE 后约得到 5 个 latent frames。随机 `S=1..4` 时既能产生
 多个 causal blocks，又能覆盖尾部 partial block，同时比正式长视频显著省显存。
 
+### 11.1 为什么 4,194,304 不能和原配置的 45,056 直接比较
+
+原 Edge 配置中的 `max_num_tokens_after_packing=45056` 和
+`dataloader_train.max_sequence_length=45056` 是**一维 packed sequence 的 token 数上限**。
+`teacher_forcing_max_mask_elements=4194304` 则是**二维 Dense Mask 的元素数上限**，单位是
+`query token 数 × key token 数`。前者不是后者的缩小版，两者不能比较数值大小。
+
+设原始样本包含 `U` 个 UND token 和 `V` 个 GEN 视觉 token。方案 B 展开为
+`[UND | clean GEN | noisy GEN]` 后：
+
+```text
+query 数 = 2V
+key 数   = U + 2V
+mask 元素数 = 2V × (U + 2V)
+```
+
+因此，如果把接近 45,056 个视觉 token 的正式 packed batch 直接送进当前 Dense 实现，
+极端情况下 mask 会接近 `90,112 × 90,112 ≈ 81.2 亿` 个 boolean 元素，单是 mask
+就约 7.6 GiB，尚未计算 attention 中间张量。也就是说，45,056 对一维 packing 并不小；
+恰恰是 Dense Mask 无法直接承接正式长度的原因。
+
+当前 smoke 使用 256×256、17 RGB frames：Wan VAE 约得到 5 个 latent frames，每帧
+patch 后约 8×8=64 个视觉 token，所以 `V≈320`。若文字侧按约 512 token 估算，实际
+mask 约为 `640 × (512+640)=737,280` 个元素。4,194,304 只是带有数倍余量的
+**防误用上限**，并不会预先分配一张 4,194,304 元素的 mask；真正分配量仍由样本长度
+决定。该上限不是正式训练推荐值，后续应以真实 NPU profiling 为准。
+
+另外，`PackingDataLoader` 要求 `max_sequence_length` 与 `max_samples_per_batch` 二选一。
+smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
+`dataloader_train.max_sequence_length=null`；不能同时把它设为 4096。
+
 ## 12. 验证步骤
 
 ### 12.1 准备路径
@@ -315,6 +346,7 @@ PYTHONPATH=. python -m cosmos_framework.scripts.train \
   --sft-toml=examples/toml/sft_config/vision_causal_smoke_edge.toml \
   -- \
   model=mot_causal_ddp \
+  dataloader_train.max_sequence_length=null \
   '~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}' \
   '+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0,1:0.0,2:0.0}' \
   dataloader_train.dataloader.datasets.video.dataset.num_video_frames=17
