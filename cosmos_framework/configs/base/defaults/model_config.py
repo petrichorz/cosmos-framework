@@ -244,9 +244,9 @@ class OmniMoTModelConfig:
     teacher_forcing_block_size_max: int = 4
     teacher_forcing_history_blocks_min: int = 1
     teacher_forcing_history_blocks_max: int = 32
-    # Required by OmniMoTCausalModel. Kept explicit because Dense attention is
-    # a small-scale correctness backend, not a safe default for real resolutions.
-    teacher_forcing_max_mask_elements: int | None = None
+    # Required by OmniMoTCausalModel. Limits the expanded [UND|clean|noisy]
+    # sequence before the Dense correctness backend allocates its 2D mask.
+    teacher_forcing_max_sequence_length: int | None = None
 
     # Load balancing loss config.
     lbl: LBLConfig = LBLConfig()

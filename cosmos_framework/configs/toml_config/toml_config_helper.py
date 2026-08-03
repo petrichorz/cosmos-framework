@@ -76,7 +76,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "teacher_forcing_block_size_max"): None,
         ("model", "teacher_forcing_history_blocks_min"): None,
         ("model", "teacher_forcing_history_blocks_max"): None,
-        ("model", "teacher_forcing_max_mask_elements"): None,
+        ("model", "teacher_forcing_max_sequence_length"): None,
         ("model", "lora_enabled"): None,
         ("model", "lora_rank"): None,
         ("model", "lora_alpha"): None,

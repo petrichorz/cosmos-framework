@@ -657,7 +657,7 @@ def build_packed_sequence(
     null_action_supertokens: bool = False,
     pad_for_cuda_graphs: bool = False,
     teacher_forcing_layout: TeacherForcingLayout | None = None,
-    teacher_forcing_max_mask_elements: int | None = None,
+    teacher_forcing_max_sequence_length: int | None = None,
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
     Build the model input pack and attention meta for joint attention.
@@ -670,8 +670,8 @@ def build_packed_sequence(
             f"Invalid joint_attn_implementation: {joint_attn_implementation}. Must be 'two_way' or 'three_way'."
         )
     if teacher_forcing_layout is not None:
-        if teacher_forcing_max_mask_elements is None:
-            raise ValueError("teacher_forcing_max_mask_elements is required with teacher_forcing_layout")
+        if teacher_forcing_max_sequence_length is None:
+            raise ValueError("teacher_forcing_max_sequence_length is required with teacher_forcing_layout")
         if cp_world_size != 1:
             raise ValueError("teacher-forcing Dense attention does not support context parallelism")
         if (
@@ -682,7 +682,7 @@ def build_packed_sequence(
             raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
         dense_gen_mask = build_dense_teacher_forcing_gen_mask(
             teacher_forcing_layout,
-            max_mask_elements=teacher_forcing_max_mask_elements,
+            max_sequence_length=teacher_forcing_max_sequence_length,
         ).to(device=device)
         attention_meta = TeacherForcingAttentionInfo(
             layout=teacher_forcing_layout,
