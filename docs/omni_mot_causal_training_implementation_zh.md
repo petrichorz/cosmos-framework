@@ -49,6 +49,9 @@ latent frame:  0 1 2 | 3 4 5 | 6
 causal block:  0 0 0 | 1 1 1 | 2
 ```
 
+对应实现位置：
+`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_teacher_forcing_layout()`。
+
 最后一个 block 可以不完整，不要求视频长度能被 `S` 整除。block 始终从 latent
 frame 0 开始划分，不存在条件前缀边界或首帧特殊重切。
 
@@ -62,6 +65,9 @@ N1 -> 历史 clean blocks + N1
 N2 -> 历史 clean blocks + N2
 ...
 ```
+
+对应实现位置：
+`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`。
 
 第一个 noisy block `N0` 没有更早的 clean block，因此只能读取文字和当前 noisy
 block。Lingbot-VA 推理阶段固定第一个 latent frame 的行为，不属于本次
@@ -82,6 +88,9 @@ batch 内共享 `S/K` 可以让 mask 几何保持一致，同时每次 forward �
 ```text
 lo(i) = max(0, i - K)
 ```
+
+对应实现位置：
+`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`。
 
 | Query | 可以读取的视觉 KV | 禁止读取 |
 | --- | --- | --- |
@@ -126,16 +135,19 @@ noisy block i -> clean block j 仅当 j < i
                                          原有 flow-matching loss
 ```
 
+这张流程图各节点对应的代码位置见本节 6.1～6.5，以及 6.6 的总索引表。
+
 ### 6.1 Causal 模型入口
 
 `OmniMoTCausalModel` 继承原来的 `OmniMoTModel`。它不复制整套训练流程，只覆盖
 `post_noise_packing_hook`：普通路径完成加噪后，再插入 clean stream。这样原有 VAE、
 噪声调度、decoder 和 loss 都继续复用。
 
-代码：
+对应代码位置：
 
-- `cosmos_framework/model/generator/omni_mot_causal_model.py`
-- `cosmos_framework/model/generator/causal_teacher_forcing.py`
+- `cosmos_framework/model/generator/omni_mot_causal_model.py::OmniMoTCausalModel.post_noise_packing_hook()`；
+- `cosmos_framework/model/generator/causal_teacher_forcing.py::validate_teacher_forcing_config()`；
+- `cosmos_framework/model/generator/causal_teacher_forcing.py::expand_teacher_forcing_training_sequence()`。
 
 ### 6.2 双流 packing
 
@@ -156,7 +168,11 @@ stream 当作更晚的一段视频。`PackedSequence.vision` 仍指向 noisy 目
 和 MSE loss 不需要理解双流结构；额外的 clean payload 和布局元数据放在
 `TeacherForcingData` 中。
 
-代码：`cosmos_framework/data/generator/sequence_packing/teacher_forcing.py`。
+对应代码位置：
+
+- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::TeacherForcingLayout`；
+- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::TeacherForcingData`；
+- `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::expand_packed_sequence_for_teacher_forcing()`。
 
 ### 6.3 时间步编码
 
@@ -164,7 +180,9 @@ stream 当作更晚的一段视频。`PackedSequence.vision` 仍指向 noisy 目
 - noisy stream 使用 `xt`，保留原 flow-matching timestep；
 - clean hidden states 不直接计算生成 loss，但允许梯度通过合法 attention 路径回传。
 
-代码：`cosmos_framework/model/generator/mot/cosmos3_vfm_network.py`。
+对应代码位置：
+`cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._encode_vision()`
+中的 `packed_seq.teacher_forcing` 分支。
 
 ### 6.4 Dense attention
 
@@ -185,20 +203,50 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 一维序列上限 `teacher_forcing_max_sequence_length`，超过上限时提前报错。真实尺寸性能
 优化属于后续工作，不在当前功能闭环中。
 
-代码：
+对应代码位置：
 
-- `cosmos_framework/model/generator/mot/teacher_forcing_attention.py`
-- `cosmos_framework/model/generator/mot/attention.py`
+- mask 构造和一维上限：
+  `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`；
+- attention metadata 构造：
+  `cosmos_framework/model/generator/mot/attention.py::build_packed_sequence()`；
+- UND/GEN attention 分发：
+  `cosmos_framework/model/generator/mot/attention.py::teacher_forcing_attention()`；
+- 单次 SDPA：
+  `cosmos_framework/model/generator/mot/teacher_forcing_attention.py::teacher_forcing_dense_attention()`。
 
 ### 6.5 输出和 loss
 
 网络会产生 clean/noisy 两部分 hidden output，但 decoder 只恢复 noisy stream，并沿用
 原有 flow-matching target、condition mask 和 loss 计算。clean stream 不单独增加 loss。
 
-代码：
+对应代码位置：
 
-- `select_teacher_forcing_noisy_outputs()`；
-- `cosmos_framework/model/generator/omni_mot_model.py` 的原 loss 路径。
+- noisy hidden state 解码：
+  `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._decode_vision()`；
+- noisy 索引辅助函数：
+  `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::select_teacher_forcing_noisy_outputs()`；
+- 原 flow-matching loss：
+  `cosmos_framework/model/generator/omni_mot_model.py::OmniMoTModel._compute_flow_matching_loss()`。
+
+### 6.6 代码位置总索引
+
+这里使用 `文件路径::类/函数` 标记实现位置，不写固定行号，避免后续代码调整后行号失效。
+
+| 功能 | 对应代码位置 |
+| --- | --- |
+| causal 模型入口 | `cosmos_framework/model/generator/omni_mot_causal_model.py::OmniMoTCausalModel` |
+| 参数合法性与 S/K 采样入口 | `cosmos_framework/model/generator/causal_teacher_forcing.py::validate_teacher_forcing_config()`、`expand_teacher_forcing_training_sequence()` |
+| S/K 随机采样 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::sample_teacher_forcing_parameters()` |
+| block/sample/stream 布局 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_teacher_forcing_layout()` |
+| clean/noisy 双流展开 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::expand_packed_sequence_for_teacher_forcing()` |
+| Dense mask 与一维长度保护 | `cosmos_framework/data/generator/sequence_packing/teacher_forcing.py::build_dense_teacher_forcing_gen_mask()` |
+| clean timestep=0 | `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._encode_vision()` |
+| attention metadata | `cosmos_framework/model/generator/mot/attention.py::build_packed_sequence()` |
+| teacher-forcing attention 分发 | `cosmos_framework/model/generator/mot/attention.py::teacher_forcing_attention()` |
+| 单 softmax Dense SDPA | `cosmos_framework/model/generator/mot/teacher_forcing_attention.py::teacher_forcing_dense_attention()` |
+| noisy stream 输出与 loss | `cosmos_framework/model/generator/mot/cosmos3_vfm_network.py::Cosmos3VFMNetwork._decode_vision()`、`cosmos_framework/model/generator/omni_mot_model.py::OmniMoTModel._compute_flow_matching_loss()` |
+| Hydra causal 模型组 | `cosmos_framework/configs/base/defaults/model.py::MOT_CAUSAL_DDP_CONFIG`、`MOT_CAUSAL_FSDP_CONFIG` |
+| TOML causal 字段定义 | `cosmos_framework/configs/toml_config/sft_config.py::ModelConfig` |
 
 ## 7. 为什么采用这种方案
 
@@ -240,7 +288,7 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 - Dense attention forward 和 Q/K/V gradient；
 - clean/noisy 两条路径均能获得有限、非零梯度。
 
-定向 CPU 回归结果为 `70 passed`。这证明网络语义闭环，不代表真实 Ascend 大尺寸训练
+最新定向 CPU 回归结果为 `101 passed`。这证明网络语义闭环，不代表真实 Ascend 大尺寸训练
 已经验证。
 
 ## 10. 尚未完成或有意推迟的内容
@@ -320,9 +368,35 @@ patch 后约 8×8=64 个视觉 token，所以 `V≈320`。若文字侧按约 512
 smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
 `dataloader_train.max_sequence_length=null`；不能同时把它设为 4096。
 
-## 12. 验证步骤
+## 12. 正式训练配置与启动位置
 
-### 12.1 准备路径
+正式训练入口放在 sibling `cosmos` 仓库的 cookbook 中，而不是
+`cosmos-framework/examples`：
+
+| 内容 | 对应位置 |
+| --- | --- |
+| 正式 TOML | `../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml` |
+| causal 参数 | 上述 TOML 的 `[model]` block |
+| FSDP/500 iterations | 上述 TOML 的 `[trainer]` block |
+| packing 45,056 | 上述 TOML 的 `[dataloader_train]` block |
+| 完整下载、转换和训练流程 | `../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh` |
+| causal 模型选择 | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp` |
+
+正式启动命令：
+
+```bash
+cd ../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune
+bash launch_sft_vision_causal_edge.sh
+```
+
+该命令对应的执行代码块位于
+`launch_sft_vision_causal_edge.sh` 的 `# 4. Train with the causal FSDP model group.` 段落。
+脚本读取同目录下的 `toml/sft_config/vision_causal_edge.toml`，并通过
+`model=mot_causal_fsdp` 实例化 `OmniMoTCausalModel`。
+
+## 13. 验证步骤
+
+### 13.1 准备路径
 
 ```bash
 cd /mi/data2T/Embodied-AI/codes/cosmos_ascend/cosmos-framework
@@ -339,7 +413,7 @@ export OUTPUT_ROOT=/path/to/causal_smoke_output
 train/video_dataset_file.jsonl
 ```
 
-### 12.2 只验证配置，不训练
+### 13.2 只验证配置，不训练
 
 ```bash
 PYTHONPATH=. python -m cosmos_framework.scripts.train \
@@ -366,13 +440,13 @@ context_parallel_shard_degree: 1
 `--dryrun` 虽然不执行训练 step，仍可能要求机器能正常访问 NPU 驱动。若出现
 `aclInit`/`drvGetDevNum` 错误，应先检查设备挂载和驱动环境，而不是修改 causal 配置。
 
-### 12.3 运行三步单卡 smoke
+### 13.3 运行三步单卡 smoke
 
 ```bash
 NPROC_PER_NODE=1 bash examples/launch_sft_vision_causal_smoke_edge.sh
 ```
 
-### 12.4 成功标准
+### 13.4 成功标准
 
 满足以下条件才算功能验证通过：
 
@@ -389,7 +463,7 @@ NPROC_PER_NODE=1 bash examples/launch_sft_vision_causal_smoke_edge.sh
 $OUTPUT_ROOT/logs/vision_causal_smoke_edge_sft.log
 ```
 
-## 13. 首轮失败时如何判断问题位置
+## 14. 首轮失败时如何判断问题位置
 
 | 错误 | 含义 | 下一步 |
 | --- | --- | --- |
@@ -400,7 +474,7 @@ $OUTPUT_ROOT/logs/vision_causal_smoke_edge_sft.log
 | NaN/Inf loss | BF16/backend/optimizer 数值问题 | 固定一个 batch，对照 FP32/CPU 小尺寸 reference |
 | checkpoint key mismatch | 基础 DCP 与 Edge recipe 不匹配 | 核对转换来源和 `BASE_CHECKPOINT_PATH` |
 
-## 14. 验证通过后的顺序
+## 15. 验证通过后的顺序
 
 建议逐项增加变量，每一步都重复相同 smoke：
 
