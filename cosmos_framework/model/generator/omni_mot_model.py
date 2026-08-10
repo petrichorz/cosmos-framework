@@ -222,6 +222,7 @@ class OmniMoTModel(ImaginaireModel):
                 natten_parameter_list=self.config.natten_parameter_list,
                 video_temporal_causal=self.config.video_temporal_causal,
                 teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
+                teacher_forcing_visualize_sdpa_mask=self.config.teacher_forcing_visualize_sdpa_mask,
                 # Sound generation parameters
                 sound_dim=self.config.sound_dim,
                 sound_latent_fps=self.config.sound_latent_fps,

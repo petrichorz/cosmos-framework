@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 import math
+import os
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -11,6 +13,9 @@ from transformers.modeling_utils import PreTrainedModel
 
 from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
 from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
+from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    visualize_dense_teacher_forcing_gen_mask,
+)
 from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
 from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_last_hidden_state,
@@ -19,6 +24,7 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
 from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAwareLinear
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
 from cosmos_framework.model.generator.utils.memory import MemoryState
+from cosmos_framework.utils import log
 
 
 class Cosmos3VFMNetworkConfig(PretrainedConfig):
@@ -50,6 +56,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         natten_parameter_list=None,
         video_temporal_causal=False,
         teacher_forcing_max_sequence_length: int | None = None,
+        teacher_forcing_visualize_sdpa_mask: bool = False,
         # Sound generation parameters
         sound_dim: int | None = None,
         temporal_compression_factor_sound=1,
@@ -84,6 +91,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
                 f"got {teacher_forcing_max_sequence_length}"
             )
         self.teacher_forcing_max_sequence_length = teacher_forcing_max_sequence_length
+        self.teacher_forcing_visualize_sdpa_mask = teacher_forcing_visualize_sdpa_mask
         self.enable_input_bias = enable_input_bias
 
         # action related parameters
@@ -174,6 +182,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
 
         self.config = config
         self.parallel_dims = None
+        self._teacher_forcing_sdpa_mask_visualized = False
 
     def init_weights(self, buffer_device: torch.device | None):
         if self.config.vision_gen or self.config.action_gen or self.config.sound_gen:
@@ -1062,6 +1071,26 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             teacher_forcing_layout=teacher_forcing_layout,
             teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
         )
+
+        if (
+            teacher_forcing_layout is not None
+            and self.config.teacher_forcing_visualize_sdpa_mask
+            and not self._teacher_forcing_sdpa_mask_visualized
+        ):
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            if rank == 0:
+                output_root = Path(os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "."))
+                output_path = output_root / "teacher_forcing_sdpa_bool_mask.png"
+                try:
+                    saved_path = visualize_dense_teacher_forcing_gen_mask(
+                        attention_meta.dense_gen_mask,
+                        teacher_forcing_layout,
+                        output_path,
+                    )
+                    log.info(f"Saved teacher-forcing SDPA bool mask visualization to {saved_path}")
+                except Exception:
+                    log.exception("Failed to save teacher-forcing SDPA bool mask visualization")
+            self._teacher_forcing_sdpa_mask_visualized = True
 
         # ── Multi-control transfer: annotate SplitInfo with per-item ranges ──────
         # Activated only when packed_seq carries control_weights, i.e. the caller
