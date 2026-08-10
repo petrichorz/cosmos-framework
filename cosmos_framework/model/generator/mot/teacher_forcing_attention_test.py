@@ -22,6 +22,7 @@ from cosmos_framework.data.generator.sequence_packing.runtime import (
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     build_dense_teacher_forcing_gen_mask,
     build_teacher_forcing_layout,
+    visualize_dense_teacher_forcing_gen_mask,
 )
 from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
@@ -163,6 +164,24 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
         ),
     )
     assert natten_metadata is None
+
+
+def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
+    layout = build_teacher_forcing_layout(
+        und_token_counts=[2, 1],
+        vision_token_shapes=[(3, 1, 1), (2, 1, 1)],
+        block_size=1,
+        history_blocks=2,
+    )
+    dense_mask = build_dense_teacher_forcing_gen_mask(
+        layout,
+        max_sequence_length=layout.source_sequence_indexes.numel(),
+    )
+
+    output_path = visualize_dense_teacher_forcing_gen_mask(dense_mask, layout, tmp_path / "mask.png")
+
+    assert output_path == (tmp_path / "mask.png").resolve()
+    assert output_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention():

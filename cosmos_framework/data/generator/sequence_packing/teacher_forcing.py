@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -243,6 +244,149 @@ def build_dense_teacher_forcing_gen_mask(
         noisy_query_visible,
     )
     return same_sample & (key_is_und | allowed_by_stream)
+
+
+def visualize_dense_teacher_forcing_gen_mask(
+    dense_gen_mask: torch.BoolTensor,
+    layout: TeacherForcingLayout,
+    output_path: str | Path,
+) -> Path:
+    """Save a compact view of the exact bool mask consumed by SDPA.
+
+    Rows are GEN query groups and columns are KV groups. A group is one UND
+    segment or one CLEAN/NOISY causal block. Tokens in each such group have
+    identical teacher-forcing visibility, so selecting one representative per
+    group preserves the mask semantics without copying the full token-level
+    matrix to CPU.
+    """
+
+    if dense_gen_mask.dtype != torch.bool:
+        raise TypeError(f"dense_gen_mask must be bool, got {dense_gen_mask.dtype}")
+    expected_shape = (layout.gen_query_indexes.numel(), layout.source_sequence_indexes.numel())
+    if tuple(dense_gen_mask.shape) != expected_shape:
+        raise ValueError(f"dense_gen_mask shape must be {expected_shape}, got {tuple(dense_gen_mask.shape)}")
+
+    def _group_starts(sample_ids: torch.Tensor, stream_ids: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        starts = torch.ones(sample_ids.numel(), dtype=torch.bool, device=sample_ids.device)
+        if sample_ids.numel() > 1:
+            starts[1:] = (
+                (sample_ids[1:] != sample_ids[:-1])
+                | (stream_ids[1:] != stream_ids[:-1])
+                | (block_ids[1:] != block_ids[:-1])
+            )
+        return torch.nonzero(starts, as_tuple=True)[0]
+
+    gen_indexes = layout.gen_query_indexes
+    query_representatives = _group_starts(
+        layout.sample_ids[gen_indexes],
+        layout.stream_ids[gen_indexes],
+        layout.block_ids[gen_indexes],
+    )
+    key_representatives = _group_starts(layout.sample_ids, layout.stream_ids, layout.block_ids)
+    grouped_mask = (
+        dense_gen_mask.index_select(0, query_representatives)
+        .index_select(1, key_representatives)
+        .detach()
+        .to(device="cpu")
+    )
+
+    query_source_indexes = gen_indexes.index_select(0, query_representatives)
+    query_sample_ids = layout.sample_ids.index_select(0, query_source_indexes).detach().cpu()
+    query_stream_ids = layout.stream_ids.index_select(0, query_source_indexes).detach().cpu()
+    query_block_ids = layout.block_ids.index_select(0, query_source_indexes).detach().cpu()
+    key_sample_ids = layout.sample_ids.index_select(0, key_representatives).detach().cpu()
+    key_stream_ids = layout.stream_ids.index_select(0, key_representatives).detach().cpu()
+    key_block_ids = layout.block_ids.index_select(0, key_representatives).detach().cpu()
+
+    # Pillow is intentionally imported only when the opt-in debug switch is on.
+    from PIL import Image, ImageDraw
+
+    num_rows, num_cols = grouped_mask.shape
+    cell_size = max(1, min(18, 1400 // max(num_rows, num_cols, 1)))
+    left_margin = 125
+    top_margin = 135
+    mask_width = max(num_cols * cell_size, 1)
+    mask_height = max(num_rows * cell_size, 1)
+
+    false_color = torch.tensor((24, 27, 35), dtype=torch.uint8)
+    visible_colors = {
+        int(TeacherForcingStream.UND): torch.tensor((245, 166, 35), dtype=torch.uint8),
+        int(TeacherForcingStream.CLEAN): torch.tensor((68, 190, 120), dtype=torch.uint8),
+        int(TeacherForcingStream.NOISY): torch.tensor((79, 145, 245), dtype=torch.uint8),
+    }
+    pixels = false_color.expand(num_rows, num_cols, 3).clone()
+    for column, stream_id in enumerate(key_stream_ids.tolist()):
+        pixels[grouped_mask[:, column], column] = visible_colors[int(stream_id)]
+
+    mask_image = Image.fromarray(pixels.numpy())
+    if cell_size != 1:
+        mask_image = mask_image.resize((mask_width, mask_height), resample=Image.Resampling.NEAREST)
+    image = Image.new("RGB", (left_margin + mask_width + 15, top_margin + mask_height + 15), "white")
+    image.paste(mask_image, (left_margin, top_margin))
+    draw = ImageDraw.Draw(image)
+    draw.text((8, 8), "Teacher-forcing SDPA bool mask (True = visible)", fill="black")
+    draw.text((8, 25), "rows: GEN queries; columns: [UND | CLEAN | NOISY] KV groups", fill="black")
+    draw.text((8, 44), f"block_size={layout.block_size}, history_blocks={layout.history_blocks}", fill="black")
+    legend_x = 8
+    for label, color in (
+        ("UND", tuple(visible_colors[-1].tolist())),
+        ("CLEAN", tuple(visible_colors[0].tolist())),
+        ("NOISY", tuple(visible_colors[1].tolist())),
+        ("MASKED", tuple(false_color.tolist())),
+    ):
+        draw.rectangle((legend_x, 66, legend_x + 10, 76), fill=color)
+        draw.text((legend_x + 14, 65), label, fill="black")
+        legend_x += 69
+
+    stream_names = {-1: "U", 0: "C", 1: "N"}
+
+    def _label(sample_id: int, stream_id: int, block_id: int) -> str:
+        suffix = "" if stream_id == int(TeacherForcingStream.UND) else str(block_id)
+        return f"s{sample_id}:{stream_names[stream_id]}{suffix}"
+
+    # Draw all labels when cells are readable; otherwise retain sample boundary
+    # labels and the color legend so large packed batches remain interpretable.
+    label_stride = 1 if cell_size >= 8 else max(1, 48 // cell_size)
+    for row in range(0, num_rows, label_stride):
+        label = _label(int(query_sample_ids[row]), int(query_stream_ids[row]), int(query_block_ids[row]))
+        draw.text((4, top_margin + row * cell_size), label, fill="black")
+    for column in range(0, num_cols, label_stride):
+        label = _label(int(key_sample_ids[column]), int(key_stream_ids[column]), int(key_block_ids[column]))
+        label_image = Image.new("RGBA", (60, 12), (255, 255, 255, 0))
+        ImageDraw.Draw(label_image).text((0, 0), label, fill="black")
+        label_image = label_image.rotate(90, expand=True)
+        image.paste(
+            label_image,
+            (left_margin + column * cell_size, top_margin - label_image.height - 2),
+            label_image,
+        )
+
+    if cell_size >= 6:
+        for row in range(1, num_rows):
+            y = top_margin + row * cell_size
+            draw.line((left_margin, y, left_margin + mask_width, y), fill=(90, 95, 105))
+        for column in range(1, num_cols):
+            x = left_margin + column * cell_size
+            draw.line((x, top_margin, x, top_margin + mask_height), fill=(90, 95, 105))
+
+    def _draw_boundaries(sample_ids: torch.Tensor, *, rows: bool) -> None:
+        for index in range(1, sample_ids.numel()):
+            if int(sample_ids[index]) == int(sample_ids[index - 1]):
+                continue
+            if rows:
+                y = top_margin + index * cell_size
+                draw.line((left_margin, y, left_margin + mask_width, y), fill=(220, 45, 45), width=2)
+            else:
+                x = left_margin + index * cell_size
+                draw.line((x, top_margin, x, top_margin + mask_height), fill=(220, 45, 45), width=2)
+
+    _draw_boundaries(query_sample_ids, rows=True)
+    _draw_boundaries(key_sample_ids, rows=False)
+
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path)
+    return output_path
 
 
 def _validate_teacher_forcing_packed_sequence(

@@ -27,3 +27,4 @@ def test_causal_model_groups_enable_teacher_forcing_but_require_explicit_dense_l
         assert config.teacher_forcing_history_blocks_min == 1
         assert config.teacher_forcing_history_blocks_max == 32
         assert config.teacher_forcing_max_sequence_length is None
+        assert config.teacher_forcing_visualize_sdpa_mask is False

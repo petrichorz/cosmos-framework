@@ -361,6 +361,13 @@ class ModelConfig(BaseModel):
             "[UND|clean|noisy] teacher-forcing sequence."
         ),
     )
+    teacher_forcing_visualize_sdpa_mask: bool = Field(
+        default=False,
+        description=(
+            "Save one rank-0 block-level visualization of the exact bool mask "
+            "passed to teacher-forcing SDPA."
+        ),
+    )
     joint_attn_implementation: str = Field(
         default="two_way",
         description=(
