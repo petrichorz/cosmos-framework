@@ -247,8 +247,9 @@ class OmniMoTModelConfig:
     # Required by OmniMoTCausalModel. Limits the expanded [UND|clean|noisy]
     # sequence before the Dense correctness backend allocates its 2D mask.
     teacher_forcing_max_sequence_length: int | None = None
-    # Rank 0 saves one compact visualization of the actual bool mask passed to
-    # SDPA. The file is written below IMAGINAIRE_OUTPUT_ROOT.
+    # Rank 0 saves one compact block-level visualization of the complete
+    # attention pattern: causal UND plus the bool mask used by GEN SDPA.
+    # The file is written below IMAGINAIRE_OUTPUT_ROOT.
     teacher_forcing_visualize_sdpa_mask: bool = False
 
     # Load balancing loss config.

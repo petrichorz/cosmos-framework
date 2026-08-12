@@ -1087,9 +1087,9 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                         teacher_forcing_layout,
                         output_path,
                     )
-                    log.info(f"Saved teacher-forcing SDPA bool mask visualization to {saved_path}")
+                    log.info(f"Saved complete teacher-forcing attention visualization to {saved_path}")
                 except Exception:
-                    log.exception("Failed to save teacher-forcing SDPA bool mask visualization")
+                    log.exception("Failed to save complete teacher-forcing attention visualization")
             self._teacher_forcing_sdpa_mask_visualized = True
 
         # ── Multi-control transfer: annotate SplitInfo with per-item ranges ──────
