@@ -168,7 +168,7 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
 
 def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
     layout = build_teacher_forcing_layout(
-        und_token_counts=[2, 1],
+        und_token_counts=[257, 1],
         vision_token_shapes=[(3, 1, 1), (2, 1, 1)],
         block_size=1,
         history_blocks=2,
@@ -182,6 +182,23 @@ def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
 
     assert output_path == (tmp_path / "mask.png").resolve()
     assert output_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    from PIL import Image
+
+    with Image.open(output_path) as image:
+        # The first sample's 257 UND tokens become two 256-token blocks; the
+        # second sample has one UND block. UND blocks retain their causal triangle.
+        assert image.size == (125 + 13 * 18 + 15, 135 + 13 * 18 + 15)
+
+        def _pixel(column, row):
+            return image.getpixel((125 + column * 18 + 3, 135 + row * 18 + 3))
+
+        assert _pixel(0, 0) == (245, 166, 35)
+        assert _pixel(1, 0) == (24, 27, 35)
+        assert _pixel(0, 1) == (245, 166, 35)
+        assert _pixel(1, 1) == (245, 166, 35)
+        assert _pixel(0, 8) == (24, 27, 35)
+        assert _pixel(8, 8) == (245, 166, 35)
 
 
 def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention():

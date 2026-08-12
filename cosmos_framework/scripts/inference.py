@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
-
+import torch
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
 from cosmos_framework.inference.common.init import init_script, is_rank0
 
 init_script()

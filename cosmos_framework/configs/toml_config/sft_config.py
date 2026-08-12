@@ -364,8 +364,8 @@ class ModelConfig(BaseModel):
     teacher_forcing_visualize_sdpa_mask: bool = Field(
         default=False,
         description=(
-            "Save one rank-0 block-level visualization of the exact bool mask "
-            "passed to teacher-forcing SDPA."
+            "Save one rank-0 visualization of the complete teacher-forcing attention pattern: "
+            "256-token causal UND blocks plus block-level CLEAN/NOISY rows."
         ),
     )
     joint_attn_implementation: str = Field(
