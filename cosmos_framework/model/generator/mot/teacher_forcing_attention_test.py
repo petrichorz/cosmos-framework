@@ -24,6 +24,8 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     build_teacher_forcing_layout,
     visualize_dense_teacher_forcing_gen_mask,
 )
+from cosmos_framework.model.attention.backends import BACKEND_CHECK_MAP
+from cosmos_framework.model.attention.frontend import BACKEND_MAP
 from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
     build_packed_sequence,
@@ -65,6 +67,11 @@ def _make_inputs(dtype: torch.dtype = torch.float64):
         dtype=torch.bool,
     )
     return query, key, value, allowed_mask
+
+
+def test_masked_sdpa_is_registered_by_key():
+    assert BACKEND_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention"
+    assert BACKEND_CHECK_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention_check"
 
 
 def test_teacher_forcing_dense_attention_matches_independent_gqa_reference():
@@ -109,8 +116,8 @@ def test_teacher_forcing_dense_attention_ignores_masked_values():
         (lambda q, k, v, m: (q, k, v, m.float()), "bool"),
         (lambda q, k, v, m: (q, k, v, m[:-1]), "shape"),
         (lambda q, k, v, m: (q, k, v, m.index_fill(1, torch.arange(m.shape[1]), False)), "visible key"),
-        (lambda q, k, v, m: (q[:, :3], k, v, m), "divisible"),
-        (lambda q, k, v, m: (q, k[:, :, :2], v, m), "head dimension"),
+        (lambda q, k, v, m: (q[:, :3], k, v, m), "evenly divide"),
+        (lambda q, k, v, m: (q, k[:, :, :2], v, m), "head dims"),
     ],
 )
 def test_teacher_forcing_dense_attention_rejects_invalid_inputs(mutate, error: str):
