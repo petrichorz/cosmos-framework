@@ -11,7 +11,7 @@ experiment   = "vision_sft_edge"
 project      = "cosmos3"
 group        = "sft"
 name         = "vision_sft_edge"
-wandb_mode   = "disabled"
+wandb_mode   = "offline"
 
 [model]
 max_num_tokens_after_packing = 45056
@@ -28,7 +28,7 @@ data_parallel_shard_degree      = -1                     # -1 = auto from WORLD_
 data_parallel_replicate_degree  = 1
 
 [model.compile]
-enabled                         = true                   # was [model.parallelism].use_torch_compile
+enabled                         = false                   # was [model.parallelism].use_torch_compile
 compile_dynamic                 = true
 
 [model.activation_checkpointing]
