@@ -246,6 +246,58 @@ def build_dense_teacher_forcing_gen_mask(
     return same_sample & (key_is_und | allowed_by_stream)
 
 
+def build_per_sample_teacher_forcing_gen_masks(
+    layout: TeacherForcingLayout,
+    *,
+    max_sequence_length: int,
+) -> tuple[torch.BoolTensor, ...]:
+    """Build one GEN-query dense mask per packed sample without a global 2D allocation."""
+
+    if max_sequence_length < 1:
+        raise ValueError(f"max_sequence_length must be >= 1, got {max_sequence_length}")
+
+    num_keys = layout.source_sequence_indexes.numel()
+    if num_keys > max_sequence_length:
+        raise ValueError(
+            f"Teacher-forcing sequence has {num_keys} tokens, exceeding max_sequence_length={max_sequence_length}"
+        )
+
+    masks: list[torch.BoolTensor] = []
+    sample_offset = 0
+    for sample_len in layout.sample_lens:
+        sample_slice = slice(sample_offset, sample_offset + sample_len)
+        sample_stream_ids = layout.stream_ids[sample_slice]
+        sample_block_ids = layout.block_ids[sample_slice]
+        query_rows = (sample_stream_ids == int(TeacherForcingStream.CLEAN)) | (
+            sample_stream_ids == int(TeacherForcingStream.NOISY)
+        )
+        query_stream_ids = sample_stream_ids[query_rows, None]
+        query_block_ids = sample_block_ids[query_rows, None]
+        key_stream_ids = sample_stream_ids[None, :]
+        key_block_ids = sample_block_ids[None, :]
+
+        key_is_und = key_stream_ids == int(TeacherForcingStream.UND)
+        key_is_clean = key_stream_ids == int(TeacherForcingStream.CLEAN)
+        key_is_noisy = key_stream_ids == int(TeacherForcingStream.NOISY)
+        inside_history = key_block_ids >= query_block_ids - layout.history_blocks
+        clean_query_visible = key_is_clean & inside_history & (key_block_ids <= query_block_ids)
+        noisy_query_visible = (key_is_clean & inside_history & (key_block_ids < query_block_ids)) | (
+            key_is_noisy & (key_block_ids == query_block_ids)
+        )
+        allowed_by_stream = torch.where(
+            query_stream_ids == int(TeacherForcingStream.CLEAN),
+            clean_query_visible,
+            noisy_query_visible,
+        )
+        mask = key_is_und | allowed_by_stream
+        masks.append(mask)
+        sample_offset += sample_len
+
+    if sample_offset != num_keys:
+        raise ValueError("teacher-forcing sample lengths do not cover the complete packed sequence")
+    return tuple(masks)
+
+
 def visualize_dense_teacher_forcing_gen_mask(
     dense_gen_mask: torch.BoolTensor,
     layout: TeacherForcingLayout,

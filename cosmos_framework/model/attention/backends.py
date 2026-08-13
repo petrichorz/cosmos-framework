@@ -16,6 +16,7 @@ from cosmos_framework.model.attention.flash3.checks import flash3_attention_chec
 from cosmos_framework.model.attention.masked_sdpa.checks import masked_sdpa_attention_check
 from cosmos_framework.model.attention.masks import CausalType
 from cosmos_framework.model.attention.natten.checks import natten_attention_check, natten_multi_dim_attention_check
+from cosmos_framework.model.attention.npu_fusion_attention.checks import npu_fusion_attention_check
 from cosmos_framework.model.attention.sdpa.checks import sdpa_attention_check
 from cosmos_framework.model.attention.utils import get_arch_tag
 from cosmos_framework.model.attention.utils.environment import (
@@ -31,8 +32,13 @@ BACKEND_CHECK_MAP = {
     "flash2": flash2_attention_check,
     "flash3": flash3_attention_check,
     "masked_sdpa": masked_sdpa_attention_check,
+    "npu_fusion_attention": npu_fusion_attention_check,
     "sdpa": sdpa_attention_check,
 }
+
+# LSE from npu_fusion_attention's internal statistics has not yet been validated
+# for NATTEN's merge-attention autograd contract. Keep those calls on SDPA.
+BACKEND_SUPPORTS_LSE = {"npu_fusion_attention": False}
 
 BACKEND_MULTI_DIM_CHECK_MAP = {
     "natten": natten_multi_dim_attention_check,
@@ -51,6 +57,7 @@ def is_backend_compatible(
     causal_type: CausalType | None,
     is_varlen: bool,
     deterministic: bool = False,
+    return_lse: bool = False,
     raise_error: bool = False,
 ) -> bool:
     """
@@ -83,6 +90,8 @@ def is_backend_compatible(
 
         deterministic (bool): Deterministic backward pass required.
 
+        return_lse (bool): Whether the caller requires merge-compatible logsumexp output.
+
         raise_error (bool): whether to raise an error if any checks fail or no backend is selected,
             instead of just returning False. Default is False.
 
@@ -95,6 +104,14 @@ def is_backend_compatible(
 
     if backend not in BACKEND_CHECK_MAP:
         raise ValueError(f"Unrecognized backend name {backend}.")
+
+    if return_lse and not BACKEND_SUPPORTS_LSE.get(backend, True):
+        log_or_raise_error(
+            f"Attention backend {backend} does not expose merge-compatible logsumexp.",
+            raise_error=raise_error,
+            exception=NotImplementedError,
+        )
+        return False
 
     return BACKEND_CHECK_MAP[backend](
         query_shape=query_shape,
@@ -129,10 +146,10 @@ def get_backend_list(arch_tag: int) -> list[str]:
     """
 
     if arch_tag == 0:
-        # Non-CUDA device (Ascend NPU / CPU): flash2 / flash3 / natten are
-        # CUDA-only, so the device-agnostic SDPA backend is the sole option.
+        # Non-CUDA device (Ascend NPU / CPU): the NPU-specific compatibility
+        # check rejects CPU tensors, which then fall through to SDPA.
         # ``get_arch_tag`` returns 0 for any non-CUDA device.
-        return filter_attention_backends(["sdpa"])
+        return filter_attention_backends(["npu_fusion_attention", "sdpa"])
 
     if arch_tag < 75:
         log.debug(f"Minimum architecture supported for Attention is 75, got {arch_tag=}.")
@@ -183,6 +200,7 @@ def choose_backend(
     causal_type: CausalType | None,
     is_varlen: bool,
     deterministic: bool = False,
+    return_lse: bool = False,
     backend: str | None = None,
     raise_error: bool = True,
 ) -> str | None:
@@ -214,6 +232,8 @@ def choose_backend(
 
         deterministic (bool): Deterministic backward pass required.
 
+        return_lse (bool): Whether the caller requires merge-compatible logsumexp output.
+
         backend (str | None): selected backend, if any.
 
         raise_error (bool): whether to raise an error if any checks fail or no backend is selected,
@@ -236,6 +256,7 @@ def choose_backend(
             causal_type=causal_type,
             is_varlen=is_varlen,
             deterministic=deterministic,
+            return_lse=return_lse,
             raise_error=raise_error,
         ):
             return backend
@@ -256,6 +277,7 @@ def choose_backend(
             causal_type=causal_type,
             is_varlen=is_varlen,
             deterministic=deterministic,
+            return_lse=return_lse,
             raise_error=False,
         ):
             return backend

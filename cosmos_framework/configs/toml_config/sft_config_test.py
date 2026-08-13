@@ -41,6 +41,7 @@ class TestSchemaValidation:
                 "teacher_forcing_history_blocks_min": 1,
                 "teacher_forcing_history_blocks_max": 32,
                 "teacher_forcing_max_sequence_length": 123456,
+                "teacher_forcing_dense_mode": "per_sample",
                 "teacher_forcing_visualize_sdpa_mask": True,
             },
         }
@@ -49,6 +50,7 @@ class TestSchemaValidation:
 
         assert cfg.model.causal_training_strategy == "teacher_forcing"
         assert cfg.model.teacher_forcing_max_sequence_length == 123456
+        assert cfg.model.teacher_forcing_dense_mode == "per_sample"
         assert cfg.model.teacher_forcing_visualize_sdpa_mask is True
 
     def test_custom_section_validates_arbitrary_nested_content(self) -> None:
@@ -111,6 +113,7 @@ class TestBuildHydraOverrides:
                 "teacher_forcing_history_blocks_min": 1,
                 "teacher_forcing_history_blocks_max": 32,
                 "teacher_forcing_max_sequence_length": 123456,
+                "teacher_forcing_dense_mode": "per_sample",
                 "teacher_forcing_visualize_sdpa_mask": True,
             },
         }
@@ -123,6 +126,7 @@ class TestBuildHydraOverrides:
         assert "model.config.teacher_forcing_history_blocks_min=1" in overrides
         assert "model.config.teacher_forcing_history_blocks_max=32" in overrides
         assert "model.config.teacher_forcing_max_sequence_length=123456" in overrides
+        assert "model.config.teacher_forcing_dense_mode=per_sample" in overrides
         assert "model.config.teacher_forcing_visualize_sdpa_mask=true" in overrides
 
     def test_teacher_forcing_model_fields_are_skipped_for_vlm(self) -> None:
@@ -256,6 +260,7 @@ class TestEndToEndLoader:
         assert config.model.config.teacher_forcing_history_blocks_min == 1
         assert config.model.config.teacher_forcing_history_blocks_max == 32
         assert config.model.config.teacher_forcing_max_sequence_length == 4096
+        assert config.model.config.teacher_forcing_dense_mode == "per_sample"
         assert config.model.config.parallelism.data_parallel_shard_degree == 1
         assert config.model.config.parallelism.context_parallel_shard_degree == 1
         assert config.model.config.compile.enabled is False
@@ -308,6 +313,7 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
         assert config.model.config.teacher_forcing_history_blocks_min == 1
         assert config.model.config.teacher_forcing_history_blocks_max == 32
         assert config.model.config.teacher_forcing_max_sequence_length == 123456
+        assert config.model.config.teacher_forcing_dense_mode == "global"
 
     def test_load_with_custom_section(self, tmp_path: Path, _dummy_recipe_env: None) -> None:
         toml_path = tmp_path / "with_custom.toml"

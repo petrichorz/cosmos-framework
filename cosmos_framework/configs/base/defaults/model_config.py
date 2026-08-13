@@ -245,8 +245,11 @@ class OmniMoTModelConfig:
     teacher_forcing_history_blocks_min: int = 1
     teacher_forcing_history_blocks_max: int = 32
     # Required by OmniMoTCausalModel. Limits the expanded [UND|clean|noisy]
-    # sequence before the Dense correctness backend allocates its 2D mask.
+    # sequence before either Dense correctness mode allocates its mask(s).
     teacher_forcing_max_sequence_length: int | None = None
+    # "global" builds one packed Dense Mask; "per_sample" loops over packed
+    # samples and builds one smaller Dense Mask for each sample.
+    teacher_forcing_dense_mode: str = "global"
     # Rank 0 saves one compact block-level visualization of the complete
     # attention pattern: causal UND plus the bool mask used by GEN SDPA.
     # The file is written below IMAGINAIRE_OUTPUT_ROOT.

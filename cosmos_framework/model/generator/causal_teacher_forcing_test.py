@@ -28,6 +28,7 @@ def _config(**overrides):
         teacher_forcing_history_blocks_min=3,
         teacher_forcing_history_blocks_max=3,
         teacher_forcing_max_sequence_length=1024,
+        teacher_forcing_dense_mode="global",
         parallelism=SimpleNamespace(context_parallel_shard_degree=1),
     )
     values.update(overrides)
@@ -70,6 +71,7 @@ def _packed_noisy_video() -> PackedSequence:
         ({"teacher_forcing_history_blocks_min": 4, "teacher_forcing_history_blocks_max": 3}, "history_blocks"),
         ({"teacher_forcing_max_sequence_length": None}, "max_sequence_length"),
         ({"teacher_forcing_max_sequence_length": 0}, "max_sequence_length"),
+        ({"teacher_forcing_dense_mode": "invalid"}, "dense_mode"),
         ({"parallelism": SimpleNamespace(context_parallel_shard_degree=2)}, "context parallel"),
     ],
 )

@@ -14,6 +14,7 @@ from transformers.modeling_utils import PreTrainedModel
 from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
 from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    build_dense_teacher_forcing_gen_mask,
     visualize_dense_teacher_forcing_gen_mask,
 )
 from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
@@ -56,6 +57,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         natten_parameter_list=None,
         video_temporal_causal=False,
         teacher_forcing_max_sequence_length: int | None = None,
+        teacher_forcing_dense_mode: str = "global",
         teacher_forcing_visualize_sdpa_mask: bool = False,
         # Sound generation parameters
         sound_dim: int | None = None,
@@ -91,6 +93,12 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
                 f"got {teacher_forcing_max_sequence_length}"
             )
         self.teacher_forcing_max_sequence_length = teacher_forcing_max_sequence_length
+        if teacher_forcing_dense_mode not in {"global", "per_sample"}:
+            raise ValueError(
+                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
+                f"got {teacher_forcing_dense_mode!r}"
+            )
+        self.teacher_forcing_dense_mode = teacher_forcing_dense_mode
         self.teacher_forcing_visualize_sdpa_mask = teacher_forcing_visualize_sdpa_mask
         self.enable_input_bias = enable_input_bias
 
@@ -1070,6 +1078,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             pad_for_cuda_graphs=self.pad_for_cuda_graphs,
             teacher_forcing_layout=teacher_forcing_layout,
             teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
+            teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
         )
 
         if (
@@ -1082,8 +1091,14 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 output_root = Path(os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "."))
                 output_path = output_root / "teacher_forcing_sdpa_bool_mask.png"
                 try:
+                    visualization_mask = attention_meta.dense_gen_mask
+                    if visualization_mask is None:
+                        visualization_mask = build_dense_teacher_forcing_gen_mask(
+                            teacher_forcing_layout,
+                            max_sequence_length=self.config.teacher_forcing_max_sequence_length,
+                        )
                     saved_path = visualize_dense_teacher_forcing_gen_mask(
-                        attention_meta.dense_gen_mask,
+                        visualization_mask,
                         teacher_forcing_layout,
                         output_path,
                     )
