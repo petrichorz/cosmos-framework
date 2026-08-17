@@ -246,20 +246,76 @@ def build_dense_teacher_forcing_gen_mask(
     return same_sample & (key_is_und | allowed_by_stream)
 
 
+def build_per_sample_teacher_forcing_gen_masks(
+    layout: TeacherForcingLayout,
+    *,
+    max_sequence_length: int,
+) -> tuple[torch.BoolTensor, ...]:
+    """Build one GEN-query dense mask per packed sample without a global 2D allocation."""
+
+    if max_sequence_length < 1:
+        raise ValueError(f"max_sequence_length must be >= 1, got {max_sequence_length}")
+
+    num_keys = layout.source_sequence_indexes.numel()
+    if num_keys > max_sequence_length:
+        raise ValueError(
+            f"Teacher-forcing sequence has {num_keys} tokens, exceeding max_sequence_length={max_sequence_length}"
+        )
+
+    masks: list[torch.BoolTensor] = []
+    sample_offset = 0
+    for sample_len in layout.sample_lens:
+        sample_slice = slice(sample_offset, sample_offset + sample_len)
+        sample_stream_ids = layout.stream_ids[sample_slice]
+        sample_block_ids = layout.block_ids[sample_slice]
+        query_rows = (sample_stream_ids == int(TeacherForcingStream.CLEAN)) | (
+            sample_stream_ids == int(TeacherForcingStream.NOISY)
+        )
+        query_stream_ids = sample_stream_ids[query_rows, None]
+        query_block_ids = sample_block_ids[query_rows, None]
+        key_stream_ids = sample_stream_ids[None, :]
+        key_block_ids = sample_block_ids[None, :]
+
+        key_is_und = key_stream_ids == int(TeacherForcingStream.UND)
+        key_is_clean = key_stream_ids == int(TeacherForcingStream.CLEAN)
+        key_is_noisy = key_stream_ids == int(TeacherForcingStream.NOISY)
+        inside_history = key_block_ids >= query_block_ids - layout.history_blocks
+        clean_query_visible = key_is_clean & inside_history & (key_block_ids <= query_block_ids)
+        noisy_query_visible = (key_is_clean & inside_history & (key_block_ids < query_block_ids)) | (
+            key_is_noisy & (key_block_ids == query_block_ids)
+        )
+        allowed_by_stream = torch.where(
+            query_stream_ids == int(TeacherForcingStream.CLEAN),
+            clean_query_visible,
+            noisy_query_visible,
+        )
+        mask = key_is_und | allowed_by_stream
+        masks.append(mask)
+        sample_offset += sample_len
+
+    if sample_offset != num_keys:
+        raise ValueError("teacher-forcing sample lengths do not cover the complete packed sequence")
+    return tuple(masks)
+
+
 def visualize_dense_teacher_forcing_gen_mask(
     dense_gen_mask: torch.BoolTensor,
     layout: TeacherForcingLayout,
     output_path: str | Path,
+    *,
+    und_block_size: int = 256,
 ) -> Path:
-    """Save a compact view of the exact bool mask consumed by SDPA.
+    """Save a compact view of the complete teacher-forcing attention pattern.
 
-    Rows are GEN query groups and columns are KV groups. A group is one UND
-    segment or one CLEAN/NOISY causal block. Tokens in each such group have
-    identical teacher-forcing visibility, so selecting one representative per
-    group preserves the mask semantics without copying the full token-level
-    matrix to CPU.
+    UND tokens are grouped into blocks of ``und_block_size`` for a compact
+    causal lower-triangular overview. CLEAN/NOISY tokens are grouped by their
+    causal blocks because all tokens in such a block have identical
+    teacher-forcing visibility. The GEN rows come from ``dense_gen_mask``;
+    the UND rows summarize the separate causal self-attention call.
     """
 
+    if und_block_size < 1:
+        raise ValueError(f"und_block_size must be >= 1, got {und_block_size}")
     if dense_gen_mask.dtype != torch.bool:
         raise TypeError(f"dense_gen_mask must be bool, got {dense_gen_mask.dtype}")
     expected_shape = (layout.gen_query_indexes.numel(), layout.source_sequence_indexes.numel())
@@ -274,26 +330,47 @@ def visualize_dense_teacher_forcing_gen_mask(
                 | (stream_ids[1:] != stream_ids[:-1])
                 | (block_ids[1:] != block_ids[:-1])
             )
+        sample_offset = 0
+        for sample_len, und_count in zip(layout.sample_lens, layout.split_lens[::2]):
+            for block_start in range(und_block_size, und_count, und_block_size):
+                starts[sample_offset + block_start] = True
+            sample_offset += sample_len
         return torch.nonzero(starts, as_tuple=True)[0]
 
     gen_indexes = layout.gen_query_indexes
-    query_representatives = _group_starts(
-        layout.sample_ids[gen_indexes],
-        layout.stream_ids[gen_indexes],
-        layout.block_ids[gen_indexes],
-    )
-    key_representatives = _group_starts(layout.sample_ids, layout.stream_ids, layout.block_ids)
-    grouped_mask = (
-        dense_gen_mask.index_select(0, query_representatives)
-        .index_select(1, key_representatives)
-        .detach()
-        .to(device="cpu")
+    representatives = _group_starts(layout.sample_ids, layout.stream_ids, layout.block_ids)
+    representative_sample_ids = layout.sample_ids.index_select(0, representatives)
+    representative_stream_ids = layout.stream_ids.index_select(0, representatives)
+    representative_block_ids = layout.block_ids.index_select(0, representatives)
+
+    num_groups = representatives.numel()
+    grouped_mask = torch.zeros((num_groups, num_groups), dtype=torch.bool, device=dense_gen_mask.device)
+    und_rows = representative_stream_ids == int(TeacherForcingStream.UND)
+    grouped_mask[und_rows] = (
+        (representative_sample_ids[und_rows, None] == representative_sample_ids[None, :])
+        & (representative_stream_ids[None, :] == int(TeacherForcingStream.UND))
+        & (representatives[None, :] <= representatives[und_rows, None])
     )
 
-    query_source_indexes = gen_indexes.index_select(0, query_representatives)
-    query_sample_ids = layout.sample_ids.index_select(0, query_source_indexes).detach().cpu()
-    query_stream_ids = layout.stream_ids.index_select(0, query_source_indexes).detach().cpu()
-    query_block_ids = layout.block_ids.index_select(0, query_source_indexes).detach().cpu()
+    gen_rows = ~und_rows
+    gen_representatives = representatives[gen_rows]
+    gen_row_by_source = torch.full(
+        (layout.source_sequence_indexes.numel(),),
+        -1,
+        dtype=torch.long,
+        device=gen_indexes.device,
+    )
+    gen_row_by_source[gen_indexes] = torch.arange(gen_indexes.numel(), device=gen_indexes.device)
+    gen_mask_rows = gen_row_by_source.index_select(0, gen_representatives)
+    if bool((gen_mask_rows < 0).any()):
+        raise ValueError("CLEAN/NOISY representatives must be present in gen_query_indexes")
+    grouped_mask[gen_rows] = dense_gen_mask.index_select(0, gen_mask_rows).index_select(1, representatives)
+    grouped_mask = grouped_mask.detach().to(device="cpu")
+
+    query_sample_ids = representative_sample_ids.detach().cpu()
+    query_stream_ids = representative_stream_ids.detach().cpu()
+    query_block_ids = representative_block_ids.detach().cpu()
+    key_representatives = representatives
     key_sample_ids = layout.sample_ids.index_select(0, key_representatives).detach().cpu()
     key_stream_ids = layout.stream_ids.index_select(0, key_representatives).detach().cpu()
     key_block_ids = layout.block_ids.index_select(0, key_representatives).detach().cpu()
@@ -324,9 +401,13 @@ def visualize_dense_teacher_forcing_gen_mask(
     image = Image.new("RGB", (left_margin + mask_width + 15, top_margin + mask_height + 15), "white")
     image.paste(mask_image, (left_margin, top_margin))
     draw = ImageDraw.Draw(image)
-    draw.text((8, 8), "Teacher-forcing SDPA bool mask (True = visible)", fill="black")
-    draw.text((8, 25), "rows: GEN queries; columns: [UND | CLEAN | NOISY] KV groups", fill="black")
-    draw.text((8, 44), f"block_size={layout.block_size}, history_blocks={layout.history_blocks}", fill="black")
+    draw.text((8, 8), "Teacher-forcing attention visibility (True = visible)", fill="black")
+    draw.text((8, 25), "rows/columns: [UND blocks | CLEAN blocks | NOISY blocks]", fill="black")
+    draw.text(
+        (8, 44),
+        f"und_block={und_block_size}, vision_block={layout.block_size}, history={layout.history_blocks}",
+        fill="black",
+    )
     legend_x = 8
     for label, color in (
         ("UND", tuple(visible_colors[-1].tolist())),
@@ -340,18 +421,37 @@ def visualize_dense_teacher_forcing_gen_mask(
 
     stream_names = {-1: "U", 0: "C", 1: "N"}
 
-    def _label(sample_id: int, stream_id: int, block_id: int) -> str:
-        suffix = "" if stream_id == int(TeacherForcingStream.UND) else str(block_id)
+    und_block_ids: list[int] = []
+    next_und_block_id: dict[int, int] = {}
+    for sample_id, stream_id in zip(query_sample_ids.tolist(), query_stream_ids.tolist()):
+        if stream_id == int(TeacherForcingStream.UND):
+            und_block_ids.append(next_und_block_id.get(sample_id, 0))
+            next_und_block_id[sample_id] = und_block_ids[-1] + 1
+        else:
+            und_block_ids.append(-1)
+
+    def _label(sample_id: int, stream_id: int, block_id: int, und_block_id: int) -> str:
+        suffix = str(und_block_id) if stream_id == int(TeacherForcingStream.UND) else str(block_id)
         return f"s{sample_id}:{stream_names[stream_id]}{suffix}"
 
     # Draw all labels when cells are readable; otherwise retain sample boundary
     # labels and the color legend so large packed batches remain interpretable.
     label_stride = 1 if cell_size >= 8 else max(1, 48 // cell_size)
     for row in range(0, num_rows, label_stride):
-        label = _label(int(query_sample_ids[row]), int(query_stream_ids[row]), int(query_block_ids[row]))
+        label = _label(
+            int(query_sample_ids[row]),
+            int(query_stream_ids[row]),
+            int(query_block_ids[row]),
+            und_block_ids[row],
+        )
         draw.text((4, top_margin + row * cell_size), label, fill="black")
     for column in range(0, num_cols, label_stride):
-        label = _label(int(key_sample_ids[column]), int(key_stream_ids[column]), int(key_block_ids[column]))
+        label = _label(
+            int(key_sample_ids[column]),
+            int(key_stream_ids[column]),
+            int(key_block_ids[column]),
+            und_block_ids[column],
+        )
         label_image = Image.new("RGBA", (60, 12), (255, 255, 255, 0))
         ImageDraw.Draw(label_image).text((0, 0), label, fill="black")
         label_image = label_image.rotate(90, expand=True)

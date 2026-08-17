@@ -11,7 +11,7 @@ override list, ``PATH_REMAPS``, etc.) lives in ``toml_config_helper.py``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import tomllib
 from pydantic import BaseModel, ConfigDict, Field
@@ -361,11 +361,18 @@ class ModelConfig(BaseModel):
             "[UND|clean|noisy] teacher-forcing sequence."
         ),
     )
+    teacher_forcing_dense_mode: Literal["global", "per_sample"] = Field(
+        default="global",
+        description=(
+            "Scheme-B GEN attention execution: one global explicit mask, or one dense attention "
+            "call per packed sample to skip cross-sample QK regions."
+        ),
+    )
     teacher_forcing_visualize_sdpa_mask: bool = Field(
         default=False,
         description=(
-            "Save one rank-0 block-level visualization of the exact bool mask "
-            "passed to teacher-forcing SDPA."
+            "Save one rank-0 visualization of the complete teacher-forcing attention pattern: "
+            "256-token causal UND blocks plus block-level CLEAN/NOISY rows."
         ),
     )
     joint_attn_implementation: str = Field(
