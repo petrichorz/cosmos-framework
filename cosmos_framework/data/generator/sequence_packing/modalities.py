@@ -240,8 +240,8 @@ def pack_vision_tokens(
         packed_seq: PackedSequence instance to accumulate data into.
         input_vision_tokens: Vision latent tokens (C, T, H, W).
         condition_frame_indexes_vision: Indexes of conditioning frames.
-        input_timestep: Diffusion timestep. Either a float (teacher_forcing/none — all frames
-            share the same sigma) or a Tensor(T_max,) (diffusion_forcing — per-frame sigma;
+        input_timestep: Diffusion timestep. Either a float when all frames share the same sigma,
+            or a Tensor(T_max,) for teacher_forcing/diffusion_forcing (per-frame sigma;
             indexed as input_timestep[frame_idx] for each noisy frame).
         latent_patch_size: Patch size for latent patchification.
         vision_fps: Frames per second of the video. Used when enable_fps_modulation=True.

@@ -34,8 +34,8 @@ def compute_flow_matching_loss(
             Under rectified flow the target is ``v = eps - x0``.
         condition_mask: Mask where 1 = clean/conditioning, 0 = noisy/generation (list of tensors).
         timesteps: Diffusion timesteps for time weighting. Shape [B,1] for
-            base/teacher_forcing (all frames share one timestep) or [B,T_max]
-            for diffusion_forcing (per-frame independent timesteps). Time weights
+            base training (all frames share one timestep) or [B,T_max] for
+            teacher_forcing/diffusion_forcing (per-frame independent timesteps). Time weights
             are applied per-frame before averaging, so non-uniform weight functions
             are handled correctly.
         has_valid_tokens: Whether this modality has valid noisy tokens.
@@ -75,8 +75,8 @@ def compute_flow_matching_loss(
         else:
             per_instance_losses.append((sqerr_i * noisy_mask_i).mean())  # []
 
-        ts_i = timesteps[i, :T_i] if timesteps.dim() > 1 else timesteps[i]  # DF:[T_i]  TF:[1]
-        tw_i = rectified_flow.train_time_weight(ts_i, tensor_kwargs_fp32)  # DF:[T_i]  TF:[1]
+        ts_i = timesteps[i, :T_i] if timesteps.dim() > 1 else timesteps[i]  # TF/DF:[T_i]  base:[1]
+        tw_i = rectified_flow.train_time_weight(ts_i, tensor_kwargs_fp32)  # TF/DF:[T_i]  base:[1]
         tw_i = tw_i.reshape(-1, *([1] * (condition_mask[i].ndim - 1)))  # vision:[T_i,1,1]  action/sound:[T_i,1]
         if normalize_by_active:
             per_instance_weighted_losses.append((sqerr_i * tw_i * noisy_mask_i).sum() / active_count)

@@ -233,7 +233,7 @@ class OmniMoTModelConfig:
     # Requires joint_attn_implementation="three_way".
     video_temporal_causal: bool = False
     # "none":             standard joint denoising (shared σ, no clean context)
-    # "teacher_forcing":  all frames noised with shared σ; clean history via cross-attention
+    # "teacher_forcing":  per-frame independent σ; clean history via cross-attention
     # "diffusion_forcing": each latent frame gets independent σ ~ Uniform[0,1]
     # "teacher_forcing_dcm": replayed teacher-forcing discrete-time consistency distillation
     causal_training_strategy: str = attrs.field(
