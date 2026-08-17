@@ -1116,8 +1116,8 @@ class OmniMoTModel(ImaginaireModel):
                 Under rectified flow the target is ``v = eps - x0``.
             condition_mask: Mask where 1 = clean/conditioning, 0 = noisy/generation (list of tensors).
             timesteps: Diffusion timesteps for time weighting. Shape [B,1] for
-                base/teacher_forcing (all frames share one timestep) or [B,T_max]
-                for diffusion_forcing (per-frame independent timesteps). Time weights
+                base training (all frames share one timestep) or [B,T_max] for
+                teacher_forcing/diffusion_forcing (per-frame independent timesteps). Time weights
                 are applied per-frame before averaging, so non-uniform weight functions
                 are handled correctly.
             has_valid_tokens: Whether this modality has valid noisy tokens.
@@ -1331,16 +1331,16 @@ class OmniMoTModel(ImaginaireModel):
             batch_size: Batch size for sampling timesteps.
             is_image_batch: Whether this is an image batch (vs video).
             num_vision_latent_frames: Per-sample vision latent frame counts [T_0, ..., T_{B-1}].
-                         For causal_training_strategy="diffusion_forcing", resamples B*T_max independent
-                         times and returns tensors of shape [B,T_max]. For base/TF strategies, ignored —
-                         returns shape [B,1] (all frames share the same sigma).
+                         For causal_training_strategy="teacher_forcing" or "diffusion_forcing", resamples
+                         B*T_max independent times and returns tensors of shape [B,T_max]. For other
+                         strategies, ignored — returns shape [B,1] (all frames share the same sigma).
             resolutions: Resolution string(s) (e.g., "256", "512") for dict-based shift lookup.
                          Can be a single string (applied to all samples) or a list of strings (one per sample).
                          If None, defaults to self.config.resolution (can be used for other modalities).
             num_tokens: Number of tokens for each sample (before 2x2 merge). Needed for dynamic shift.
 
         Returns:
-            (timesteps, sigmas): Both [B,1] for TF/base, or [B,T_max] for diffusion_forcing.
+            (timesteps, sigmas): Both [B,T_max] for teacher_forcing/diffusion_forcing, or [B,1] otherwise.
         """
 
         rectified_flow = self.rectified_flow_image if is_image_batch else self.rectified_flow_video
@@ -1392,10 +1392,11 @@ class OmniMoTModel(ImaginaireModel):
                     shifts_list.append(shift_dict[resolution])
                 shifts = torch.tensor(shifts_list, dtype=torch.float32)
 
-        # Sample noise times: B×T_max for DF (one per video latent frame), B×1 for base/TF
-        if self.config.causal_training_strategy == "diffusion_forcing":
+        # Teacher forcing and diffusion forcing use one independent noise time per VAE latent frame.
+        # Other strategies use one shared noise time per sample.
+        if self.config.causal_training_strategy in {"teacher_forcing", "diffusion_forcing"}:
             # T_max = max(num_vision_latent_frames) across the batch; trailing entries for shorter
-            # sequences are unused (sliced away in _add_noise_to_input).
+            # sequences are unused (sliced away in _add_noise_to_input and the loss).
             T_max = max(num_vision_latent_frames)
             sigmas = (
                 rectified_flow.sample_train_time(
@@ -1507,9 +1508,9 @@ class OmniMoTModel(ImaginaireModel):
         Args:
             gen_data_clean (GenerationDataClean): The input dataclass containing the clean data *latents* (tokens).
             packed_sequence (PackedSequence): Packed sequence with condition masks attached to modalities.
-            sigmas (torch.Tensor): The noise levels. Shape [B,1] for base/teacher_forcing (all video
-                latent frames share the same sigma) or [B,T_max] for diffusion_forcing (per-latent-frame
-                independent sigma). T_max is the number of video latent frames (temporally compressed
+            sigmas (torch.Tensor): The noise levels. Shape [B,1] for base training (all video latent
+                frames share the same sigma) or [B,T_max] for teacher_forcing/diffusion_forcing
+                (per-latent-frame independent sigma). T_max is the number of video latent frames (temporally compressed
                 tokens), not RGB frames. In all modes, sigmas are multiplied by (1 - condition_mask)
                 so conditioning latent frames get sigma_eff=0 and only non-conditioned frames contribute
                 to the loss.
@@ -1562,8 +1563,8 @@ class OmniMoTModel(ImaginaireModel):
         # For image editing, x0_tokens_vision is a flat list with multiple items per sample
         # and sigmas has already been expanded to match (see _expand_per_sample_to_per_vision_item).
         # Conditioning latent frames are zeroed via (1 - condition_mask) in all modes (base/TF/DF).
-        # view(-1,1,1)[:T_latent]: for base/TF sigmas[i] is (1,), view gives (1,1,1) and the slice is a no-op;
-        # for DF sigmas[i] is (T_max,) — one sigma per video latent frame — view gives (T_max,1,1)
+        # view(-1,1,1)[:T_latent]: for base sigmas[i] is (1,), view gives (1,1,1) and the slice is a no-op;
+        # for TF/DF sigmas[i] is (T_max,) — one sigma per video latent frame — view gives (T_max,1,1)
         # and [:T_latent] slices to (T_latent,1,1) matching the per-item latent frame count.
         num_vision_items = len(packed_sequence.vision.condition_mask)
         noisy_mask_vision = [1.0 - cond_mask for cond_mask in packed_sequence.vision.condition_mask]

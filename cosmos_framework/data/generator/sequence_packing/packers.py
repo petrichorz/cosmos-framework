@@ -70,9 +70,9 @@ def pack_input_sequence(
             - x0_tokens_vision: Vision tensors for samples where has_vision=True
             - x0_tokens_action: Action tensors for samples where has_action=True
             - x0_tokens_sound: Sound tensors (list of [C, T]) for samples where has_sound=True
-        input_timesteps: Diffusion timesteps for each sample. Shape (B,) or (B, 1) for
-            teacher_forcing/none (all frames share the same sigma), or (B, T_max) for
-            diffusion_forcing (per-frame independent sigma). Entries are extracted per
+        input_timesteps: Diffusion timesteps for each sample. Shape (B,) or (B, 1) when
+            all frames share the same sigma, or (B, T_max) for teacher_forcing/diffusion_forcing
+            (per-frame independent sigma). Entries are extracted per
             sample as a float (numel==1) or Tensor(T_max,) for per-frame indexing.
         special_tokens: Dictionary containing special token IDs (eos_token_id, start_of_generation, end_of_generation)
         max_num_tokens: Maximum number of tokens in the packed sequence
@@ -177,7 +177,7 @@ def pack_input_sequence(
         seq_builder.begin_sample(initial_mrope_temporal_offset)
 
         _ts = input_timesteps[sample_idx]
-        input_timestep = _ts.item() if _ts.numel() == 1 else _ts  # float (TF) or Tensor(T_max,) (DF)
+        input_timestep = _ts.item() if _ts.numel() == 1 else _ts  # shared float or per-frame Tensor(T_max,)
 
         # Pack text tokens if has_text=True and not skipped
         if sequence_plan.has_text and not skip_text_tokens:
