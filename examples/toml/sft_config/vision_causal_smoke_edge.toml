@@ -23,6 +23,7 @@ teacher_forcing_block_size_max           = 4
 teacher_forcing_history_blocks_min       = 1
 teacher_forcing_history_blocks_max       = 32
 teacher_forcing_max_sequence_length       = 4096
+teacher_forcing_dense_mode                = "per_sample"
 
 [model.ema]
 enabled         = false

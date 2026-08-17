@@ -29,6 +29,7 @@ class TeacherForcingConfig(Protocol):
     teacher_forcing_history_blocks_min: int
     teacher_forcing_history_blocks_max: int
     teacher_forcing_max_sequence_length: int | None
+    teacher_forcing_dense_mode: str
     parallelism: _ParallelismConfig
 
 
@@ -68,6 +69,11 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
         )
     if config.teacher_forcing_max_sequence_length is None or config.teacher_forcing_max_sequence_length < 1:
         raise ValueError("teacher_forcing_max_sequence_length must be explicitly configured to a positive integer")
+    if config.teacher_forcing_dense_mode not in {"global", "per_sample"}:
+        raise ValueError(
+            "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
+            f"got {config.teacher_forcing_dense_mode!r}"
+        )
 
 
 def expand_teacher_forcing_training_sequence(

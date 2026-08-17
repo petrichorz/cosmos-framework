@@ -250,8 +250,12 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 
 ## 7. 为什么采用这种方案
 
-我们比较过两类方向：多次 attention 后用 LSE 合并，以及单次 Dense Mask attention。
-当前选择后者，原因不是它最终性能最好，而是它最适合作为正确性基线：
+当前已经实现的是 Scheme B：把 clean/noisy 放进同一次网络 forward，并用单张 Dense
+Mask 表达完整可见性。历史讨论中的 Scheme A 则是另一种**模型级执行图**：先计算 clean
+路径并保存逐层可微 KV，再让 noisy 路径读取对应层的历史 clean KV。它不能和“多次
+attention 后用 LSE 合并”的 attention 级实验混为一谈。
+
+当前选择 Scheme B，原因不是它最终性能最好，而是它最适合作为正确性基线：
 
 - Scheme B 的 clean/noisy 可见性可以在一张 mask 中完整表达；
 - 不依赖尚未验证的 NPU LSE 输出；
@@ -259,6 +263,290 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 - CPU 显式 attention 能提供独立数值参考；
 - 等语义稳定后，可以用更快的 Ascend/block-sparse 实现替换 backend，而不改变上层
   packing 和训练定义。
+
+### 7.1 历史 Scheme A 的核心思想
+
+Scheme A 不再构造一个包含所有合法和非法 QK 位置的全局矩阵。它在加噪前先运行 clean
+路径，并在每个 Transformer layer 保存 UND/clean 的 K/V。随后 noisy block `Ni` 只把
+真正允许读取的 token 作为该 block 的 KV：
+
+```text
+clean x0
+   |
+   +-- clean causal forward
+           |
+           +-- layer 0 UND/clean K/V
+           +-- layer 1 UND/clean K/V
+           +-- ...
+
+noisy block Ni at layer l
+   |
+   +-- Q = Ni
+   +-- KV = same-sample UND
+           + clean[max(0, i-K) .. i-1]
+           + current noisy block Ni
+   |
+   +-- attention output -> residual/MLP -> next noisy layer
+```
+
+clean block 自身的规则与 noisy 不同：
+
+```text
+clean block Ci KV = UND + clean[max(0, i-K) .. i]
+noisy block Ni KV = UND + clean[max(0, i-K) .. i-1] + Ni
+```
+
+因此 clean query 可以读取当前 clean block，noisy query 不能读取当前 clean 答案，但可以
+在当前 noisy block 内做 full attention。该规则必须和
+[`build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)
+保持一致；Dense Mask 应继续作为 Scheme A 的语义 oracle。
+
+现有基础模型已经预留了这类执行图的生命周期入口：
+
+- [`memory_init_training()`](../cosmos_framework/model/generator/omni_mot_model.py#L742)：训练 memory/cache 初始化和 segment 生命周期；
+- [`build_memory_state()`](../cosmos_framework/model/generator/omni_mot_model.py#L769)：构造 `ARMemoryState` 或 `KVCacheTrainMemoryState` 的注入点；
+- [`pre_noise_memory_hook()`](../cosmos_framework/model/generator/omni_mot_model.py#L790)：加噪前运行 clean forward 的注入点。
+
+这些 hook 证明基础代码允许表达 Scheme A，但当前 `OmniMoTCausalModel` 并未实现该
+memory/cache 数据流；下面内容都是候选优化设计，不是已经验证的行为。
+
+### 7.2 Scheme A 如何支持多样本 TND packing
+
+Scheme A 支持 dataloader 已经产出的多样本 TND packing，但不能简单地把“一条完整样本”
+作为一个 full-attention TND segment。因为同一条样本内，不同 block 的可见 KV 不同。
+
+进入 attention 前，需要把 TND 的逻辑 segment 进一步定义成一个
+`(sample_id, block_id, stream)` group。以两个样本、历史窗口 `K=2` 为例，noisy 阶段为：
+
+```text
+Q groups:
+[N_A0 | N_A1 | N_A2 | N_B0 | N_B1]
+
+KV groups:
+[UND_A + N_A0
+ | UND_A + C_A0 + N_A1
+ | UND_A + C_A0 + C_A1 + N_A2
+ | UND_B + N_B0
+ | UND_B + C_B0 + N_B1]
+```
+
+然后构造各 group 的累计 Q/KV 边界：
+
+```text
+cu_q  = cumulative([len(N_A0), len(N_A1), len(N_A2), len(N_B0), len(N_B1)])
+cu_kv = cumulative([len(KV_A0), len(KV_A1), len(KV_A2), len(KV_B0), len(KV_B1)])
+```
+
+第 `j` 个 Q segment 只对应第 `j` 个 KV segment。因此跨样本隔离、stream 规则和历史
+窗口由“哪些 token 被 gather 进 group”决定，而不是依赖全局 Dense Mask。所有样本、所有
+block 仍可拼成一次 TND fused-attention 调用，不要求 Python 按样本或 block 循环。
+
+当前 `TeacherForcingLayout` 已保存 `sample_ids`、`stream_ids`、`block_ids` 和输出索引，
+[`build_teacher_forcing_layout()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L103)
+逐样本构造了这些信息；`PackedSequence` 同时保留 `sample_lens` 和 `split_lens`。现有元数据
+足以生成 group 和 scatter 索引，无需取消多样本 packing。
+
+需要注意：普通 TND `actual_seq_lengths` 只能描述连续 segment，不能让多个 Q group
+零拷贝共享同一段 UND/clean KV。因此同一份 UND 和重叠 clean history 通常需要 gather
+成多份临时 KV。重复的是 KV 数据和访存；每个合法 QK pair 本身并没有因此多计算一次。
+
+### 7.3 Scheme A 与 Scheme B 的计算量
+
+设：
+
+- `U`：UND token 数；
+- `V`：单条样本原始视觉 token 数，clean/noisy 各有 `V`；
+- `P`：一个 causal block 的视觉 token 数；
+- `K`：历史窗口包含的最大 clean block 数。
+
+普通 Dense backend 不会因为 boolean mask 为 false 就跳过对应矩阵乘法，因此 Scheme B
+的 attention 主计算量近似为：
+
+```text
+C_B ~= 2V * (U + 2V)
+```
+
+Scheme A 中，每个 query 只读取 UND、有限 clean history 和当前 block，近似为：
+
+```text
+C_A ~= 2V * [U + (K + 1)P]
+```
+
+二者比例近似：
+
+```text
+C_A / C_B ~= [U + (K + 1)P] / (U + 2V)
+```
+
+当 `K` 和 `P` 固定、视频长度持续增长时，Scheme B 的 attention 随 `V` 二次增长，
+Scheme A 更接近随 `V` 线性增长。对于多样本 packing，Scheme A 还不会形成不同样本之间
+的 QK pair。
+
+这里减少的是 `QK^T`、softmax 和 `P*V` 部分。只要实现没有重复执行 clean prefix，QKV
+projection、output projection、Norm 和 MLP 的 token 数仍可以接近 Scheme B 的
+`U+2V`。以下朴素实现必须避免：
+
+```text
+for each noisy block i:
+    重新运行 clean[0..i] 的完整模型 forward
+```
+
+它会反复计算 clean prefix，并可能把原本线性的 token 计算变成随 block 数二次增长。
+正确实现应让 clean token 每层只计算一次，随后由所有合法 noisy group 复用其 K/V。
+
+### 7.4 Scheme A 是否一定更快
+
+不一定。它的 attention FLOPs 在长序列、有限历史窗口下更小，但新增了：
+
+- UND 和重叠 clean history 的 KV gather；
+- TND 临时 KV buffer 写入；
+- attention 输出 scatter；
+- clean/noisy 两阶段依赖和同步；
+- group 数超出算子上限后的多次调度；
+- 为节省训练显存而启用 checkpoint 时的反向重算。
+
+因此总时间应理解为：
+
+```text
+T_A = 有效 attention 计算
+    + KV gather/scatter
+    + kernel/阶段调度
+    + 可选 checkpoint 重算
+```
+
+长视频、block 较大且 `K << num_blocks` 时，减少的 Dense QK 计算更可能覆盖这些开销；
+短视频、block 很小、历史接近全长时，Scheme A 可能没有净加速。不能只用理论 FLOPs
+决定是否切换，必须同时测量 step time、有效 vision tokens/s、NPU kernel 时间、HBM
+带宽和 peak memory。
+
+### 7.5 Scheme A 与 Dense Mask 的显存关系
+
+Scheme B 的单张 bool mask 约占：
+
+```text
+M_B_mask ~= 2V * (U + 2V) bytes
+```
+
+这张 mask 很大，但可以跨 Transformer layers 复用。Scheme A 不需要这张全局 mask，
+其主要新增显存是重复 gather 后的 K/V。所有 noisy groups 的 KV token 副本数近似为：
+
+```text
+E_KV ~= (V/P) * U + V * (K + 1)
+```
+
+若每个 K 或 V token 的总 head 宽度为 `d_kv`，BF16 下单阶段 gather buffer 近似为：
+
+```text
+M_A_gather ~= E_KV * d_kv * 2（K 和 V 两份）* 2 bytes
+```
+
+所以 Scheme A 的 buffer 对 `V` 近似线性，但常数可能很大。尤其在训练中，attention
+backward 通常需要 K/V；若所有层的展开 buffer 都被 autograd 保留，朴素 Scheme A 的
+峰值显存可能高于只保存一张 Dense Mask 的 Scheme B。
+
+仅仅把 group 分批调用并不能保证节省训练显存，因为各 chunk 的 K/V 仍可能被 backward
+保存。要让 Scheme A 稳定省显存，通常还需要：
+
+- 按显存预算对 TND groups 做 chunking；
+- 对 gather + attention 使用 activation checkpointing，在 backward 重建临时 KV；
+- clean/noisy 阶段不同时持有全部展开 buffer；
+- 避免保存所有 layers 的完整展开 KV 副本。
+
+因此不能把“Scheme A 天然更省显存”作为设计前提。它的上限更容易控制，但朴素实现反而
+可能更占显存。
+
+### 7.6 精度和反向传播风险
+
+Scheme A 数学上可以与 Scheme B 等价，但必须把它视为训练计算图重构，而不是普通推理
+KV cache。关键约束如下：
+
+1. **clean KV 不得 detach。** 当前 noisy loss 会经过 clean K/V 回传到 clean hidden
+   states 和模型参数。若 clean forward 使用 `torch.no_grad()` 或 cache 被 `detach()`，
+   训练目标会改变。
+2. **重复 gather 的梯度必须 scatter-add。** 同一个 clean token 被多个 noisy groups
+   使用时，所有使用者的梯度必须累加回原 token。PyTorch 可微索引通常能表达该语义，
+   自定义 NPU copy/gather 则需要单独验证 autograd。
+3. **逐层 cache 必须对齐。** noisy layer `l` 必须读取 clean layer `l` 投影得到的 K/V，
+   不能只保存 clean 最后一层 hidden state 给所有 noisy layers 使用。
+4. **group 边界必须精确复现 Dense oracle。** 特别检查 noisy 不读取当前 clean、当前
+   noisy block 内 full attention、尾部 partial block、mixed-length packing 和 history
+   左边界。
+5. **checkpoint 重算必须确定。** block size、history、group 索引和 RNG 状态在 backward
+   重算时必须与原 forward 一致，不能重新采样布局。
+6. **不要求 bitwise 一致。** Dense masked SDPA 和 TND fused attention 的 tiling、
+   softmax reduction 与 BF16 累加顺序不同，允许合理浮点误差，但 forward 和 backward
+   都必须对照验证。
+
+最大的精度风险是 clean cache 被无意 detach；最大的实现风险是为了性能使用自定义
+gather/buffer 后破坏 autograd。两者都会出现“forward 看起来正确，但参数梯度错误”的情况。
+
+### 7.7 推荐的实现与验证顺序
+
+Scheme A 不应直接从 Dense Mask 一步替换为 Ascend 高性能版本。建议分阶段实现：
+
+1. 使用小序列、FP32 和普通 SDPA，实现可微的 exact-KV group reference；
+2. 用当前 Dense Mask oracle 比较 output、Q/K/V gradient 和参数 gradient；
+3. 覆盖多个 packed samples、mixed lengths、首/尾 block、`K=1/32` 和 partial block；
+4. 换成 BF16，确定可接受的 forward/backward 误差阈值；
+5. 再接 Ascend TND fused attention，并重复全部梯度比较；
+6. 最后加入 group chunking、checkpoint 和 compile，逐项测量正确性与性能。
+
+在通过上述验证前，Scheme B 仍是训练语义的权威基线，不应删除 Dense Mask oracle。
+
+### 7.8 “多次 attention + LSE 合并”是另一条路线
+
+曾经还讨论过把一个 query 的合法 KV 拆成多个集合，例如 UND、clean history、current
+noisy，分别调用 attention 后用 log-sum-exp 合并，试图恢复一次统一 softmax。这是
+attention 级分解，不等同于上述 clean pre-forward + 可微 KV memory 的 Scheme A。
+
+仅做 LSE 拆分只会取消统一大 mask；如果各分支仍计算全局 dense 矩阵，并不会自动减少
+内部空洞。它还依赖后端提供可用于精确合并且反向正确的 LSE。当前没有完成该能力的 NPU
+forward/backward 验证，因此不作为近期实现基础。
+
+### 7.9 Scheme B 的逐 packed sample Dense 模式
+
+在不改变 Scheme B 训练语义的前提下，可以利用不同 packed samples 原本就完全隔离这一
+性质，把一张全局 block-diagonal Dense Mask 拆成每条样本一张局部 mask：
+
+```text
+global:
+Q=[GEN_A|GEN_B] x KV=[ALL_A|ALL_B] -> one masked SDPA
+
+per_sample:
+GEN_A x ALL_A -> masked SDPA A
+GEN_B x ALL_B -> masked SDPA B
+outputs = concat([A, B])
+```
+
+该模式由以下配置切换：
+
+```toml
+teacher_forcing_dense_mode = "global"      # 正确性基线，默认值
+teacher_forcing_dense_mode = "per_sample"  # 跳过跨样本 QK 区域
+```
+
+`per_sample` 只循环 GEN attention；Norm、QKV projection、UND causal attention、output
+projection 和 MLP 仍对完整 packing 一次执行。它不会引入 Scheme A 的 clean pre-forward
+或 KV cache，也不会消除单条样本内部由 clean/noisy 与历史窗口形成的空洞。
+
+设 packing 中各样本分别有 `Ui` 个 UND token 和 `Vi` 个原始视觉 token，attention 主
+计算量从：
+
+```text
+global:     2 * sum(Vi) * [sum(Ui) + 2*sum(Vi)]
+per_sample: sum(2*Vi * [Ui + 2*Vi])
+```
+
+下降部分正是跨样本、最终被 `same_sample` mask 排除的 QK 区域。代价是每层 GEN
+attention 的 kernel 调用数从 1 增加为 packed sample 数，可能降低单 kernel MFU。因此
+性能判断应以 step time 和有效 tokens/s 为主，而不是只观察硬件 MFU。
+
+实现保留全局 Dense Mask 构造函数作为 oracle。局部 mask 必须逐样本直接构造，不能先
+分配全局 mask 再切片，否则无法获得 mask 峰值显存收益。对应实现位置：
+
+- [`build_per_sample_teacher_forcing_gen_masks()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py)；
+- [`teacher_forcing_per_sample_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py)；
+- [`teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py)。
 
 ## 8. 已完成的代码模块
 
@@ -268,7 +556,7 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 4. PackedSequence 双流扩展：支持不同视频长度的 packed batch。
 5. clean/noisy 相同 RoPE position IDs。
 6. clean timestep=0、noisy timestep=t。
-7. 单 softmax Dense SDPA，支持显式 GQA KV head 扩展。
+7. global 模式使用一次 Dense SDPA；per-sample 模式每条样本独立 softmax；均支持显式 GQA KV head 扩展。
 8. 只恢复 noisy output，复用原 decoder/loss。
 9. 独立 `mot_causal_ddp` / `mot_causal_fsdp` 模型组和 TOML 字段。
 10. 小模型 CPU forward/backward 与梯度闭环测试。

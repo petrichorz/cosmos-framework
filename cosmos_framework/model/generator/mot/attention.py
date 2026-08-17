@@ -6,6 +6,7 @@ import torch
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     TeacherForcingLayout,
     build_dense_teacher_forcing_gen_mask,
+    build_per_sample_teacher_forcing_gen_masks,
 )
 from cosmos_framework.model.attention import (
     attention,
@@ -13,7 +14,10 @@ from cosmos_framework.model.attention import (
     multi_dimensional_attention_varlen,
 )
 from cosmos_framework.model.attention.masks import CausalType
-from cosmos_framework.model.generator.mot.teacher_forcing_attention import teacher_forcing_dense_attention
+from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
+    teacher_forcing_dense_attention,
+    teacher_forcing_per_sample_dense_attention,
+)
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
 
@@ -71,13 +75,15 @@ class SplitInfo:
 
 
 class TeacherForcingAttentionInfo(SplitInfo):
-    """Split metadata plus the authoritative unified GEN dense mask."""
+    """Split metadata plus global or per-sample Scheme-B GEN masks."""
 
     def __init__(
         self,
         *,
         layout: TeacherForcingLayout,
-        dense_gen_mask: torch.BoolTensor,
+        dense_mode: str,
+        dense_gen_mask: torch.BoolTensor | None,
+        sample_gen_masks: tuple[torch.BoolTensor, ...],
         split_lens: list[int],
         attn_modes: list[str],
         sample_lens: list[int],
@@ -92,7 +98,9 @@ class TeacherForcingAttentionInfo(SplitInfo):
             is_three_way=is_three_way,
         )
         self.layout = layout
+        self.dense_mode = dense_mode
         self.dense_gen_mask = dense_gen_mask
+        self.sample_gen_masks = sample_gen_masks
 
 
 AttentionMaskType = SplitInfo
@@ -250,7 +258,7 @@ def teacher_forcing_attention(
     attention_meta: TeacherForcingAttentionInfo,
     packed_key_states_normalized: SequencePack | None = None,
 ) -> SequencePack:
-    """Run UND causal attention and one unified masked GEN attention."""
+    """Run UND causal attention and global or per-sample masked GEN attention."""
 
     causal_q, causal_q_offsets = get_causal_seq(packed_query_states)
     causal_k, causal_k_offsets = get_causal_seq(packed_key_states)
@@ -270,14 +278,29 @@ def teacher_forcing_attention(
     causal_out = causal_res.squeeze(0).flatten(-2, -1)  # type: ignore[union-attr]
 
     full_q, _ = get_full_only_seq(packed_query_states)
-    num_gen_queries = attention_meta.dense_gen_mask.shape[0]
+    gen_sample_lens = tuple(attention_meta.layout.split_lens[1::2])
+    num_gen_queries = sum(gen_sample_lens)
     key_pack_for_gen = packed_key_states_normalized if packed_key_states_normalized is not None else packed_key_states
-    full_res = teacher_forcing_dense_attention(
-        full_q[:num_gen_queries],
-        get_all_seq(key_pack_for_gen),
-        get_all_seq(packed_value_states),
-        attention_meta.dense_gen_mask,
-    )
+    if attention_meta.dense_mode == "global":
+        if attention_meta.dense_gen_mask is None:
+            raise ValueError("global teacher-forcing attention requires dense_gen_mask")
+        full_res = teacher_forcing_dense_attention(
+            full_q[:num_gen_queries],
+            get_all_seq(key_pack_for_gen),
+            get_all_seq(packed_value_states),
+            attention_meta.dense_gen_mask,
+        )
+    elif attention_meta.dense_mode == "per_sample":
+        full_res = teacher_forcing_per_sample_dense_attention(
+            full_q[:num_gen_queries],
+            get_all_seq(key_pack_for_gen),
+            get_all_seq(packed_value_states),
+            attention_meta.sample_gen_masks,
+            sample_lens=attention_meta.layout.sample_lens,
+            gen_sample_lens=gen_sample_lens,
+        )
+    else:
+        raise ValueError(f"Unsupported teacher-forcing dense mode: {attention_meta.dense_mode!r}")
     full_out = full_q.new_zeros((full_q.shape[0], full_res.shape[1] * full_res.shape[2]))
     full_out[:num_gen_queries] = full_res.flatten(-2, -1)
     return from_mode_splits(causal_out, full_out, packed_query_states)
@@ -658,6 +681,7 @@ def build_packed_sequence(
     pad_for_cuda_graphs: bool = False,
     teacher_forcing_layout: TeacherForcingLayout | None = None,
     teacher_forcing_max_sequence_length: int | None = None,
+    teacher_forcing_dense_mode: str = "global",
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
     Build the model input pack and attention meta for joint attention.
@@ -680,13 +704,31 @@ def build_packed_sequence(
             or tuple(attn_modes) != teacher_forcing_layout.attn_modes
         ):
             raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
-        dense_gen_mask = build_dense_teacher_forcing_gen_mask(
-            teacher_forcing_layout,
-            max_sequence_length=teacher_forcing_max_sequence_length,
-        ).to(device=device)
+        if teacher_forcing_dense_mode == "global":
+            dense_gen_mask = build_dense_teacher_forcing_gen_mask(
+                teacher_forcing_layout,
+                max_sequence_length=teacher_forcing_max_sequence_length,
+            ).to(device=device)
+            sample_gen_masks: tuple[torch.BoolTensor, ...] = ()
+        elif teacher_forcing_dense_mode == "per_sample":
+            dense_gen_mask = None
+            sample_gen_masks = tuple(
+                mask.to(device=device)
+                for mask in build_per_sample_teacher_forcing_gen_masks(
+                    teacher_forcing_layout,
+                    max_sequence_length=teacher_forcing_max_sequence_length,
+                )
+            )
+        else:
+            raise ValueError(
+                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
+                f"got {teacher_forcing_dense_mode!r}"
+            )
         attention_meta = TeacherForcingAttentionInfo(
             layout=teacher_forcing_layout,
+            dense_mode=teacher_forcing_dense_mode,
             dense_gen_mask=dense_gen_mask,
+            sample_gen_masks=sample_gen_masks,
             split_lens=split_lens,
             attn_modes=attn_modes,
             sample_lens=sample_lens,

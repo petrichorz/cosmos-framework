@@ -24,8 +24,10 @@ from cosmos_framework.model.attention.checks import (
 from cosmos_framework.model.attention.cudnn import cudnn_attention
 from cosmos_framework.model.attention.flash2 import flash2_attention
 from cosmos_framework.model.attention.flash3 import flash3_attention
+from cosmos_framework.model.attention.masked_sdpa import masked_sdpa_attention
 from cosmos_framework.model.attention.masks import CausalType
 from cosmos_framework.model.attention.natten import natten_attention, natten_multi_dim_attention
+from cosmos_framework.model.attention.npu_fusion_attention import npu_fusion_attention
 from cosmos_framework.model.attention.sdpa import sdpa_attention
 from cosmos_framework.model.attention.utils.environment import filter_attention_merge_backends
 from cosmos_framework.model.attention.utils.safe_ops import log
@@ -36,6 +38,8 @@ BACKEND_MAP = {
     "natten": natten_attention,
     "flash2": flash2_attention,
     "flash3": flash3_attention,
+    "masked_sdpa": masked_sdpa_attention,
+    "npu_fusion_attention": npu_fusion_attention,
     "sdpa": sdpa_attention,
 }
 
@@ -217,6 +221,7 @@ def attention(
         causal_type=causal_type,
         is_varlen=is_varlen,
         deterministic=deterministic,
+        return_lse=return_lse,
         backend=backend,
         raise_error=False,
     )
