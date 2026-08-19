@@ -10,6 +10,7 @@ Frontend APIs
 
 import torch
 
+from cosmos_framework.model.attention.block_attention.checks import block_attention_check
 from cosmos_framework.model.attention.cudnn.checks import cudnn_attention_check
 from cosmos_framework.model.attention.flash2.checks import flash2_attention_check
 from cosmos_framework.model.attention.flash3.checks import flash3_attention_check
@@ -27,6 +28,7 @@ from cosmos_framework.model.attention.utils.safe_ops import log
 from cosmos_framework.model.attention.utils.safe_ops.functools import lru_cache
 
 BACKEND_CHECK_MAP = {
+    "block_attention": block_attention_check,
     "cudnn": cudnn_attention_check,
     "natten": natten_attention_check,
     "flash2": flash2_attention_check,
@@ -38,7 +40,10 @@ BACKEND_CHECK_MAP = {
 
 # LSE from npu_fusion_attention's internal statistics has not yet been validated
 # for NATTEN's merge-attention autograd contract. Keep those calls on SDPA.
-BACKEND_SUPPORTS_LSE = {"npu_fusion_attention": False}
+BACKEND_SUPPORTS_LSE = {
+    "block_attention": False,
+    "npu_fusion_attention": False,
+}
 
 BACKEND_MULTI_DIM_CHECK_MAP = {
     "natten": natten_multi_dim_attention_check,

@@ -12,6 +12,7 @@ import torch
 from torch import Tensor
 
 from cosmos_framework.model.attention.backends import choose_backend, choose_multi_dim_backend
+from cosmos_framework.model.attention.block_attention import block_attention
 from cosmos_framework.model.attention.checks import (
     attention_param_checks,
     attention_tensor_checks,
@@ -34,6 +35,7 @@ from cosmos_framework.model.attention.utils.safe_ops import log
 
 # Map backend names to their frontend attention API
 BACKEND_MAP = {
+    "block_attention": block_attention,
     "cudnn": cudnn_attention,
     "natten": natten_attention,
     "flash2": flash2_attention,
