@@ -9,8 +9,9 @@ import torch
 
 from cosmos_framework.data.generator.sequence_packing import (
     PackedSequence,
+    TeacherForcingGeometry,
     expand_packed_sequence_for_teacher_forcing,
-    sample_teacher_forcing_parameters,
+    sample_teacher_forcing_geometry,
 )
 
 
@@ -77,9 +78,27 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
         raise ValueError("teacher_forcing_max_sequence_length must be explicitly configured to a positive integer")
     if config.teacher_forcing_dense_mode not in {"global", "per_sample"}:
         raise ValueError(
-            "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-            f"got {config.teacher_forcing_dense_mode!r}"
+            f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {config.teacher_forcing_dense_mode!r}"
         )
+
+
+def prepare_teacher_forcing_geometry(
+    *,
+    num_samples: int,
+    config: TeacherForcingConfig,
+    generator: torch.Generator | None = None,
+) -> TeacherForcingGeometry:
+    """Independently sample one block/history pair per packed sample."""
+
+    validate_teacher_forcing_config(config)
+    return sample_teacher_forcing_geometry(
+        num_samples=num_samples,
+        block_size_min=config.teacher_forcing_block_size_min,
+        block_size_max=config.teacher_forcing_block_size_max,
+        history_blocks_min=config.teacher_forcing_history_blocks_min,
+        history_blocks_max=config.teacher_forcing_history_blocks_max,
+        generator=generator,
+    )
 
 
 def expand_teacher_forcing_training_sequence(
@@ -87,24 +106,21 @@ def expand_teacher_forcing_training_sequence(
     *,
     clean_vision_tokens: list[torch.Tensor],
     config: TeacherForcingConfig,
-    generator: torch.Generator | None = None,
+    geometry: TeacherForcingGeometry | None = None,
 ) -> PackedSequence:
-    """Sample batch-shared S/K and expand an already-noised video sequence."""
+    """Expand an already-noised video sequence with pre-sampled geometry."""
 
     validate_teacher_forcing_config(config)
     if packed_sequence.is_image_batch:
         raise ValueError("teacher-forcing causal training currently requires a video batch")
+    if geometry is None:
+        geometry = prepare_teacher_forcing_geometry(
+            num_samples=len(clean_vision_tokens),
+            config=config,
+        )
 
-    block_size, history_blocks = sample_teacher_forcing_parameters(
-        block_size_min=config.teacher_forcing_block_size_min,
-        block_size_max=config.teacher_forcing_block_size_max,
-        history_blocks_min=config.teacher_forcing_history_blocks_min,
-        history_blocks_max=config.teacher_forcing_history_blocks_max,
-        generator=generator,
-    )
     return expand_packed_sequence_for_teacher_forcing(
         packed_sequence,
         clean_vision_tokens=clean_vision_tokens,
-        block_size=block_size,
-        history_blocks=history_blocks,
+        geometry=geometry,
     )

@@ -10,6 +10,7 @@ from cosmos_framework.data.generator.sequence_packing.modality import ModalityDa
 from cosmos_framework.data.generator.sequence_packing.runtime import from_all_seq, get_all_seq
 from cosmos_framework.data.generator.sequence_packing.sequence import PackedSequence
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    TeacherForcingGeometry,
     expand_packed_sequence_for_teacher_forcing,
 )
 from cosmos_framework.model.generator.mot.attention import dispatch_attention
@@ -125,8 +126,7 @@ def _make_sequence() -> tuple[PackedSequence, torch.Tensor, torch.Tensor]:
     expanded = expand_packed_sequence_for_teacher_forcing(
         source,
         clean_vision_tokens=[clean],
-        block_size=1,
-        history_blocks=2,
+        geometry=TeacherForcingGeometry(block_sizes=(1,), history_blocks=(2,)),
     )
     return expanded, clean, noisy
 

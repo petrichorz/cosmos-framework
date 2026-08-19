@@ -20,6 +20,7 @@ from cosmos_framework.data.generator.sequence_packing.runtime import (
     get_gen_seq,
 )
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    TeacherForcingGeometry,
     build_dense_teacher_forcing_gen_mask,
     build_per_sample_teacher_forcing_gen_masks,
     build_teacher_forcing_layout,
@@ -157,12 +158,18 @@ def test_teacher_forcing_dense_attention_rejects_invalid_inputs(mutate, error: s
         teacher_forcing_dense_attention(query, key, value, allowed_mask)
 
 
+def _geometry(block_size: int, history_blocks: int, num_samples: int = 1) -> TeacherForcingGeometry:
+    return TeacherForcingGeometry(
+        block_sizes=(block_size,) * num_samples,
+        history_blocks=(history_blocks,) * num_samples,
+    )
+
+
 def _make_teacher_forcing_packs(dense_mode: str = "global"):
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
         vision_token_shapes=[(2, 1, 1), (1, 1, 2)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1, num_samples=2),
     )
     generator = torch.Generator().manual_seed(456)
     query = torch.randn(sum(layout.sample_lens), 4, 3, generator=generator)
@@ -234,8 +241,7 @@ def test_per_sample_masks_match_global_mask_diagonal_blocks():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
         vision_token_shapes=[(3, 1, 1), (2, 1, 2)],
-        block_size=2,
-        history_blocks=1,
+        geometry=_geometry(2, 1, num_samples=2),
     )
     global_mask = build_dense_teacher_forcing_gen_mask(
         layout, max_sequence_length=sum(layout.sample_lens)
@@ -264,8 +270,7 @@ def test_per_sample_dense_attention_matches_global_output_and_gradients():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
         vision_token_shapes=[(3, 1, 1), (2, 1, 2)],
-        block_size=2,
-        history_blocks=1,
+        geometry=_geometry(2, 1, num_samples=2),
     )
     generator = torch.Generator().manual_seed(789)
     num_queries = layout.gen_query_indexes.numel()
@@ -310,8 +315,7 @@ def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
     layout = build_teacher_forcing_layout(
         und_token_counts=[257, 1],
         vision_token_shapes=[(3, 1, 1), (2, 1, 1)],
-        block_size=1,
-        history_blocks=2,
+        geometry=_geometry(1, 2, num_samples=2),
     )
     dense_mask = build_dense_teacher_forcing_gen_mask(
         layout,
@@ -406,8 +410,7 @@ def test_build_packed_sequence_applies_teacher_forcing_sequence_length_guard():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(2, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1),
     )
     packed_sequence = torch.randn(sum(layout.sample_lens), 2, 4)
 
@@ -432,8 +435,7 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(2, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1),
     )
     packed_sequence = torch.randn(sum(layout.sample_lens), 2, 4)
 

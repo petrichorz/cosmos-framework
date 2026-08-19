@@ -10,6 +10,7 @@ from cosmos_framework.data.generator.sequence_packing.modality import ModalityDa
 from cosmos_framework.data.generator.sequence_packing.sequence import PackedSequence
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     TeacherForcingData,
+    TeacherForcingGeometry,
     TeacherForcingLayout,
     TeacherForcingStream,
     build_dense_teacher_forcing_gen_mask,
@@ -18,6 +19,13 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     sample_teacher_forcing_parameters,
     select_teacher_forcing_noisy_outputs,
 )
+
+
+def _geometry(block_size: int, history_blocks: int, num_samples: int = 1) -> TeacherForcingGeometry:
+    return TeacherForcingGeometry(
+        block_sizes=(block_size,) * num_samples,
+        history_blocks=(history_blocks,) * num_samples,
+    )
 
 
 def test_teacher_forcing_stream_values_are_stable():
@@ -29,8 +37,7 @@ def test_teacher_forcing_stream_values_are_stable():
 def test_teacher_forcing_layout_is_frozen():
     empty = torch.empty(0, dtype=torch.long)
     layout = TeacherForcingLayout(
-        block_size=1,
-        history_blocks=1,
+        geometry=TeacherForcingGeometry(block_sizes=(1,), history_blocks=(1,)),
         original_sample_lens=(),
         sample_lens=(),
         split_lens=(),
@@ -45,7 +52,21 @@ def test_teacher_forcing_layout_is_frozen():
     )
 
     with pytest.raises(FrozenInstanceError):
-        layout.block_size = 2
+        layout.geometry = TeacherForcingGeometry(block_sizes=(2,), history_blocks=(1,))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"block_sizes": (), "history_blocks": ()}, "empty"),
+        ({"block_sizes": (1, 2), "history_blocks": (1,)}, "one block_size"),
+        ({"block_sizes": (0,), "history_blocks": (1,)}, "block_size"),
+        ({"block_sizes": (1,), "history_blocks": (0,)}, "history_blocks"),
+    ],
+)
+def test_teacher_forcing_geometry_rejects_invalid_values(kwargs: dict[str, tuple[int, ...]], error: str):
+    with pytest.raises(ValueError, match=error):
+        TeacherForcingGeometry(**kwargs)
 
 
 def test_sample_teacher_forcing_parameters_is_reproducible():
@@ -81,8 +102,7 @@ def test_build_teacher_forcing_layout_maps_both_streams_to_the_original_tokens()
     layout = build_teacher_forcing_layout(
         und_token_counts=[2],
         vision_token_shapes=[(5, 1, 1)],
-        block_size=2,
-        history_blocks=1,
+        geometry=_geometry(2, 1),
     )
 
     assert layout.original_sample_lens == (7,)
@@ -102,8 +122,7 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
         vision_token_shapes=[(3, 1, 2), (2, 2, 1)],
-        block_size=2,
-        history_blocks=3,
+        geometry=_geometry(2, 3, num_samples=2),
     )
 
     assert layout.original_sample_lens == (7, 6)
@@ -170,8 +189,7 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
             {
                 "und_token_counts": [1],
                 "vision_token_shapes": [(2, 1, 1), (2, 1, 1)],
-                "block_size": 1,
-                "history_blocks": 1,
+                "geometry": _geometry(1, 1),
             },
             "same number",
         ),
@@ -179,8 +197,7 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
             {
                 "und_token_counts": [],
                 "vision_token_shapes": [],
-                "block_size": 1,
-                "history_blocks": 1,
+                "geometry": _geometry(1, 1),
             },
             "empty",
         ),
@@ -188,8 +205,7 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
             {
                 "und_token_counts": [0],
                 "vision_token_shapes": [(2, 1, 1)],
-                "block_size": 1,
-                "history_blocks": 1,
+                "geometry": _geometry(1, 1),
             },
             "und_token_counts",
         ),
@@ -197,8 +213,7 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
             {
                 "und_token_counts": [1],
                 "vision_token_shapes": [(2, 0, 1)],
-                "block_size": 1,
-                "history_blocks": 1,
+                "geometry": _geometry(1, 1),
             },
             "vision_token_shapes",
         ),
@@ -206,19 +221,9 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
             {
                 "und_token_counts": [1],
                 "vision_token_shapes": [(2, 1, 1)],
-                "block_size": 0,
-                "history_blocks": 1,
+                "geometry": _geometry(1, 1, num_samples=2),
             },
-            "block_size",
-        ),
-        (
-            {
-                "und_token_counts": [1],
-                "vision_token_shapes": [(2, 1, 1)],
-                "block_size": 1,
-                "history_blocks": 0,
-            },
-            "history_blocks",
+            "one entry",
         ),
     ],
 )
@@ -234,8 +239,7 @@ def test_dense_mask_matches_s1_k1_block_causal_matrix():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(3, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1),
     )
 
     mask = build_dense_teacher_forcing_gen_mask(
@@ -263,8 +267,7 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(5, 1, 2)],
-        block_size=2,
-        history_blocks=1,
+        geometry=_geometry(2, 1),
     )
 
     mask = build_dense_teacher_forcing_gen_mask(
@@ -283,8 +286,7 @@ def test_dense_mask_matches_lingbot_full_video_boundaries(block_size: int, histo
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(num_frames, 1, 1)],
-        block_size=block_size,
-        history_blocks=history_blocks,
+        geometry=_geometry(block_size, history_blocks),
     )
     mask = build_dense_teacher_forcing_gen_mask(
         layout,
@@ -316,8 +318,7 @@ def test_dense_mask_isolates_packed_samples():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1, 2],
         vision_token_shapes=[(2, 1, 1), (2, 1, 1)],
-        block_size=1,
-        history_blocks=2,
+        geometry=_geometry(1, 2, num_samples=2),
     )
 
     mask = build_dense_teacher_forcing_gen_mask(
@@ -333,8 +334,7 @@ def test_dense_mask_rejects_sequences_over_the_configured_limit():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(3, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1),
     )
     sequence_length = layout.source_sequence_indexes.numel()
 
@@ -348,8 +348,7 @@ def test_dense_mask_rejects_und_queries_in_gen_query_indexes():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(1, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1),
     )
     corrupted = replace(layout, gen_query_indexes=torch.tensor([0], dtype=torch.long))
 
@@ -416,8 +415,7 @@ def test_expand_packed_sequence_preserves_noisy_contract_and_duplicates_rope():
     expanded = expand_packed_sequence_for_teacher_forcing(
         packed,
         clean_vision_tokens=clean_tokens,
-        block_size=2,
-        history_blocks=3,
+        geometry=_geometry(2, 3, num_samples=2),
     )
 
     assert expanded is not packed
@@ -483,8 +481,7 @@ def test_expand_packed_sequence_rejects_unsupported_layouts(mutate, error: str):
         expand_packed_sequence_for_teacher_forcing(
             packed,
             clean_vision_tokens=clean_tokens,
-            block_size=1,
-            history_blocks=1,
+            geometry=_geometry(1, 1, num_samples=2),
         )
 
 
@@ -496,8 +493,7 @@ def test_expand_packed_sequence_rejects_clean_payload_shape_mismatch():
         expand_packed_sequence_for_teacher_forcing(
             packed,
             clean_vision_tokens=clean_tokens,
-            block_size=1,
-            history_blocks=1,
+            geometry=_geometry(1, 1, num_samples=2),
         )
 
 
@@ -511,8 +507,7 @@ def test_expand_packed_sequence_rejects_clean_payload_dtype_mismatch():
         expand_packed_sequence_for_teacher_forcing(
             packed,
             clean_vision_tokens=clean_tokens,
-            block_size=1,
-            history_blocks=1,
+            geometry=_geometry(1, 1, num_samples=2),
         )
 
 
@@ -522,8 +517,7 @@ def test_select_teacher_forcing_noisy_outputs_preserves_order_and_gradient():
     expanded = expand_packed_sequence_for_teacher_forcing(
         packed,
         clean_vision_tokens=clean_tokens,
-        block_size=1,
-        history_blocks=1,
+        geometry=_geometry(1, 1, num_samples=2),
     )
     assert expanded.teacher_forcing is not None
     output = torch.arange(expanded.sequence_length * 2, dtype=torch.float32).reshape(expanded.sequence_length, 2)

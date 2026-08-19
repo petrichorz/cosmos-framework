@@ -93,8 +93,8 @@ def test_expand_teacher_forcing_training_sequence_uses_configured_batch_shared_g
     )
 
     assert expanded.teacher_forcing is not None
-    assert expanded.teacher_forcing.layout.block_size == 2
-    assert expanded.teacher_forcing.layout.history_blocks == 3
+    assert expanded.teacher_forcing.layout.geometry.block_sizes == (2,)
+    assert expanded.teacher_forcing.layout.geometry.history_blocks == (3,)
     assert expanded.teacher_forcing.clean_vision_tokens == clean
     assert expanded.vision is not None
     assert expanded.vision.tokens == packed.vision.tokens

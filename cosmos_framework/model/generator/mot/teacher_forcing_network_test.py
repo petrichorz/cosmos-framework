@@ -17,6 +17,7 @@ if importlib.util.find_spec("loguru") is None:
 from cosmos_framework.data.generator.sequence_packing.modality import ModalityData, ModalitySpan
 from cosmos_framework.data.generator.sequence_packing.sequence import PackedSequence
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
+    TeacherForcingGeometry,
     expand_packed_sequence_for_teacher_forcing,
 )
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import (
@@ -73,8 +74,7 @@ def _make_expanded_sequence() -> PackedSequence:
     return expand_packed_sequence_for_teacher_forcing(
         source,
         clean_vision_tokens=[torch.tensor([[[[[1.0]], [[2.0]]]]])],
-        block_size=1,
-        history_blocks=1,
+        geometry=TeacherForcingGeometry(block_sizes=(1,), history_blocks=(1,)),
     )
 
 
