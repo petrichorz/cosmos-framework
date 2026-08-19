@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -21,6 +22,7 @@ from cosmos_framework.data.generator.action.action_processing import ActionProce
 from cosmos_framework.data.generator.sequence_packing import (
     PackedSequence,
     SequencePlan,
+    TeacherForcingGeometry,
     build_sequence_plans_from_data_batch,
     pack_input_sequence,
 )
@@ -802,10 +804,25 @@ class OmniMoTModel(ImaginaireModel):
         """
         return memory_info
 
+    def prepare_teacher_forcing_geometry(
+        self,
+        num_vision_latent_frames: list[int],
+    ) -> TeacherForcingGeometry | None:
+        """Prepare optional causal geometry before timestep sampling.
+
+        The base model has no teacher-forcing geometry. The causal subclass
+        returns immutable per-sample geometry that is passed explicitly to both
+        noise sampling and post-noise packing.
+        """
+
+        del num_vision_latent_frames
+        return None
+
     def post_noise_packing_hook(
         self,
         packed_sequence: PackedSequence,
         gen_data_clean: GenerationDataClean,
+        teacher_forcing_geometry: TeacherForcingGeometry | None = None,
     ) -> PackedSequence:
         """Transform packing after ``xt`` replaces ``x0`` and before device transfer.
 
@@ -813,7 +830,7 @@ class OmniMoTModel(ImaginaireModel):
         causal training overrides this hook to attach a separate clean stream
         while preserving the noised vision payload as the supervised stream.
         """
-        del gen_data_clean
+        del gen_data_clean, teacher_forcing_geometry
         return packed_sequence
 
     def training_step(
@@ -883,6 +900,7 @@ class OmniMoTModel(ImaginaireModel):
         # Sample a random noise level (sigma) and corresponding interpolation coefficient ("timesteps" in RF)
         # Apply shift per sample based on each sample's resolution
         num_vision_latent_frames = [x.shape[2] for x in gen_data_clean.x0_tokens_vision]
+        teacher_forcing_geometry = self.prepare_teacher_forcing_geometry(num_vision_latent_frames)
         timesteps_vision, sigmas_vision = self._get_train_noise_level_vision(
             batch_size=gen_data_clean.batch_size,
             is_image_batch=gen_data_clean.is_image_batch,
@@ -890,6 +908,7 @@ class OmniMoTModel(ImaginaireModel):
             num_vision_latent_frames=num_vision_latent_frames,
             num_tokens=num_tokens_per_sample,
             iteration=iteration,
+            teacher_forcing_geometry=teacher_forcing_geometry,
         )  # [B, T_vis] each
 
         # Optional independent action schedule (sampled from rectified_flow_action with
@@ -1030,7 +1049,11 @@ class OmniMoTModel(ImaginaireModel):
             iteration=iteration,
         )
         self._replace_clean_with_noised(packed_sequence, gen_data_noised)
-        packed_sequence = self.post_noise_packing_hook(packed_sequence, gen_data_clean)
+        packed_sequence = self.post_noise_packing_hook(
+            packed_sequence,
+            gen_data_clean,
+            teacher_forcing_geometry,
+        )
 
         # Move packed sequence to CUDA
         packed_sequence.to_cuda()
@@ -1117,7 +1140,8 @@ class OmniMoTModel(ImaginaireModel):
             condition_mask: Mask where 1 = clean/conditioning, 0 = noisy/generation (list of tensors).
             timesteps: Diffusion timesteps for time weighting. Shape [B,1] for
                 base training (all frames share one timestep) or [B,T_max] for
-                teacher_forcing/diffusion_forcing (per-frame independent timesteps). Time weights
+                teacher_forcing/diffusion_forcing (per-frame timestep tensors; teacher forcing repeats
+                one timestep within each causal block). Time weights
                 are applied per-frame before averaging, so non-uniform weight functions
                 are handled correctly.
             has_valid_tokens: Whether this modality has valid noisy tokens.
@@ -1322,6 +1346,7 @@ class OmniMoTModel(ImaginaireModel):
         resolutions: list[str] | str | None = None,
         num_tokens: list[int] | None = None,
         iteration: int | None = None,
+        teacher_forcing_geometry: TeacherForcingGeometry | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Sample the rectified flow interpolation coefficient (timesteps) and obtain the corresponding
@@ -1331,13 +1356,15 @@ class OmniMoTModel(ImaginaireModel):
             batch_size: Batch size for sampling timesteps.
             is_image_batch: Whether this is an image batch (vs video).
             num_vision_latent_frames: Per-sample vision latent frame counts [T_0, ..., T_{B-1}].
-                         For causal_training_strategy="teacher_forcing" or "diffusion_forcing", resamples
-                         B*T_max independent times and returns tensors of shape [B,T_max]. For other
-                         strategies, ignored — returns shape [B,1] (all frames share the same sigma).
+                         Teacher forcing samples one time per causal block; diffusion forcing samples
+                         one time per latent frame. Both return [B,T_max]. Other strategies ignore the
+                         frame counts and return [B,1] (all frames share the same sigma).
             resolutions: Resolution string(s) (e.g., "256", "512") for dict-based shift lookup.
                          Can be a single string (applied to all samples) or a list of strings (one per sample).
                          If None, defaults to self.config.resolution (can be used for other modalities).
             num_tokens: Number of tokens for each sample (before 2x2 merge). Needed for dynamic shift.
+            teacher_forcing_geometry: Per-sample causal block geometry. Required for teacher forcing
+                and ignored by all other strategies.
 
         Returns:
             (timesteps, sigmas): Both [B,T_max] for teacher_forcing/diffusion_forcing, or [B,1] otherwise.
@@ -1392,9 +1419,48 @@ class OmniMoTModel(ImaginaireModel):
                     shifts_list.append(shift_dict[resolution])
                 shifts = torch.tensor(shifts_list, dtype=torch.float32)
 
-        # Teacher forcing and diffusion forcing use one independent noise time per VAE latent frame.
-        # Other strategies use one shared noise time per sample.
-        if self.config.causal_training_strategy in {"teacher_forcing", "diffusion_forcing"}:
+        # Teacher forcing samples one independent noise time per causal block and
+        # expands it across that sample's block frames. Diffusion forcing keeps
+        # one independent time per VAE latent frame. Other strategies use one
+        # shared noise time per sample.
+        if self.config.causal_training_strategy == "teacher_forcing":
+            if teacher_forcing_geometry is None:
+                raise ValueError("teacher_forcing requires pre-sampled per-sample geometry")
+            if len(teacher_forcing_geometry.block_sizes) != batch_size:
+                raise ValueError(
+                    "teacher-forcing geometry must contain one block size per sample, "
+                    f"got {len(teacher_forcing_geometry.block_sizes)} and {batch_size}"
+                )
+            # 上取整，计算有多少个block，计算后续sigma采样数量
+            block_counts = [
+                math.ceil(num_frames / block_size)
+                for num_frames, block_size in zip(
+                    num_vision_latent_frames,
+                    teacher_forcing_geometry.block_sizes,
+                    strict=True,
+                )
+            ]
+            block_shifts = torch.repeat_interleave(shifts, torch.tensor(block_counts, dtype=torch.long))
+            block_sigmas = rectified_flow.sample_train_time(
+                sum(block_counts),
+                iteration=iteration,
+                shifts=block_shifts,
+            ).to(**self.tensor_kwargs_fp32)
+            T_max = max(num_vision_latent_frames)
+            sigmas = torch.zeros((batch_size, T_max), **self.tensor_kwargs_fp32)
+            block_offset = 0
+            for sample_id, (num_frames, block_size, block_count) in enumerate(
+                zip(
+                    num_vision_latent_frames,
+                    teacher_forcing_geometry.block_sizes,
+                    block_counts,
+                    strict=True,
+                )
+            ):
+                sample_block_sigmas = block_sigmas[block_offset : block_offset + block_count]
+                sigmas[sample_id, :num_frames] = sample_block_sigmas.repeat_interleave(block_size)[:num_frames]
+                block_offset += block_count
+        elif self.config.causal_training_strategy == "diffusion_forcing":
             # T_max = max(num_vision_latent_frames) across the batch; trailing entries for shorter
             # sequences are unused (sliced away in _add_noise_to_input and the loss).
             T_max = max(num_vision_latent_frames)
@@ -1509,8 +1575,9 @@ class OmniMoTModel(ImaginaireModel):
             gen_data_clean (GenerationDataClean): The input dataclass containing the clean data *latents* (tokens).
             packed_sequence (PackedSequence): Packed sequence with condition masks attached to modalities.
             sigmas (torch.Tensor): The noise levels. Shape [B,1] for base training (all video latent
-                frames share the same sigma) or [B,T_max] for teacher_forcing/diffusion_forcing
-                (per-latent-frame independent sigma). T_max is the number of video latent frames (temporally compressed
+                frames share the same sigma) or [B,T_max] for teacher_forcing/diffusion_forcing.
+                Teacher forcing repeats one sigma within each causal block, while diffusion forcing
+                samples independently per latent frame. T_max is the number of video latent frames (temporally compressed
                 tokens), not RGB frames. In all modes, sigmas are multiplied by (1 - condition_mask)
                 so conditioning latent frames get sigma_eff=0 and only non-conditioned frames contribute
                 to the loss.
