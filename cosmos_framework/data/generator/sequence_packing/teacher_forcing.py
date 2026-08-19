@@ -26,11 +26,28 @@ class TeacherForcingStream(IntEnum):
 
 
 @dataclass(frozen=True)
+class TeacherForcingGeometry:
+    """Per-sample block geometry shared by noise sampling and attention."""
+
+    block_sizes: tuple[int, ...]
+    history_blocks: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not self.block_sizes:
+            raise ValueError("teacher-forcing geometry cannot be empty")
+        if len(self.block_sizes) != len(self.history_blocks):
+            raise ValueError("teacher-forcing geometry must contain one block_size and history_blocks value per sample")
+        if any(block_size < 1 for block_size in self.block_sizes):
+            raise ValueError(f"teacher-forcing block_size values must be >= 1, got {self.block_sizes}")
+        if any(history < 1 for history in self.history_blocks):
+            raise ValueError(f"teacher-forcing history_blocks values must be >= 1, got {self.history_blocks}")
+
+
+@dataclass(frozen=True)
 class TeacherForcingLayout:
     """Immutable geometry shared by packing, attention, and output recovery."""
 
-    block_size: int
-    history_blocks: int
+    geometry: TeacherForcingGeometry
     original_sample_lens: tuple[int, ...]
     sample_lens: tuple[int, ...]
     split_lens: tuple[int, ...]
@@ -101,12 +118,46 @@ def sample_teacher_forcing_parameters(
     return block_size, history_blocks
 
 
+def sample_teacher_forcing_geometry(
+    *,
+    num_samples: int,
+    block_size_min: int = 1,
+    block_size_max: int = 4,
+    history_blocks_min: int = 1,
+    history_blocks_max: int = 32,
+    generator: torch.Generator | None = None,
+) -> TeacherForcingGeometry:
+    """Independently sample block geometry for every packed sample."""
+
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+    _validate_inclusive_range("block_size", block_size_min, block_size_max)
+    _validate_inclusive_range("history_blocks", history_blocks_min, history_blocks_max)
+    block_sizes = torch.randint(
+        block_size_min,
+        block_size_max + 1,
+        (num_samples,),
+        generator=generator,
+        device="cpu",
+    )
+    history_blocks = torch.randint(
+        history_blocks_min,
+        history_blocks_max + 1,
+        (num_samples,),
+        generator=generator,
+        device="cpu",
+    )
+    return TeacherForcingGeometry(
+        block_sizes=tuple(int(value) for value in block_sizes.tolist()),
+        history_blocks=tuple(int(value) for value in history_blocks.tolist()),
+    )
+
+
 def build_teacher_forcing_layout(
     *,
     und_token_counts: Sequence[int],
     vision_token_shapes: Sequence[tuple[int, int, int]],
-    block_size: int,
-    history_blocks: int,
+    geometry: TeacherForcingGeometry,
 ) -> TeacherForcingLayout:
     """Build batch metadata for ``[UND | clean vision | noisy vision]`` samples."""
 
@@ -117,10 +168,11 @@ def build_teacher_forcing_layout(
         )
     if not und_token_counts:
         raise ValueError("teacher-forcing layout cannot be built from an empty batch")
-    if block_size < 1:
-        raise ValueError(f"block_size must be >= 1, got {block_size}")
-    if history_blocks < 1:
-        raise ValueError(f"history_blocks must be >= 1, got {history_blocks}")
+    if len(geometry.block_sizes) != len(und_token_counts):
+        raise ValueError(
+            "teacher-forcing geometry must contain one entry per packed sample, "
+            f"got {len(geometry.block_sizes)} and {len(und_token_counts)}"
+        )
 
     original_sample_lens: list[int] = []
     sample_lens: list[int] = []
@@ -136,7 +188,9 @@ def build_teacher_forcing_layout(
 
     original_offset = 0
     new_offset = 0
-    for sample_id, (und_count, vision_shape) in enumerate(zip(und_token_counts, vision_token_shapes)):
+    for sample_id, (und_count, vision_shape, block_size) in enumerate(
+        zip(und_token_counts, vision_token_shapes, geometry.block_sizes, strict=True)
+    ):
         if und_count < 1:
             raise ValueError(f"und_token_counts[{sample_id}] must be >= 1, got {und_count}")
         if len(vision_shape) != 3:
@@ -179,8 +233,7 @@ def build_teacher_forcing_layout(
         new_offset = new_sample_end
 
     return TeacherForcingLayout(
-        block_size=block_size,
-        history_blocks=history_blocks,
+        geometry=geometry,
         original_sample_lens=tuple(original_sample_lens),
         sample_lens=tuple(sample_lens),
         split_lens=tuple(split_lens),
@@ -232,7 +285,13 @@ def build_dense_teacher_forcing_gen_mask(
     key_is_clean = key_stream_ids == int(TeacherForcingStream.CLEAN)
     key_is_noisy = key_stream_ids == int(TeacherForcingStream.NOISY)
 
-    inside_history = key_block_ids >= query_block_ids - layout.history_blocks
+    sample_history_blocks = torch.tensor(
+        layout.geometry.history_blocks,
+        dtype=query_block_ids.dtype,
+        device=query_block_ids.device,
+    )
+    query_history_blocks = sample_history_blocks[query_sample_ids]
+    inside_history = key_block_ids >= query_block_ids - query_history_blocks
     clean_query_visible = key_is_clean & inside_history & (key_block_ids <= query_block_ids)
     noisy_query_visible = (key_is_clean & inside_history & (key_block_ids < query_block_ids)) | (
         key_is_noisy & (key_block_ids == query_block_ids)
@@ -264,7 +323,11 @@ def build_per_sample_teacher_forcing_gen_masks(
 
     masks: list[torch.BoolTensor] = []
     sample_offset = 0
-    for sample_len in layout.sample_lens:
+    for sample_len, history_blocks in zip(
+        layout.sample_lens,
+        layout.geometry.history_blocks,
+        strict=True,
+    ):
         sample_slice = slice(sample_offset, sample_offset + sample_len)
         sample_stream_ids = layout.stream_ids[sample_slice]
         sample_block_ids = layout.block_ids[sample_slice]
@@ -279,7 +342,7 @@ def build_per_sample_teacher_forcing_gen_masks(
         key_is_und = key_stream_ids == int(TeacherForcingStream.UND)
         key_is_clean = key_stream_ids == int(TeacherForcingStream.CLEAN)
         key_is_noisy = key_stream_ids == int(TeacherForcingStream.NOISY)
-        inside_history = key_block_ids >= query_block_ids - layout.history_blocks
+        inside_history = key_block_ids >= query_block_ids - history_blocks
         clean_query_visible = key_is_clean & inside_history & (key_block_ids <= query_block_ids)
         noisy_query_visible = (key_is_clean & inside_history & (key_block_ids < query_block_ids)) | (
             key_is_noisy & (key_block_ids == query_block_ids)
@@ -405,7 +468,10 @@ def visualize_dense_teacher_forcing_gen_mask(
     draw.text((8, 25), "rows/columns: [UND blocks | CLEAN blocks | NOISY blocks]", fill="black")
     draw.text(
         (8, 44),
-        f"und_block={und_block_size}, vision_block={layout.block_size}, history={layout.history_blocks}",
+        (
+            f"und_block={und_block_size}, vision_blocks={layout.geometry.block_sizes}, "
+            f"history={layout.geometry.history_blocks}"
+        ),
         fill="black",
     )
     legend_x = 8
@@ -594,8 +660,7 @@ def expand_packed_sequence_for_teacher_forcing(
     packed_sequence: PackedSequence,
     *,
     clean_vision_tokens: Sequence[torch.Tensor],
-    block_size: int,
-    history_blocks: int,
+    geometry: TeacherForcingGeometry,
 ) -> PackedSequence:
     """Return a vision-only packed sequence expanded into clean/noisy GEN streams."""
 
@@ -630,8 +695,7 @@ def expand_packed_sequence_for_teacher_forcing(
     layout = build_teacher_forcing_layout(
         und_token_counts=und_token_counts,
         vision_token_shapes=vision_token_shapes,
-        block_size=block_size,
-        history_blocks=history_blocks,
+        geometry=geometry,
     )
     source_to_und = _build_source_to_stream_index(layout, TeacherForcingStream.UND)
     source_to_noisy = _build_source_to_stream_index(layout, TeacherForcingStream.NOISY)
