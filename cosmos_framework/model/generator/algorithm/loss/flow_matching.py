@@ -35,7 +35,8 @@ def compute_flow_matching_loss(
         condition_mask: Mask where 1 = clean/conditioning, 0 = noisy/generation (list of tensors).
         timesteps: Diffusion timesteps for time weighting. Shape [B,1] for
             base training (all frames share one timestep) or [B,T_max] for
-            teacher_forcing/diffusion_forcing (per-frame independent timesteps). Time weights
+            teacher_forcing/diffusion_forcing (per-frame timestep tensors; teacher forcing repeats
+            one timestep within each causal block). Time weights
             are applied per-frame before averaging, so non-uniform weight functions
             are handled correctly.
         has_valid_tokens: Whether this modality has valid noisy tokens.
