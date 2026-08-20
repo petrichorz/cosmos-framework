@@ -41,6 +41,7 @@ MOT_CAUSAL_DDP_CONFIG = dict(
     model=L(OmniMoTCausalModel)(
         config=OmniMoTModelConfig(
             causal_training_strategy="teacher_forcing",
+            joint_attn_implementation="teacher_forcing",
         ),
         _recursive_=False,
     ),
@@ -54,6 +55,7 @@ MOT_CAUSAL_FSDP_CONFIG = dict(
     model=L(OmniMoTCausalModel)(
         config=OmniMoTModelConfig(
             causal_training_strategy="teacher_forcing",
+            joint_attn_implementation="teacher_forcing",
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=8,
             ),

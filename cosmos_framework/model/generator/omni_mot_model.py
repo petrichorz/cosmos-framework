@@ -526,8 +526,9 @@ class OmniMoTModel(ImaginaireModel):
 
     def _derive_include_end_of_generation_token(self) -> bool:
         impl = self.config.joint_attn_implementation
-        assert impl in ("two_way", "three_way"), (
-            f"Invalid joint_attn_implementation: {impl}. Must be 'two_way' or 'three_way'."
+        assert impl in ("two_way", "three_way", "teacher_forcing"), (
+            f"Invalid joint_attn_implementation: {impl}. "
+            "Must be 'two_way', 'three_way', or 'teacher_forcing'."
         )
         return False
 
@@ -2040,7 +2041,7 @@ class OmniMoTModel(ImaginaireModel):
             self.parallel_dims.cp_enabled or self.parallel_dims.cfgp_enabled or self.parallel_dims.dp_shard_enabled
         ):
             return False
-        if self.config.joint_attn_implementation != "two_way":
+        if self.config.joint_attn_implementation not in {"two_way", "teacher_forcing"}:
             return False
         if self.config.video_temporal_causal:
             return False

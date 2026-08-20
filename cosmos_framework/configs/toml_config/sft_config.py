@@ -375,12 +375,13 @@ class ModelConfig(BaseModel):
             "256-token causal UND blocks plus block-level CLEAN/NOISY rows."
         ),
     )
-    joint_attn_implementation: str = Field(
+    joint_attn_implementation: Literal["two_way", "three_way", "teacher_forcing"] = Field(
         default="two_way",
         description=(
             "VFM attention layout: 'two_way' (separate U/G blocks with "
             "cross-attention), 'three_way' (adds a sparsity-aware third "
-            "block — NATTEN), or 'flex' (legacy). Used when "
+            "block — NATTEN), or 'teacher_forcing' (causal UND plus explicitly "
+            "masked CLEAN/NOISY streams during training, with two-way inference). Used when "
             "[job].task='vfm'; skipped on VLM."
         ),
     )
