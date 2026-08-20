@@ -182,7 +182,10 @@ class OmniMoTModelConfig:
     # Attention implementation for joint understanding + generation
     # Note "two_way" and "three_way" disallow and remove "End-of-Vision" or other text token in the generation tower.
     # "three_way" must only be used when introducing sparsity
-    joint_attn_implementation: str = "two_way"  # "two_way" or "three_way"
+    joint_attn_implementation: str = attrs.field(
+        default="two_way",
+        validator=attrs.validators.in_({"two_way", "three_way", "teacher_forcing"}),
+    )
 
     # Per-layer NATTEN parameters
     # Must use "three_way" attention if used.

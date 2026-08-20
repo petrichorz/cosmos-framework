@@ -19,6 +19,7 @@ class _ParallelismConfig(Protocol):
 
 
 class TeacherForcingConfig(Protocol):
+    joint_attn_implementation: str
     causal_training_strategy: str
     vision_gen: bool
     action_gen: bool
@@ -40,6 +41,11 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
         raise ValueError(
             "OmniMoTCausalModel requires causal_training_strategy='teacher_forcing', "
             f"got {config.causal_training_strategy!r}"
+        )
+    if config.joint_attn_implementation != "teacher_forcing":
+        raise ValueError(
+            "OmniMoTCausalModel requires joint_attn_implementation='teacher_forcing', "
+            f"got {config.joint_attn_implementation!r}"
         )
     if not config.vision_gen:
         raise ValueError("OmniMoTCausalModel requires vision_gen=True")
