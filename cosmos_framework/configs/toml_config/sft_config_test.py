@@ -255,6 +255,7 @@ class TestEndToEndLoader:
         assert config.trainer.max_iter == 3
         assert config.model.config.precision == "bfloat16"
         assert config.model.config.causal_training_strategy == "teacher_forcing"
+        assert config.model.config.joint_attn_implementation == "teacher_forcing"
         assert config.model.config.teacher_forcing_block_size_min == 1
         assert config.model.config.teacher_forcing_block_size_max == 4
         assert config.model.config.teacher_forcing_history_blocks_min == 1
@@ -289,6 +290,7 @@ task       = "vfm"
 experiment = "vision_sft_nano"
 
 [model]
+joint_attn_implementation                = "teacher_forcing"
 causal_training_strategy                 = "teacher_forcing"
 teacher_forcing_block_size_min           = 1
 teacher_forcing_block_size_max           = 4
@@ -308,6 +310,7 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 
         assert config.model._target_ is OmniMoTCausalModel
         assert config.model.config.causal_training_strategy == "teacher_forcing"
+        assert config.model.config.joint_attn_implementation == "teacher_forcing"
         assert config.model.config.teacher_forcing_block_size_min == 1
         assert config.model.config.teacher_forcing_block_size_max == 4
         assert config.model.config.teacher_forcing_history_blocks_min == 1

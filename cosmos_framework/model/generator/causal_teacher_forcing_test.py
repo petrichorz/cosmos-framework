@@ -18,6 +18,7 @@ from cosmos_framework.model.generator.utils.data_and_condition import Generation
 
 def _config(**overrides):
     values = dict(
+        joint_attn_implementation="teacher_forcing",
         causal_training_strategy="teacher_forcing",
         vision_gen=True,
         action_gen=False,
@@ -61,6 +62,7 @@ def _packed_noisy_video() -> PackedSequence:
     ("overrides", "error"),
     [
         ({"causal_training_strategy": "none"}, "teacher_forcing"),
+        ({"joint_attn_implementation": "two_way"}, "joint_attn_implementation"),
         ({"vision_gen": False}, "vision_gen"),
         ({"action_gen": True}, "action_gen"),
         ({"sound_gen": True}, "sound_gen"),

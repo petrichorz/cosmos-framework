@@ -422,7 +422,7 @@ The commonly tuned knobs:
     1. `wandb_mode` — `"online"` (logs to W&B; `WANDB_API_KEY` must be set), `"offline"` (logs locally, sync later with `wandb sync`), or `"disabled"`.
 1. `[model]`
     1. `max_num_tokens_after_packing` — VFM token-packing target. `-1` disables the cap. VFM only; VLM uses `data_setting.max_tokens` (tail override).
-    1. `joint_attn_implementation` — VFM attention layout: `"two_way"` / `"three_way"` (NATTEN) / `"flex"`.
+    1. `joint_attn_implementation` — VFM attention topology: `"two_way"`, `"three_way"` (NATTEN), or `"teacher_forcing"` (explicit CLEAN/NOISY masks during training, two-way inference).
     1. `attn_implementation` — VLM attention impl: `"cosmos"` / `"flash_attention_2"` / `"sdpa"` / `"eager"`. VLM only.
     1. `lora_enabled`, `lora_rank`, `lora_alpha`, `lora_target_modules` — LoRA adapter knobs for the generation pathway. Used by SUPER-tier recipes; NANO-tier leaves `lora_enabled=false`. VFM only.
 1. `[model.ema]`
