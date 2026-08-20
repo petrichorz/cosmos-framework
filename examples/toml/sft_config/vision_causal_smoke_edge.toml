@@ -15,7 +15,7 @@ wandb_mode = "disabled"
 
 [model]
 max_num_tokens_after_packing             = 4096
-joint_attn_implementation                = "two_way"
+joint_attn_implementation                = "teacher_forcing"
 precision                                = "bfloat16"
 causal_training_strategy                 = "teacher_forcing"
 teacher_forcing_block_size_min           = 1

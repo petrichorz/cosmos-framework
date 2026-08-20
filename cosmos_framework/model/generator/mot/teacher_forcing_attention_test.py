@@ -31,6 +31,7 @@ from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
     build_packed_sequence,
     dispatch_attention,
+    resolve_runtime_joint_attn_implementation,
 )
 from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
     teacher_forcing_dense_attention,
@@ -76,6 +77,30 @@ def _make_inputs(dtype: torch.dtype = torch.float64):
 def test_masked_sdpa_is_registered_by_key():
     assert BACKEND_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention"
     assert BACKEND_CHECK_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention_check"
+
+
+@pytest.mark.parametrize(
+    ("configured", "has_layout", "expected"),
+    [
+        ("two_way", False, "two_way"),
+        ("three_way", False, "three_way"),
+        ("teacher_forcing", True, "teacher_forcing"),
+        ("teacher_forcing", False, "two_way"),
+    ],
+)
+def test_resolve_runtime_joint_attention_topology(configured: str, has_layout: bool, expected: str):
+    assert (
+        resolve_runtime_joint_attn_implementation(
+            configured,
+            has_teacher_forcing_layout=has_layout,
+        )
+        == expected
+    )
+
+
+def test_resolve_runtime_joint_attention_topology_rejects_unknown_value():
+    with pytest.raises(ValueError, match="joint_attn_implementation"):
+        resolve_runtime_joint_attn_implementation("unknown", has_teacher_forcing_layout=False)
 
 
 def test_teacher_forcing_dense_attention_matches_independent_gqa_reference():
@@ -144,7 +169,7 @@ def _make_teacher_forcing_packs(dense_mode: str = "global"):
     key = torch.randn(sum(layout.sample_lens), 2, 3, generator=generator)
     value = torch.randn(sum(layout.sample_lens), 2, 3, generator=generator)
     common_kwargs = dict(
-        joint_attn_implementation="three_way",
+        joint_attn_implementation="teacher_forcing",
         attn_modes=list(layout.attn_modes),
         split_lens=list(layout.split_lens),
         sample_lens=list(layout.sample_lens),
@@ -168,6 +193,7 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
 
     assert isinstance(attention_meta, TeacherForcingAttentionInfo)
     assert attention_meta.layout is layout
+    assert attention_meta.is_three_way is False
     torch.testing.assert_close(
         attention_meta.dense_gen_mask,
         build_dense_teacher_forcing_gen_mask(
@@ -176,6 +202,32 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
         ),
     )
     assert natten_metadata is None
+
+
+@pytest.mark.parametrize("implementation", ["two_way", "three_way"])
+def test_build_packed_sequence_rejects_implicit_teacher_forcing_override(implementation: str):
+    layout = build_teacher_forcing_layout(
+        und_token_counts=[1],
+        vision_token_shapes=[(2, 1, 1)],
+        block_size=1,
+        history_blocks=1,
+    )
+
+    with pytest.raises(ValueError, match="requires joint_attn_implementation='teacher_forcing'"):
+        build_packed_sequence(
+            implementation,
+            packed_sequence=torch.randn(sum(layout.sample_lens), 2, 4),
+            attn_modes=list(layout.attn_modes),
+            split_lens=list(layout.split_lens),
+            sample_lens=list(layout.sample_lens),
+            packed_und_token_indexes=torch.tensor([0]),
+            packed_gen_token_indexes=layout.gen_query_indexes,
+            num_heads=2,
+            head_dim=4,
+            num_layers=1,
+            teacher_forcing_layout=layout,
+            teacher_forcing_max_sequence_length=20,
+        )
 
 
 def test_per_sample_masks_match_global_mask_diagonal_blocks():
@@ -361,7 +413,7 @@ def test_build_packed_sequence_applies_teacher_forcing_sequence_length_guard():
 
     with pytest.raises(ValueError, match="max_sequence_length"):
         build_packed_sequence(
-            "three_way",
+            "teacher_forcing",
             packed_sequence=packed_sequence,
             attn_modes=list(layout.attn_modes),
             split_lens=list(layout.split_lens),
@@ -387,7 +439,7 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
 
     with pytest.raises(ValueError, match="layout geometry"):
         build_packed_sequence(
-            "three_way",
+            "teacher_forcing",
             packed_sequence=packed_sequence,
             attn_modes=["causal", "full"],
             split_lens=[2, 3],

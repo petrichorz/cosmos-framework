@@ -17,7 +17,11 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     build_dense_teacher_forcing_gen_mask,
     visualize_dense_teacher_forcing_gen_mask,
 )
-from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
+from cosmos_framework.model.generator.mot.attention import (
+    SplitInfo,
+    build_packed_sequence,
+    resolve_runtime_joint_attn_implementation,
+)
 from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_last_hidden_state,
     get_context_parallel_sharded_sequence,
@@ -1020,6 +1024,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
 
         vision_token_shapes = packed_seq.vision.token_shapes if packed_seq.vision else None
         teacher_forcing_layout = packed_seq.teacher_forcing.layout if packed_seq.teacher_forcing is not None else None
+        runtime_joint_attn_implementation = resolve_runtime_joint_attn_implementation(
+            self.config.joint_attn_implementation,
+            has_teacher_forcing_layout=teacher_forcing_layout is not None,
+        )
         if teacher_forcing_layout is not None:
             if use_video_temporal_causal:
                 raise ValueError("teacher-forcing block causality cannot be combined with video_temporal_causal")
@@ -1055,7 +1063,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         )
 
         input_pack, attention_meta, natten_metadata_list = build_packed_sequence(
-            self.config.joint_attn_implementation,
+            runtime_joint_attn_implementation,
             packed_sequence=packed_sequence,
             attn_modes=packed_seq.attn_modes,
             split_lens=packed_seq.split_lens,
@@ -1157,7 +1165,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             attention_meta.control_weights = weights
 
         input_pack, packed_position_ids = get_context_parallel_sharded_sequence(
-            attn_implementation=self.config.joint_attn_implementation,
+            attn_implementation=runtime_joint_attn_implementation,
             input_pack=input_pack,
             position_ids=packed_seq.position_ids,
             parallel_dims=sequence_shard_parallel_dims,

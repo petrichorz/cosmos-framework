@@ -22,6 +22,7 @@ def test_causal_model_groups_enable_teacher_forcing_but_require_explicit_dense_l
     for group in (MOT_CAUSAL_DDP_CONFIG, MOT_CAUSAL_FSDP_CONFIG):
         config = group["model"]["config"]
         assert config.causal_training_strategy == "teacher_forcing"
+        assert config.joint_attn_implementation == "teacher_forcing"
         assert config.teacher_forcing_block_size_min == 1
         assert config.teacher_forcing_block_size_max == 4
         assert config.teacher_forcing_history_blocks_min == 1
