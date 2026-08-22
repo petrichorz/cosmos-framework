@@ -216,8 +216,7 @@ def test_build_packed_sequence_rejects_implicit_teacher_forcing_override(impleme
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
         vision_token_shapes=[(2, 1, 1)],
-        block_size=1,
-        history_blocks=1,
+        geometry=TeacherForcingGeometry(block_sizes=(1,), history_blocks=(1,)),
     )
 
     with pytest.raises(ValueError, match="requires joint_attn_implementation='teacher_forcing'"):

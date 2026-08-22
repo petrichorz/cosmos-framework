@@ -3,6 +3,7 @@
 
 """Pure configuration and packing helpers for Scheme-B causal training."""
 
+from collections.abc import Sequence
 from typing import Protocol
 
 import torch
@@ -99,6 +100,21 @@ def prepare_teacher_forcing_geometry(
         history_blocks_max=config.teacher_forcing_history_blocks_max,
         generator=generator,
     )
+
+
+def validate_teacher_forcing_conditioning(
+    condition_frame_indexes_vision: Sequence[Sequence[int]],
+) -> None:
+    """Restrict causal teacher-forcing training to T2V (``[]``)."""
+
+    for sample_id, indexes in enumerate(condition_frame_indexes_vision):
+        normalized = list(indexes)
+        if normalized:
+            raise ValueError(
+                "causal teacher-forcing training supports only T2V condition []; "
+                f"sample {sample_id} requested {normalized}. I2V remains an inference-only mode, "
+                "and V2V training is unsupported"
+            )
 
 
 def expand_teacher_forcing_training_sequence(
