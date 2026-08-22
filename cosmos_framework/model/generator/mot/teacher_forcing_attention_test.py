@@ -158,6 +158,34 @@ def test_teacher_forcing_dense_attention_rejects_invalid_inputs(mutate, error: s
         teacher_forcing_dense_attention(query, key, value, allowed_mask)
 
 
+def test_teacher_forcing_dense_attention_can_skip_redundant_mask_content_validation(monkeypatch):
+    query, key, value, allowed_mask = _make_inputs(torch.float32)
+    captured_backend_kwargs = None
+
+    def fake_attention(query, key, value, *, backend, backend_kwargs, scale):
+        nonlocal captured_backend_kwargs
+        del key, value, backend, scale
+        captured_backend_kwargs = backend_kwargs
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.teacher_forcing_attention.attention",
+        fake_attention,
+    )
+
+    teacher_forcing_dense_attention(
+        query,
+        key,
+        value,
+        allowed_mask,
+        mask_is_prevalidated=True,
+    )
+
+    assert captured_backend_kwargs is not None
+    assert captured_backend_kwargs["allowed_mask"] is allowed_mask
+    assert captured_backend_kwargs["validate_allowed_mask"] is False
+
+
 def _geometry(block_size: int, history_blocks: int, num_samples: int = 1) -> TeacherForcingGeometry:
     return TeacherForcingGeometry(
         block_sizes=(block_size,) * num_samples,

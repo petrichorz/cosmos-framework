@@ -15,6 +15,7 @@ def teacher_forcing_dense_attention(
     allowed_mask: torch.Tensor,
     *,
     scale: float | None = None,
+    mask_is_prevalidated: bool = False,
 ) -> torch.Tensor:
     """Attend GEN queries once over unified UND/clean/noisy keys.
 
@@ -27,7 +28,10 @@ def teacher_forcing_dense_attention(
         key.unsqueeze(0),
         value.unsqueeze(0),
         backend="masked_sdpa",
-        backend_kwargs={"allowed_mask": allowed_mask},
+        backend_kwargs={
+            "allowed_mask": allowed_mask,
+            "validate_allowed_mask": not mask_is_prevalidated,
+        },
         scale=scale,
     )
     return output.squeeze(0)
@@ -42,6 +46,7 @@ def teacher_forcing_per_sample_dense_attention(
     sample_lens: tuple[int, ...],
     gen_sample_lens: tuple[int, ...],
     scale: float | None = None,
+    masks_are_prevalidated: bool = False,
 ) -> torch.Tensor:
     """Run Scheme-B dense attention independently for each packed sample."""
 
@@ -68,6 +73,7 @@ def teacher_forcing_per_sample_dense_attention(
                 value[kv_offset:kv_end],
                 allowed_mask,
                 scale=scale,
+                mask_is_prevalidated=masks_are_prevalidated,
             )
         )
         query_offset = query_end
