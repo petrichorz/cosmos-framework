@@ -8,6 +8,7 @@ from cosmos_framework.data.generator.sequence_packing import PackedSequence, Tea
 from cosmos_framework.model.generator.causal_teacher_forcing import (
     expand_teacher_forcing_training_sequence,
     prepare_teacher_forcing_geometry,
+    validate_teacher_forcing_conditioning,
     validate_teacher_forcing_config,
 )
 from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
@@ -24,9 +25,18 @@ class OmniMoTCausalModel(OmniMoTModel):
     def prepare_teacher_forcing_geometry(
         self,
         num_vision_latent_frames: list[int],
+        condition_frame_indexes_vision: list[list[int]] | None = None,
     ) -> TeacherForcingGeometry:
         """Sample independent block/history geometry for every packed sample."""
 
+        if condition_frame_indexes_vision is None:
+            raise ValueError("causal teacher forcing requires per-sample vision conditioning metadata")
+        if len(condition_frame_indexes_vision) != len(num_vision_latent_frames):
+            raise ValueError(
+                "vision conditioning metadata must contain one entry per sample, "
+                f"got {len(condition_frame_indexes_vision)} and {len(num_vision_latent_frames)}"
+            )
+        validate_teacher_forcing_conditioning(condition_frame_indexes_vision)
         return prepare_teacher_forcing_geometry(
             num_samples=len(num_vision_latent_frames),
             config=self.config,
