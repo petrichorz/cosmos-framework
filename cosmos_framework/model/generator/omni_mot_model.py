@@ -24,6 +24,7 @@ from cosmos_framework.data.generator.sequence_packing import (
     SequencePlan,
     TeacherForcingGeometry,
     build_sequence_plans_from_data_batch,
+    build_teacher_forcing_frame_block_ids,
     pack_input_sequence,
 )
 from cosmos_framework.data.generator.sequence_packing.modality import add_special_tokens
@@ -807,6 +808,7 @@ class OmniMoTModel(ImaginaireModel):
     def prepare_teacher_forcing_geometry(
         self,
         num_vision_latent_frames: list[int],
+        condition_frame_indexes_vision: list[list[int]] | None = None,
     ) -> TeacherForcingGeometry | None:
         """Prepare optional causal geometry before timestep sampling.
 
@@ -815,7 +817,7 @@ class OmniMoTModel(ImaginaireModel):
         noise sampling and post-noise packing.
         """
 
-        del num_vision_latent_frames
+        del num_vision_latent_frames, condition_frame_indexes_vision
         return None
 
     def post_noise_packing_hook(
@@ -900,7 +902,10 @@ class OmniMoTModel(ImaginaireModel):
         # Sample a random noise level (sigma) and corresponding interpolation coefficient ("timesteps" in RF)
         # Apply shift per sample based on each sample's resolution
         num_vision_latent_frames = [x.shape[2] for x in gen_data_clean.x0_tokens_vision]
-        teacher_forcing_geometry = self.prepare_teacher_forcing_geometry(num_vision_latent_frames)
+        teacher_forcing_geometry = self.prepare_teacher_forcing_geometry(
+            num_vision_latent_frames,
+            [plan.condition_frame_indexes_vision for plan in sequence_plans],
+        )
         timesteps_vision, sigmas_vision = self._get_train_noise_level_vision(
             batch_size=gen_data_clean.batch_size,
             is_image_batch=gen_data_clean.is_image_batch,
@@ -1433,7 +1438,7 @@ class OmniMoTModel(ImaginaireModel):
                 )
             # 上取整，计算有多少个block，计算后续sigma采样数量
             block_counts = [
-                math.ceil(num_frames / block_size)
+                1 + math.ceil((num_frames - 1) / block_size)
                 for num_frames, block_size in zip(
                     num_vision_latent_frames,
                     teacher_forcing_geometry.block_sizes,
@@ -1458,7 +1463,10 @@ class OmniMoTModel(ImaginaireModel):
                 )
             ):
                 sample_block_sigmas = block_sigmas[block_offset : block_offset + block_count]
-                sigmas[sample_id, :num_frames] = sample_block_sigmas.repeat_interleave(block_size)[:num_frames]
+                frame_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size).to(
+                    device=sample_block_sigmas.device
+                )
+                sigmas[sample_id, :num_frames] = sample_block_sigmas.index_select(0, frame_block_ids)
                 block_offset += block_count
         elif self.config.causal_training_strategy == "diffusion_forcing":
             # T_max = max(num_vision_latent_frames) across the batch; trailing entries for shorter

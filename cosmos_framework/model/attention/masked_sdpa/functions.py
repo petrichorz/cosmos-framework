@@ -48,8 +48,11 @@ def masked_sdpa_attention(
 
     kwargs = backend_kwargs.copy() if backend_kwargs is not None else {}
     allowed_mask = kwargs.pop("allowed_mask", None)
+    validate_allowed_mask = kwargs.pop("validate_allowed_mask", True)
     if kwargs:
         raise ValueError(f"Unsupported masked_sdpa backend kwargs: {sorted(kwargs)}")
+    if not isinstance(validate_allowed_mask, bool):
+        raise TypeError(f"validate_allowed_mask must be bool, got {type(validate_allowed_mask).__name__}")
     if allowed_mask is None:
         raise ValueError("masked_sdpa requires backend_kwargs['allowed_mask'].")
     if allowed_mask.dtype != torch.bool:
@@ -61,7 +64,10 @@ def masked_sdpa_attention(
         raise ValueError(
             f"allowed_mask must be on the same device as query, got {allowed_mask.device} and {query.device}"
         )
-    if not bool(allowed_mask.any(dim=-1).all()):
+    # Reducing a device mask and converting the result to Python bool synchronizes
+    # the host with the accelerator. Keep validation enabled for generic callers,
+    # but allow trusted mask builders to disable this repeated hot-path check.
+    if validate_allowed_mask and not bool(allowed_mask.any(dim=-1).all()):
         raise ValueError("every masked_sdpa query must have at least one visible key")
 
     q = query.transpose(1, 2)

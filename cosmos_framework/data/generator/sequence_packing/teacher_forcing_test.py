@@ -14,6 +14,7 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     TeacherForcingLayout,
     TeacherForcingStream,
     build_dense_teacher_forcing_gen_mask,
+    build_teacher_forcing_frame_block_ids,
     build_teacher_forcing_layout,
     expand_packed_sequence_for_teacher_forcing,
     sample_teacher_forcing_parameters,
@@ -112,7 +113,7 @@ def test_build_teacher_forcing_layout_maps_both_streams_to_the_original_tokens()
     assert layout.source_sequence_indexes.tolist() == [0, 1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6]
     assert layout.sample_ids.tolist() == [0] * 12
     assert layout.stream_ids.tolist() == [-1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
-    assert layout.block_ids.tolist() == [-1, -1, 0, 0, 1, 1, 2, 0, 0, 1, 1, 2]
+    assert layout.block_ids.tolist() == [-1, -1, 0, 1, 1, 2, 2, 0, 1, 1, 2, 2]
     assert layout.gen_query_indexes.tolist() == list(range(2, 12))
     assert layout.clean_token_indexes.tolist() == list(range(2, 7))
     assert layout.noisy_output_indexes.tolist() == list(range(7, 12))
@@ -158,26 +159,26 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
         -1,
         0,
         0,
-        0,
-        0,
+        1,
+        1,
         1,
         1,
         0,
         0,
-        0,
-        0,
+        1,
+        1,
         1,
         1,
         -1,
         -1,
         0,
         0,
+        1,
+        1,
         0,
         0,
-        0,
-        0,
-        0,
-        0,
+        1,
+        1,
     ]
     assert layout.sample_ids.tolist() == [0] * 13 + [1] * 10
 
@@ -263,6 +264,11 @@ def test_dense_mask_matches_s1_k1_block_causal_matrix():
     assert not mask[5, 3]
 
 
+def test_teacher_forcing_frame_block_ids_keep_first_latent_in_a_singleton_block():
+    assert build_teacher_forcing_frame_block_ids(1, 4).tolist() == [0]
+    assert build_teacher_forcing_frame_block_ids(8, 3).tolist() == [0, 1, 1, 1, 2, 2, 2, 3]
+
+
 def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
@@ -274,14 +280,26 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
         layout, max_sequence_length=layout.source_sequence_indexes.numel()
     )
 
-    assert mask[4].nonzero(as_tuple=True)[0].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    assert mask[8].nonzero(as_tuple=True)[0].tolist() == [0, 5, 6, 7, 8, 9, 10]
-    assert mask[18].nonzero(as_tuple=True)[0].tolist() == [0, 5, 6, 7, 8, 19, 20]
+    clean_columns = layout.clean_token_indexes
+    noisy_columns = layout.noisy_output_indexes
+    frame_block_ids = build_teacher_forcing_frame_block_ids(5, 2).repeat_interleave(2)
+
+    # The first latent is a singleton block; the following two latent pairs form ordinary blocks.
+    assert frame_block_ids.tolist() == [0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    for token_id, block_id in enumerate(frame_block_ids.tolist()):
+        clean_row = token_id
+        noisy_row = frame_block_ids.numel() + token_id
+        expected_clean_for_clean = (frame_block_ids >= block_id - 1) & (frame_block_ids <= block_id)
+        expected_clean_for_noisy = (frame_block_ids >= block_id - 1) & (frame_block_ids < block_id)
+        expected_noisy_for_noisy = frame_block_ids == block_id
+        assert mask[clean_row, clean_columns].tolist() == expected_clean_for_clean.tolist()
+        assert mask[noisy_row, clean_columns].tolist() == expected_clean_for_noisy.tolist()
+        assert mask[noisy_row, noisy_columns].tolist() == expected_noisy_for_noisy.tolist()
 
 
 @pytest.mark.parametrize("block_size", [1, 2, 3, 4])
 @pytest.mark.parametrize("history_blocks", [1, 32])
-def test_dense_mask_matches_lingbot_full_video_boundaries(block_size: int, history_blocks: int):
+def test_dense_mask_matches_singleton_first_latent_boundaries(block_size: int, history_blocks: int):
     num_frames = 7
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
@@ -296,15 +314,16 @@ def test_dense_mask_matches_lingbot_full_video_boundaries(block_size: int, histo
     clean_columns = layout.clean_token_indexes
     noisy_columns = layout.noisy_output_indexes
     for frame_id in range(num_frames):
-        block_id = frame_id // block_size
+        frame_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size)
+        block_id = int(frame_block_ids[frame_id])
         oldest_visible_block = max(0, block_id - history_blocks)
         expected_clean_for_clean = [
-            oldest_visible_block <= candidate // block_size <= block_id for candidate in range(num_frames)
+            oldest_visible_block <= int(frame_block_ids[candidate]) <= block_id for candidate in range(num_frames)
         ]
         expected_clean_for_noisy = [
-            oldest_visible_block <= candidate // block_size < block_id for candidate in range(num_frames)
+            oldest_visible_block <= int(frame_block_ids[candidate]) < block_id for candidate in range(num_frames)
         ]
-        expected_noisy_for_noisy = [candidate // block_size == block_id for candidate in range(num_frames)]
+        expected_noisy_for_noisy = [int(frame_block_ids[candidate]) == block_id for candidate in range(num_frames)]
 
         clean_row = frame_id
         noisy_row = num_frames + frame_id
@@ -361,6 +380,7 @@ def test_teacher_forcing_api_is_exported():
 
     assert sequence_packing.TeacherForcingData is TeacherForcingData
     assert sequence_packing.TeacherForcingLayout is TeacherForcingLayout
+    assert sequence_packing.build_teacher_forcing_frame_block_ids is build_teacher_forcing_frame_block_ids
     assert sequence_packing.build_teacher_forcing_layout is build_teacher_forcing_layout
     assert sequence_packing.build_dense_teacher_forcing_gen_mask is build_dense_teacher_forcing_gen_mask
     assert sequence_packing.expand_packed_sequence_for_teacher_forcing is expand_packed_sequence_for_teacher_forcing
@@ -373,8 +393,8 @@ def _make_packed_video_sequence() -> PackedSequence:
     noisy_1 = torch.tensor([[[[[20.0, 21.0]], [[22.0, 23.0]]]]])
     vision = ModalityData(
         sequence_indexes=torch.tensor([2, 3, 4, 6, 7, 8, 9]),
-        timesteps=torch.tensor([0.4, 0.4, 0.7, 0.7, 0.7, 0.7]),
-        mse_loss_indexes=torch.tensor([3, 4, 6, 7, 8, 9]),
+        timesteps=torch.tensor([0.2, 0.4, 0.4, 0.7, 0.7, 0.7, 0.7]),
+        mse_loss_indexes=torch.tensor([2, 3, 4, 6, 7, 8, 9]),
         spans=[
             ModalitySpan(2, 1, 0, 0, 1, (1, 1, 1)),
             ModalitySpan(3, 1, 0, 1, 1, (1, 1, 1)),
@@ -384,8 +404,8 @@ def _make_packed_video_sequence() -> PackedSequence:
         ],
         token_shapes=[(3, 1, 1), (2, 1, 2)],
         tokens=[noisy_0, noisy_1],
-        condition_mask=[torch.tensor([[[1.0]], [[0.0]], [[0.0]]]), torch.zeros(2, 1, 1)],
-        noisy_frame_indexes=[torch.tensor([1, 2]), torch.tensor([0, 1])],
+        condition_mask=[torch.zeros(3, 1, 1), torch.zeros(2, 1, 1)],
+        noisy_frame_indexes=[torch.tensor([0, 1, 2]), torch.tensor([0, 1])],
     )
     return PackedSequence(
         sample_lens=[5, 5],
@@ -440,7 +460,7 @@ def test_expand_packed_sequence_preserves_noisy_contract_and_duplicates_rope():
     assert layout.clean_token_indexes.tolist() == [2, 3, 4, 9, 10, 11, 12]
     assert layout.noisy_output_indexes.tolist() == [5, 6, 7, 13, 14, 15, 16]
     assert expanded.vision.sequence_indexes.tolist() == [5, 6, 7, 13, 14, 15, 16]
-    assert expanded.vision.mse_loss_indexes.tolist() == [6, 7, 13, 14, 15, 16]
+    assert expanded.vision.mse_loss_indexes.tolist() == [5, 6, 7, 13, 14, 15, 16]
     assert expanded.vision.timesteps is packed.vision.timesteps
     assert expanded.vision.tokens == packed.vision.tokens
     assert expanded.vision.condition_mask == packed.vision.condition_mask
@@ -504,6 +524,28 @@ def test_expand_packed_sequence_rejects_clean_payload_dtype_mismatch():
     clean_tokens = [torch.ones_like(token, dtype=torch.float32) for token in packed.vision.tokens]
 
     with pytest.raises(ValueError, match="dtype"):
+        expand_packed_sequence_for_teacher_forcing(
+            packed,
+            clean_vision_tokens=clean_tokens,
+            geometry=_geometry(1, 1, num_samples=2),
+        )
+
+
+@pytest.mark.parametrize(
+    "condition_mask",
+    [
+        torch.tensor([[[1.0]], [[0.0]], [[0.0]]]),
+        torch.tensor([[[1.0]], [[1.0]], [[0.0]]]),
+        torch.tensor([[[0.0]], [[1.0]], [[0.0]]]),
+    ],
+)
+def test_expand_packed_sequence_rejects_non_t2v_conditioning(condition_mask: torch.Tensor):
+    packed = _make_packed_video_sequence()
+    assert packed.vision is not None
+    packed.vision.condition_mask[0] = condition_mask
+    clean_tokens = [torch.zeros_like(token) for token in packed.vision.tokens]
+
+    with pytest.raises(ValueError, match="only T2V.*I2V"):
         expand_packed_sequence_for_teacher_forcing(
             packed,
             clean_vision_tokens=clean_tokens,

@@ -153,6 +153,24 @@ def sample_teacher_forcing_geometry(
     )
 
 
+def build_teacher_forcing_frame_block_ids(num_frames: int, block_size: int) -> torch.LongTensor:
+    """Assign the first latent to a singleton block and chunk the remaining latents."""
+
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}")
+    if block_size < 1:
+        raise ValueError(f"block_size must be >= 1, got {block_size}")
+
+    block_ids = torch.zeros(num_frames, dtype=torch.long)
+    if num_frames > 1:
+        block_ids[1:] = 1 + torch.div(
+            torch.arange(num_frames - 1, dtype=torch.long),
+            block_size,
+            rounding_mode="floor",
+        )
+    return block_ids
+
+
 def build_teacher_forcing_layout(
     *,
     und_token_counts: Sequence[int],
@@ -206,8 +224,9 @@ def build_teacher_forcing_layout(
 
         und_source = list(range(original_offset, original_offset + und_count))
         vision_source = list(range(original_offset + und_count, original_offset + original_sample_len))
-        vision_frame_ids = torch.arange(num_frames, dtype=torch.long).repeat_interleave(spatial_tokens)
-        vision_block_ids = torch.div(vision_frame_ids, block_size, rounding_mode="floor").tolist()
+        vision_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size).repeat_interleave(
+            spatial_tokens
+        )
 
         clean_start = new_offset + und_count
         noisy_start = clean_start + vision_count
@@ -224,7 +243,7 @@ def build_teacher_forcing_layout(
             + [int(TeacherForcingStream.CLEAN)] * vision_count
             + [int(TeacherForcingStream.NOISY)] * vision_count
         )
-        block_ids.extend([-1] * und_count + vision_block_ids + vision_block_ids)
+        block_ids.extend([-1] * und_count + vision_block_ids.tolist() + vision_block_ids.tolist())
         gen_query_indexes.extend(range(clean_start, new_sample_end))
         clean_token_indexes.extend(range(clean_start, noisy_start))
         noisy_output_indexes.extend(range(noisy_start, new_sample_end))
@@ -593,6 +612,11 @@ def _validate_teacher_forcing_packed_sequence(
             "teacher-forcing expansion requires exactly one vision item per packed sample, "
             f"got {len(vision.token_shapes)} shapes, {len(vision.tokens)} payloads, and {num_samples} samples"
         )
+    if len(vision.condition_mask) != num_samples:
+        raise ValueError(
+            "teacher-forcing expansion requires one vision condition mask per packed sample, "
+            f"got {len(vision.condition_mask)} and {num_samples}"
+        )
 
     vision_token_shapes: list[tuple[int, int, int]] = []
     und_token_counts: list[int] = []
@@ -601,10 +625,27 @@ def _validate_teacher_forcing_packed_sequence(
     expected_split_lens: list[int] = []
     expected_attn_modes: list[str] = []
     sample_offset = 0
-    for sample_id, (sample_len, token_shape) in enumerate(zip(packed_sequence.sample_lens, vision.token_shapes)):
+    for sample_id, (sample_len, token_shape, condition_mask) in enumerate(
+        zip(packed_sequence.sample_lens, vision.token_shapes, vision.condition_mask, strict=True)
+    ):
         if len(token_shape) != 3:
             raise ValueError(f"vision.token_shapes[{sample_id}] must contain (T, H, W), got {token_shape}")
         num_frames, height, width = token_shape
+        if tuple(condition_mask.shape) != (num_frames, 1, 1):
+            raise ValueError(
+                f"vision.condition_mask[{sample_id}] must have shape {(num_frames, 1, 1)}, "
+                f"got {tuple(condition_mask.shape)}"
+            )
+        conditioned_frames = torch.nonzero(
+            condition_mask.reshape(num_frames, -1).any(dim=1),
+            as_tuple=True,
+        )[0].tolist()
+        if conditioned_frames:
+            raise ValueError(
+                "causal teacher-forcing training supports only T2V condition []; "
+                f"sample {sample_id} requested {conditioned_frames}. I2V remains an inference-only mode, "
+                "and V2V training is unsupported"
+            )
         vision_count = num_frames * height * width
         und_count = sample_len - vision_count
         if und_count < 1:
