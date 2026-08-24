@@ -8,11 +8,14 @@ import torch
 
 from cosmos_framework.data.generator.sequence_packing.modality import ModalityData
 from cosmos_framework.data.generator.sequence_packing.sequence import PackedSequence
+from cosmos_framework.data.generator.sequence_packing.teacher_forcing import TeacherForcingGeometry
 from cosmos_framework.model.generator.causal_teacher_forcing import (
     expand_teacher_forcing_training_sequence,
+    validate_teacher_forcing_conditioning,
     validate_teacher_forcing_config,
 )
 from cosmos_framework.model.generator.omni_mot_causal_model import OmniMoTCausalModel
+from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
 from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 
 
@@ -111,6 +114,71 @@ def test_expand_teacher_forcing_training_sequence_rejects_images():
             clean_vision_tokens=[torch.zeros(1, 1, 3, 1, 1)],
             config=_config(),
         )
+
+
+@pytest.mark.parametrize("conditioning", [[[0]], [[0, 1]], [[1]], [[], [0, 1]]])
+def test_validate_teacher_forcing_conditioning_rejects_non_t2v_modes(conditioning):
+    with pytest.raises(ValueError, match="only T2V.*I2V"):
+        validate_teacher_forcing_conditioning(conditioning)
+
+
+def test_validate_teacher_forcing_conditioning_allows_packed_t2v_samples():
+    validate_teacher_forcing_conditioning([[], [], [], []])
+
+
+def test_causal_model_prepares_geometry_for_packed_t2v_samples():
+    model = SimpleNamespace(config=_config())
+
+    geometry = OmniMoTCausalModel.prepare_teacher_forcing_geometry(
+        model,
+        [7, 9],
+        [[], []],
+    )
+
+    assert len(geometry.block_sizes) == 2
+    assert len(geometry.history_blocks) == 2
+
+
+def test_teacher_forcing_sigma_uses_singleton_first_block_then_regular_chunks():
+    class _RectifiedFlow:
+        noise_scheduler = SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000))
+
+        @staticmethod
+        def sample_train_time(num_samples, iteration, shifts):
+            del iteration
+            assert num_samples == 7
+            assert shifts.shape == (7,)
+            return torch.arange(1, num_samples + 1, dtype=torch.float32) / 10
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            causal_training_strategy="teacher_forcing",
+            rectified_flow_training_config=SimpleNamespace(use_discrete_rf=False, shift=1),
+        ),
+        rectified_flow_image=_RectifiedFlow(),
+        rectified_flow_video=_RectifiedFlow(),
+        tensor_kwargs_fp32={"device": "cpu", "dtype": torch.float32},
+    )
+    geometry = TeacherForcingGeometry(block_sizes=(3, 2), history_blocks=(2, 2))
+
+    timesteps, sigmas = OmniMoTModel._get_train_noise_level_vision(
+        model,
+        batch_size=2,
+        is_image_batch=False,
+        num_vision_latent_frames=[8, 4],
+        teacher_forcing_geometry=geometry,
+    )
+
+    torch.testing.assert_close(
+        sigmas,
+        torch.tensor(
+            [
+                [0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4],
+                [0.5, 0.6, 0.6, 0.7, 0.0, 0.0, 0.0, 0.0],
+            ]
+        ),
+    )
+    torch.testing.assert_close(timesteps, sigmas * 1000)
 
 
 def test_post_noise_packing_hook_casts_clean_model_input_without_mutating_fp32_x0():

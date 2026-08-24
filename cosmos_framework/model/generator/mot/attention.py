@@ -313,6 +313,7 @@ def teacher_forcing_attention(
             get_all_seq(key_pack_for_gen),
             get_all_seq(packed_value_states),
             attention_meta.dense_gen_mask,
+            mask_is_prevalidated=True,
         )
     elif attention_meta.dense_mode == "per_sample":
         full_res = teacher_forcing_per_sample_dense_attention(
@@ -322,6 +323,7 @@ def teacher_forcing_attention(
             attention_meta.sample_gen_masks,
             sample_lens=attention_meta.layout.sample_lens,
             gen_sample_lens=gen_sample_lens,
+            masks_are_prevalidated=True,
         )
     else:
         raise ValueError(f"Unsupported teacher-forcing dense mode: {attention_meta.dense_mode!r}")
