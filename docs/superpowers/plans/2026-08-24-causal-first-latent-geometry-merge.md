@@ -6,8 +6,8 @@
 
 来源分支：`fix/causal-first-latent-geometry`
 
-详细设计与实现 handoff：
-[`docs/superpowers/plans/2026-08-22-causal-first-latent-geometry-handoff.md`](./2026-08-22-causal-first-latent-geometry-handoff.md)
+当前 KV cache 推理实现与代码导读：
+[`docs/causal_gen_kv_cache_code_guide.md`](../../causal_gen_kv_cache_code_guide.md)
 
 ## 1. 合并目的
 
@@ -85,5 +85,5 @@
 ## 5. 合并后注意事项
 
 - 正式训练应关闭 `teacher_forcing_visualize_sdpa_mask`；per-sample 模式下开启该调试项仍会为了绘图额外构造完整 global dense mask。
-- 当前 teacher-forcing topology 是训练专用；没有 teacher-forcing layout 的 validation/inference 会回退到普通 `two_way`。block-causal T2V/I2V 推理需要按照独立 inference handoff 继续实现。
+- teacher-forcing topology 仍是训练专用；Text+Image causal inference 通过独立的 GenKVCache block 循环实现，不复用训练时的双流 layout。具体边界见上述代码导读。
 - 本次合并不包含工作区中的其他文档或配置修改。
