@@ -16,6 +16,7 @@
 - [6. 已确认的风险点与注意事项（版本迭代参考）](#6-已确认的风险点与注意事项版本迭代参考)
 - [7. 实施流程（建议顺序）](#7-实施流程建议顺序)
 - [8. 关键结论速查](#8-关键结论速查)
+- [9. 具体文件修改方案（做法 2：抽方法 + 子类 override）](#9-具体文件修改方案做法-2抽方法--子类-override)
 - [附录：相关文件索引](#附录相关文件索引)
 
 ---
@@ -380,6 +381,10 @@ class SFTDataset(...):
 | 1 | 加到 episodes 表 | ✅ **安全**，官方 lerobot 加载不报错（已实测），cosmos-framework 的 `self._episodes[idx]` 还能白捡该字段 |
 | 2 | 加到 data 表 | ❌ **禁止**，会破坏 `info.json` 的 schema 校验，加载报 `CastError: column names don't match`（已实测） |
 | 3 | `info.json` 的 `features` 约束范围 | **只严格约束 data 表**，不约束 episodes 表 |
+| 4 | **pandas 3.0.5 破坏嵌套 list 列** | ❌ **不能用 pandas 3.0.5 读写 episodes parquet**（`stats/action/min` 等嵌套 list 列会损坏，报 `expected length 50 but got length 230` / `Malformed levels`）。加 caption 列用 **pyarrow**（append_column 保留 schema）或 **pandas 2.x**（py311 环境 2.3.1 实测 OK） |
+| 5 | `tasks` 列的实际类型 | **`numpy.ndarray`**（不是 list/tuple）。代码里判断要用 `hasattr(x, "__len__")` 而非 `isinstance(x, (list, tuple))`（已修复） |
+| 6 | **toy 数据集 stats 列 parquet 编码损坏** | ⚠️ **重大发现**：toy 数据集的 `stats/*/*` 嵌套 list 列，磁盘上的 def/rep level 编码损坏（`Malformed levels`）。读容忍，但**重写整个表（如加 caption 列）必然失败**（pyarrow 25 自己读→写→读都报错）。pyarrow 21（py311）容忍度更高能勉强写。真实私有数据需单独验证是否有此问题 |
+| 7 | **stats 列损坏的最终解法** | ✅ **drop 掉 `stats/*/*` 列**（45 个损坏列，训练用不到），只保留 17 个有效列 + 加 caption 列，即可用 pyarrow 25 正常读写。已用此法成功构造 `toy_lerobot3_with_caption` 数据集 |
 
 ### 6.4 视频解码层（torchcodec）
 
@@ -438,12 +443,391 @@ class SFTDataset(...):
 
 ---
 
+## 9. 具体文件修改方案（做法 2：抽方法 + 子类 override）
+
+> 采用**做法 2**（抽 `_decode_video_frames` 方法 + `LeRobotSFTDataset` 子类 override）。
+> **唯一修改的文件**：`cosmos_framework/data/generator/local_datasets/sft_dataset.py`（修改后 **1084 行**）。
+> 原 JSONL 流程（`get_sft_dataset`、`_load_sft_metadata_from_s3`、`SFTDataset` 原有行为）**完全不动**。
+> ✅ **本方案已实际落地**，以下行号均为文件修改后的真实行号。
+
+### 9.0 行号锚点（已落地后的真实行号）
+
+| 锚点 | 行号 | 备注 |
+|------|------|------|
+| `SFTDataset` 类定义 | 98 | 原有，未动 |
+| `_tokenize_caption` 方法 | 167-177 | 原有，未动 |
+| **`_decode_video_frames`（父类默认）** | **179-207** | ✅ 新增（改动 1） |
+| `process_one_sample` 方法 | 210 | 原有，decode 循环被替换（改动 2） |
+| `_LeRobotVideoDecoderCache` | **495-528** | ✅ 新增（改动 3） |
+| `LeRobotSFTDataset` | **530-577** | ✅ 新增（改动 3） |
+| `_flatten_metadata_by_window` | 580 | 原有，偏移后 |
+| `_load_sft_metadata_from_s3` | 600-696 | 原有，偏移后 |
+| `_select_lerobot_video_key` | **704-729** | ✅ 新增（改动 4） |
+| `_get_lerobot_video_width_height` | **731-745** | ✅ 新增（改动 4） |
+| `_load_lerobot_metadata` | **747-853** | ✅ 新增（改动 4） |
+| `get_sft_dataset` | 856-992 | 原有，偏移后 |
+| `get_sft_dataset_from_lerobot` | **999-1085** | ✅ 新增（改动 5，文件末尾） |
+
+---
+
+### 9.1 改动 1：新增 `_decode_video_frames` 方法
+
+**位置**：✅ 已落地在 **179-207 行**（`_tokenize_caption` 之后、`process_one_sample` 之前）。
+
+**类型**：新增方法（原 `SFTDataset` 内）
+
+**目的**：把 `process_one_sample` 里的视频解码循环抽成可 override 的钩子。
+
+**改动前**（`process_one_sample` 内 253-263 行）：
+
+```python
+            video_chunk = []
+            for idx, frame in enumerate(
+                ffmpeg_decode_video(input_video_path, scale_hw=(resize_h, resize_w), num_threads=2)
+            ):
+                if idx < start_frame:
+                    continue
+                elif idx <= end_frame:
+                    if (idx - start_frame) % temporal_interval == 0:
+                        video_chunk.append(frame)
+                else:
+                    break
+```
+
+**改动后**（新增方法，放 178 行）：
+
+```python
+    def _decode_video_frames(
+        self,
+        video_path: str,
+        start_frame: int,
+        end_frame: int,
+        temporal_interval: int,
+        resize_h: int,
+        resize_w: int,
+    ) -> list[np.ndarray]:
+        """Decode frames in [start_frame, end_frame] from a local video path.
+
+        原版实现：全量 ffmpeg decode + 按帧编号过滤。
+        返回 list[np.ndarray]（每帧 HWC uint8），供 process_one_sample 后续 np.stack。
+        """
+        video_chunk = []
+        for idx, frame in enumerate(
+            ffmpeg_decode_video(video_path, scale_hw=(resize_h, resize_w), num_threads=2)
+        ):
+            if idx < start_frame:
+                continue
+            elif idx <= end_frame:
+                if (idx - start_frame) % temporal_interval == 0:
+                    video_chunk.append(frame)
+            else:
+                break
+        return video_chunk
+```
+
+**关键**：方法签名覆盖 decode 循环依赖的全部变量（video_path / start_frame / end_frame / temporal_interval / resize_h / resize_w），返回 `video_chunk`（list of HWC uint8），这样 `process_one_sample` 里 265 行之后的 `np.stack` 等逻辑**不用改**。
+
+---
+
+### 9.2 改动 2：修改 `process_one_sample` 的 decode 循环
+
+**位置**：✅ 已落地在 `process_one_sample` 内（原 253-263 行，现偏移到 ~280 行附近，已替换为方法调用）。
+
+**类型**：替换（10 行 decode 循环 → 1 行方法调用）
+
+**改动后**（已落地）：
+
+```python
+            video_chunk = self._decode_video_frames(
+                video_path=input_video_path,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                temporal_interval=temporal_interval,
+                resize_h=resize_h,
+                resize_w=resize_w,
+            )
+```
+
+**注意**：
+- `input_video_path`、`start_frame`、`end_frame`、`temporal_interval`、`resize_h`、`resize_w` 都是 `process_one_sample` 里已经存在的局部变量，无需改动。
+- 之后的 `if not video_chunk` / `np.stack` / truncate / crop / transpose 逻辑**完全不动**。
+- 这一改动对原 `SFTDataset` 的行为**零影响**（方法体就是原来那 10 行，抽到了 `_decode_video_frames`）。
+
+---
+
+### 9.3 改动 3：新增 `_LeRobotVideoDecoderCache` + `LeRobotSFTDataset(SFTDataset)` 子类
+
+**位置**：✅ 已落地在 **487-577 行**（`SFTDataset` 类结束之后、`_flatten_metadata_by_window` 之前）。
+
+**类型**：新增类（2 个：decoder 缓存 + 子类）
+
+**目的**：override `_decode_video_frames`，用 torchcodec 共享 decoder + 按帧编号 seek，替换全量 decode。
+
+> 说明：原本方案里计划「从 `cosmos3_action_lerobot` 引入 `_LRUVideoDecoderCache`」，但落地时发现从那里 import 会**连带触发 lerobot 库 import**（那个模块顶部 `from lerobot.datasets.lerobot_dataset import LeRobotDataset`）。为避免污染 vision SFT 的 import 路径，改为**本地定义** `_LeRobotVideoDecoderCache`，且 torchcodec/fsspec 惰性 import。
+
+**已落地代码**（`_LeRobotVideoDecoderCache` 在 495-528 行，`LeRobotSFTDataset` 在 530-577 行）：
+
+```python
+class _LeRobotVideoDecoderCache:
+    """按视频路径缓存 torchcodec VideoDecoder 的 LRU 缓存（seek_mode="exact"）。"""
+    def __init__(self, max_size: int = 64):
+        from collections import OrderedDict
+        self._max_size = max_size
+        self._cache: "OrderedDict[str, tuple]" = OrderedDict()
+
+    def get_decoder(self, video_path: str):
+        from torchcodec.decoders import VideoDecoder
+        import fsspec
+        if video_path in self._cache:
+            self._cache.move_to_end(video_path)
+            return self._cache[video_path][0]
+        file_handle = fsspec.open(video_path).__enter__()
+        decoder = VideoDecoder(file_handle, seek_mode="exact")
+        self._cache[video_path] = (decoder, file_handle)
+        while len(self._cache) > self._max_size:
+            _, (_, old_fh) = self._cache.popitem(last=False)
+            old_fh.close()
+        return decoder
+
+
+class LeRobotSFTDataset(SFTDataset):
+    """override _decode_video_frames：共享 decoder + get_frames_in_range 区间 seek。"""
+    def __init__(self, *args, decoder_cache_max_size: int = 64, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._decoder_cache = _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
+
+    def _decode_video_frames(self, video_path, start_frame, end_frame, temporal_interval, resize_h, resize_w):
+        import torch.nn.functional as F
+        decoder = self._decoder_cache.get_decoder(video_path)
+        frame_batch = decoder.get_frames_in_range(start=start_frame, stop=end_frame + 1)
+        data = frame_batch.data  # [N, C, H, W] uint8
+        if temporal_interval > 1:
+            data = data[0::temporal_interval]
+        data = data.float()
+        data = F.interpolate(data, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
+        data = data.round().clamp(0, 255).to(torch.uint8)
+        data_nhwc = data.permute(0, 2, 3, 1).cpu().numpy()
+        return [data_nhwc[i] for i in range(data_nhwc.shape[0])]
+```
+
+**落地时补全的两个"待定项"**（原第 5 章标记）：
+
+1. **resize**：用 `torch.nn.functional.interpolate(mode="bicubic")` 对齐原版 ffmpeg 的 `-vf scale + bicubic`。
+2. **抽帧**：`data[0::temporal_interval]` 等价于原版「相对 start 取余 interval == 0」（因为 get_frames_in_range 返回的是连续帧，第 0 个元素就是全局 start_frame）。
+
+**注意**：`LeRobotSFTDataset.__init__` 用 `*args, **kwargs` 透传，兼容父类 `SFTDataset.__init__`（101 行）签名，额外加 `decoder_cache_max_size`。
+
+---
+
+### 9.4 改动 4：新增 3 个 LeRobot metadata 函数
+
+**位置**：✅ 已落地在 **704-853 行**（`_load_sft_metadata_from_s3` 结束之后、`get_sft_dataset` 之前）。
+
+**类型**：新增模块函数（3 个：`_select_lerobot_video_key` + `_get_lerobot_video_width_height` + `_load_lerobot_metadata`）
+
+**目的**：读 LeRobot → 产出和 `_load_sft_metadata_from_s3` **结构完全一致**的 metadata list。
+
+> 落地时把「选 video 字段」和「抓 width/height」拆成两个独立辅助函数（`_select_lerobot_video_key` 704-729 行、`_get_lerobot_video_width_height` 731-745 行），主函数 `_load_lerobot_metadata` 在 747-853 行。
+
+```python
+def _load_lerobot_metadata(
+    lerobot_root: str,
+    min_frames: int = 61,
+    min_short_edge: int = 0,
+    video_feature_key: str | None = None,
+    caption_key: str = "caption",        # ← 新增：episodes 表里 caption 列的列名
+) -> list[dict]:
+    """读 LeRobot 3.x 数据集（episodes 表带 caption 列），产出 metadata list。
+
+    步骤：
+    1. 读 meta/info.json → fps、video_path 模板、features
+    2. 读 meta/episodes/*.parquet → 每行一个 episode（含 caption 列）
+    3. 动态抓第一个 dtype=video 字段 → (width, height)（见 3.3 节 get_video_width_height）
+    4. 对每个 episode 构造 metadata dict：
+       - uuid = f"chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}"
+       - vision_path = info["video_path"] 模板填充
+       - width/height = video 字段 shape 前两位（shape=[H,W,C]）
+       - aspect_ratio = get_aspect_ratio(width, height)
+       - t2w_windows = [{
+           start_frame: round(from_timestamp * fps),
+           end_frame:   round(to_timestamp * fps) - 1,   # to 开区间，-1
+           temporal_interval: 1,
+           caption: episodes 表的 caption 列,   # 见下方「caption 处理」
+         }]
+    5. 过滤（duration > 61s、短边、window 帧数 < min_frames），对齐 _load_sft_metadata_from_s3
+    """
+    ...
+    return metadata_list   # 结构对齐 _load_sft_metadata_from_s3 的返回
+```
+
+**caption 处理逻辑**（已落地，802-837 行）：
+
+```python
+caption = row.get(caption_key)   # 802 行：只读 caption_key 指定的列，取不到为 None（不做 tasks 兜底）
+
+# 830-837 行：caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过
+window = {
+    "start_frame": start_frame,
+    "end_frame": end_frame,
+    "temporal_interval": 1,
+}
+if caption:
+    window["caption"] = caption
+```
+
+> 关键边界行为：缺 caption 列（或值为空）时，`window` 里**没有** `caption` key，下游 `_select_caption` 找不到已知 key → `return None` → `process_one_sample` 跳过该样本（对齐 JSONL 版本对缺 caption 的处理）。**不写 `caption: None`**，否则下游 `raw.strip()` 会 `AttributeError` 崩溃。
+
+**关键**：返回的 metadata dict 字段必须和 `_load_sft_metadata_from_s3`（554-563 行产出）**完全一致**：`uuid` / `vision_path` / `width` / `height` / `nb_frames` / `framerate` / `aspect_ratio` / `t2w_windows`。
+
+---
+
+### 9.5 改动 5：新增 `get_sft_dataset_from_lerobot` 函数
+
+**位置**：✅ 已落地在 **1000-1084 行**（`get_sft_dataset` 结束之后，文件末尾）。
+
+**类型**：新增模块函数
+
+**目的**：LeRobot 版入口，构造 `LeRobotSFTDataset`（而非 `SFTDataset`）。
+
+```python
+def get_sft_dataset_from_lerobot(
+    lerobot_root: str,
+    resolution: str = "720",
+    num_video_frames: int = -1,          # LeRobot 场景建议 -1（native chunk mode）
+    video_feature_key: str | None = None,
+    caption_key: str = "caption",        # ← 新增：传给 _load_lerobot_metadata
+    decoder_cache_max_size: int = 64,
+    # ... 其余参数与 get_sft_dataset 完全一致 ...
+    **kwargs,
+) -> LeRobotSFTDataset:
+    """LeRobot 版 get_sft_dataset，产出 metadata 后构造 LeRobotSFTDataset。"""
+    metadata_list = _load_lerobot_metadata(
+        lerobot_root,
+        video_feature_key=video_feature_key,
+        caption_key=caption_key,          # ← 唯一来源差异 + 列名透传
+    )
+
+    # ↓ 以下和 get_sft_dataset 后半段完全一样 ↓
+    if sample_by_window:
+        metadata_list = _flatten_metadata_by_window(metadata_list)
+    metadata_list.sort(key=lambda x: hashlib.sha256(x["uuid"].encode("utf-8")).hexdigest())
+
+    return LeRobotSFTDataset(
+        metadata=metadata_list,
+        num_video_frames=num_video_frames,
+        resolution=resolution,
+        decoder_cache_max_size=decoder_cache_max_size,
+        # ... 其余构造参数与 get_sft_dataset 一致 ...
+    )
+```
+
+---
+
+### 9.6 两入口函数差异清单（准确版）
+
+| # | 差异点 | `get_sft_dataset` | `get_sft_dataset_from_lerobot` |
+|---|--------|------------------|-------------------------------|
+| 1 | 签名 | `jsonl_paths: str\|list[str]` | `lerobot_root: str` + `video_feature_key: str\|None` |
+| 2 | metadata 来源 | `_load_sft_metadata_from_s3(...)` | `_load_lerobot_metadata(...)`（747-853 行） |
+| 3 | 构造的类 | `SFTDataset(...)` | `LeRobotSFTDataset(...)`（530-577 行） |
+
+**复用的部分**（两函数完全相同）：`_flatten_metadata_by_window`（580 行）+ `sha256` 排序 + 构造参数列表（因为子类 `__init__` 签名兼容父类）。
+
+> 之前文档里"只差 metadata 来源一行"的说法**不准确**，实际是 3 处差异（签名、来源、类名），见 9.6。
+
+---
+
+### 9.7 完全不动（复用）的清单
+
+| 项 | 说明 |
+|----|------|
+| `SFTDataset.__init__`（101 行） | 纯 metadata 驱动，不关心来源 |
+| `SFTDataset.__len__`（164 行） | 不动 |
+| `SFTDataset._tokenize_caption`（167-177 行） | 不动 |
+| `process_one_sample` 的 download + window 计算部分 | 不动（LeRobot 走 native chunk mode 分支） |
+| `process_one_sample` 的 stack/crop/caption tokenize/ret 构造部分 | 不动 |
+| `__iter__`（391 行） | 不动 |
+| `_flatten_metadata_by_window`（580 行） | 不动（被 get_sft_dataset_from_lerobot 复用） |
+| `_load_sft_metadata_from_s3`（600 行） | 不动（JSONL 入口保留） |
+| `get_sft_dataset`（856 行） | 不动（JSONL 入口保留） |
+
+---
+
+## 10. 训练接入改动（已落地，含留档注释）
+
+> 本方案的**训练接入点**已实际改好：`vision_sft_edge.py`（dataloader 定义）+ 启动脚本。原 JSONL 版均**注释保留，未删除**。
+
+### 10.1 `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py`
+
+| 位置 | 改动 |
+|------|------|
+| 顶部 import（48 行后） | 新增 `from ... import get_sft_dataset_from_lerobot`（带 `# LeRobot 3.x 适配` 注释） |
+| dataloader 的 `dataset=`（249 行起） | `L(get_sft_dataset)` → `L(get_sft_dataset_from_lerobot)`，参数从 `jsonl_paths` 换成 `lerobot_root` + `video_feature_key` + `caption_key`；原 JSONL 版整体注释保留 |
+
+新参数：
+
+```python
+dataset=L(get_sft_dataset_from_lerobot)(
+    ...
+    lerobot_root="${oc.env:DATASET_PATH}",               # LeRobot 数据集根目录
+    video_feature_key="observation.images.top",          # 指定 top 相机；不填则自动选第一个 usable
+    caption_key="caption",                               # episodes 表的 caption 列名
+    ...
+)
+```
+
+### 10.2 `examples/launch_sft_vision_edge_yundao.sh`
+
+| 位置 | 改动 |
+|------|------|
+| `DATASET_PATH`（第 9 行） | 改为 LeRobot 数据集根目录 `toy_lerobot3_with_caption`；原 JSONL 路径注释保留 |
+| `EXTRA_DATASET_CHECK`（第 80 行） | 校验 `meta/info.json` 存在（原来是 `train/video_dataset_file.jsonl`）；原校验注释保留 |
+
+---
+
+## 11. 验证与实测记录
+
+### 11.1 数据构造（drop stats 列 + 加 caption）
+
+**问题**：toy 数据集的 episodes 表有 45 个 `stats/*/*` 嵌套 list 列，磁盘编码损坏，重写整个表必然失败（见 6.3）。
+
+**解法**：drop 掉 `stats/*/*` 列（训练用不到），只保留 17 个有效列 + 加 caption 列，用 pyarrow 25 即可正常读写。
+
+**结果**：✅ 成功构造 `/mi/data2T/liujin/dataset/toy_lerobot3_with_caption/00ri/so100_battery/`（episodes 表 18 列：17 有效 + caption）。
+
+**caption 值**：`"Grasp a battery and put it in the bin."`（toy 数据 `tasks.parquet` 里自带的**任务指令**，50 个 episode 全部相同，非高质量视频描述，只够冒烟测试）。
+
+### 11.2 `_load_lerobot_metadata` 字段验证
+
+| 字段 | 验证值 | 结果 |
+|------|--------|------|
+| uuid | `chunk_0_file_0_episode_0` | ✅ |
+| width/height | 640×480（shape `[480,640,3]` 正确取位） | ✅ |
+| aspect_ratio | `4,3` | ✅ |
+| 帧编号 | `[0,553]`、`[554,1083]`（to 开区间 -1 生效） | ✅ |
+| vision_path | 指向 `observation.images.top`（usable=true） | ✅ |
+| caption 读取 | 正确读到 caption 列 | ✅ |
+
+### 11.3 训练全链路测试结果
+
+**结果**：✅ **全链路跑通**（metadata → caption → 视频解码 → 训练前向 loss 计算成功）。
+
+日志关键证据：
+```
+Total number of parameters: 1414924992（模型加载成功）
+PackedSequence(sample_lens=[11184, 10464, 11184, 10544], ...)（4 个 sample 打包）
+loss = 2.0362（前向成功）
+```
+
+---
+
 ## 附录：相关文件索引
 
 | 文件 | 作用 |
 |------|------|
-| `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | vision SFT 数据加载（`SFTDataset` + `get_sft_dataset` + metadata 解析） |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | vision SFT 数据加载（`SFTDataset` + `get_sft_dataset` + `get_sft_dataset_from_lerobot` + metadata 解析） |
 | `cosmos_framework/data/generator/local_datasets/helper.py` | `ffmpeg_decode_video`、`get_aspect_ratio`、`download_from_s3` |
 | `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴） |
 | `cosmos_framework/data/generator/action/datasets/base_dataset.py` | `_video_path`（video_path 模板拼接，可参考） |
-| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | vision SFT 实验配置（dataloader 接入点） |
+| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | vision SFT 实验配置（dataloader 接入点，已改为 LeRobot） |
+| `examples/launch_sft_vision_edge_yundao.sh` | 启动脚本（DATASET_PATH 已改为 LeRobot） |

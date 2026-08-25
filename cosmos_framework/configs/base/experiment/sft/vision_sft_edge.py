@@ -46,6 +46,7 @@ from cosmos_framework.data.generator.joint_dataloader import (
     RankPartitionedDataLoader,
 )
 from cosmos_framework.data.generator.local_datasets.sft_dataset import get_sft_dataset
+from cosmos_framework.data.generator.local_datasets.sft_dataset import get_sft_dataset_from_lerobot  # LeRobot 3.x 适配
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
 
@@ -246,23 +247,24 @@ vision_sft_edge = LazyDict(
                 datasets=dict(
                     video=dict(
                         ratio=1,
-                        dataset=L(get_sft_dataset)(
+                        # ============================================================
+                        # 【LeRobot 3.x 适配】改用 get_sft_dataset_from_lerobot 动态加载 LeRobot 数据集。
+                        # 原 JSONL 版本见下方注释（留档，未删除）。
+                        # ============================================================
+                        dataset=L(get_sft_dataset_from_lerobot)(
                             append_duration_fps_timestamps=True,
                             append_resolution_info=True,
-                            # Per-caption token cap. Structured-JSON captions are long, so
-                            # default to 2048 (measured max ~1790); tune via the TOML knob
-                            # [dataloader_train].max_caption_tokens. See sft_dataset.py
-                            # _MAX_CAPTION_TOKENS.
                             max_caption_tokens=2048,
                             caption_suffix="",
                             cfg_dropout_keep_metadata=False,
                             cfg_dropout_rate=0.1,
-                            # 70% T2V, 20% I2V (first frame), 10% V2V (first 5 frames / 2 latent frames)
                             conditioning_config={0: 0.7, 1: 0.2, 2: 0.1},
                             conditioning_fps=-1,
                             conditioning_fps_noise_std=0.0,
                             frame_selection_mode="first",
-                            jsonl_paths=["${oc.env:DATASET_PATH}/train/video_dataset_file.jsonl"],
+                            lerobot_root="${oc.env:DATASET_PATH}",   # LeRobot 数据集根目录（含 meta/info.json）
+                            video_feature_key="observation.images.top",  # 指定 top 相机；不填则自动选第一个 usable 的
+                            caption_key="caption",                   # episodes 表里的 caption 列名
                             min_short_edge=0,
                             num_video_frames=-1,
                             resolution="256",
@@ -270,17 +272,32 @@ vision_sft_edge = LazyDict(
                             temporal_compression_factor=4,
                             temporal_interval_mode="max_30fps",
                             use_system_prompt=False,
-                            # YAML spells this out as
-                            #   _target_: create_qwen2_tokenizer_with_download
-                            #   config_variant: gcp
-                            # but that pins the dataset's tokenizer to the GCP
-                            # variant, requiring credentials/gcp_checkpoint.secret.
-                            # Use a Hydra interpolation instead so launchers
-                            # (e.g. launch_vision_sft_edge_toml.sh) can flip
-                            # model.config.vlm_config.tokenizer.config_variant=hf
-                            # and have the dataset inherit the same setting.
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
                         ),
+                        # ============================================================
+                        # 【留档】原 JSONL 版本（改用 LeRobot 后注释掉，未删除）
+                        # ============================================================
+                        # dataset=L(get_sft_dataset)(
+                        #     append_duration_fps_timestamps=True,
+                        #     append_resolution_info=True,
+                        #     max_caption_tokens=2048,
+                        #     caption_suffix="",
+                        #     cfg_dropout_keep_metadata=False,
+                        #     cfg_dropout_rate=0.1,
+                        #     conditioning_config={0: 0.7, 1: 0.2, 2: 0.1},
+                        #     conditioning_fps=-1,
+                        #     conditioning_fps_noise_std=0.0,
+                        #     frame_selection_mode="first",
+                        #     jsonl_paths=["${oc.env:DATASET_PATH}/train/video_dataset_file.jsonl"],
+                        #     min_short_edge=0,
+                        #     num_video_frames=-1,
+                        #     resolution="256",
+                        #     sample_by_window=False,
+                        #     temporal_compression_factor=4,
+                        #     temporal_interval_mode="max_30fps",
+                        #     use_system_prompt=False,
+                        #     tokenizer_config="${model.config.vlm_config.tokenizer}",
+                        # ),
                     ),
                 ),
             ),
