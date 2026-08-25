@@ -13,8 +13,6 @@ import torch
 from typing_extensions import assert_never
 from tyro.conf import Suppress
 
-from cosmos_framework.utils.device_backend import BACKEND
-
 from cosmos_framework.inference.common.args import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -36,6 +34,7 @@ from cosmos_framework.inference.common.args import (
 from cosmos_framework.inference.common.config import CONFIG_DIR, PACKAGE_DIR
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
+from cosmos_framework.utils.device_backend import BACKEND
 from cosmos_framework.utils.flags import SMOKE, TRAINING
 
 if TYPE_CHECKING:
@@ -83,6 +82,7 @@ Guidance = Annotated[float, pydantic.Field(ge=0, le=7)]
 GuidanceInterval = tuple[pydantic.NonNegativeFloat, pydantic.NonNegativeFloat]
 PromptUpsamplerProbability = Annotated[float, pydantic.Field(ge=0, le=1)]
 ControlGuidance = Annotated[float, pydantic.Field(ge=0, le=10)]
+CausalHistoryBlocks = Annotated[int, pydantic.Field(ge=1, le=16)]
 
 
 class SamplingArgs(ArgsBase):
@@ -92,6 +92,9 @@ class SamplingArgs(ArgsBase):
     normalize_cfg: bool
     shift: float
     sigma_max: float
+    causal_num_blocks: pydantic.PositiveInt
+    causal_block_size: pydantic.PositiveInt
+    causal_history_blocks: CausalHistoryBlocks
 
 
 class SamplingOverrides(OverridesBase):
@@ -109,8 +112,23 @@ class SamplingOverrides(OverridesBase):
     """Shift in the UniPC sampler. Ignored when sampler='edm'."""
     sigma_max: Training[float | None] = None
     """Maximum sigma for the EDM sampler. Ignored when sampler='unipc'."""
+    causal_num_blocks: Training[pydantic.PositiveInt | None] = None
+    """Number of causal blocks generated sequentially after singleton condition block 0."""
+    causal_block_size: Training[pydantic.PositiveInt | None] = None
+    """Number of VAE latent frames jointly denoised in each generated causal block."""
+    causal_history_blocks: Training[CausalHistoryBlocks | None] = None
+    """Number of finalized clean causal blocks retained in GenKVCache. Maximum 16."""
 
     def _build_sampling(self, model_config: "OmniMoTModelConfig", sample_meta: "SampleMeta"):
+        is_causal = model_config.causal_training_strategy == "teacher_forcing"
+        if is_causal and self.causal_num_blocks is None:
+            raise ValueError("causal inference requires causal_num_blocks; num_frames is not a causal length input")
+        if self.causal_num_blocks is None:
+            self.causal_num_blocks = 1
+        if self.causal_block_size is None:
+            self.causal_block_size = 1
+        if self.causal_history_blocks is None:
+            self.causal_history_blocks = 16
         if sample_meta.model_mode.is_reasoner:
             # Diffusion sampling fields are unused by the reasoner but required by
             # OmniSampleArgs validation; fill in inert sentinels.
@@ -527,12 +545,14 @@ class VisionDataOverrides(OverridesBase, _VisionDataBase):
                 log.warning(
                     f"Number of frames {self.num_frames} is outside the recommended range [{MIN_NUM_FRAMES}, {MAX_NUM_FRAMES[self.resolution]}]. Quality may be degraded."
                 )
-        if SMOKE:
+        is_causal = model_config.causal_training_strategy == "teacher_forcing"
+        if SMOKE and not is_causal:
             self.num_frames = min(self.num_frames, 2)
-        temporal_compression_factor = model_config.tokenizer.temporal_compression_factor
-        self.num_frames = (
-            math.ceil((self.num_frames - 1) / temporal_compression_factor) * temporal_compression_factor + 1
-        )
+        if not is_causal:
+            temporal_compression_factor = model_config.tokenizer.temporal_compression_factor
+            self.num_frames = (
+                math.ceil((self.num_frames - 1) / temporal_compression_factor) * temporal_compression_factor + 1
+            )
 
 
 class SoundDataArgs(ArgsBase):
@@ -1091,13 +1111,27 @@ class OmniSampleOverrides(
         self.__dict__.update(merged.__dict__)
         self.model_mode = sample_meta.model_mode
 
+        is_causal = model_config.causal_training_strategy == "teacher_forcing"
+        if is_causal:
+            if "num_frames" in user_fields:
+                raise ValueError(
+                    "causal inference does not accept num_frames; configure causal_num_blocks and causal_block_size"
+                )
+            if self.causal_num_blocks is None:
+                raise ValueError("causal inference requires causal_num_blocks")
+            block_size = self.causal_block_size or 1
+            latent_frames = 1 + self.causal_num_blocks * block_size
+            temporal_factor = model_config.tokenizer.temporal_compression_factor
+            self.num_frames = (latent_frames - 1) * temporal_factor + 1
+
         # Model-specific num_frames default for video generation (e.g.
         # Cosmos3-Edge -> 121). Applies only when the user did not request a
         # frame count and the mode produces a plain video; image, action, and
         # reasoner modes keep their own num_frames handling (reasoner reports
         # VIDEO vision_mode but uses num_frames as an inert 1).
         if (
-            "num_frames" not in user_fields
+            not is_causal
+            and "num_frames" not in user_fields
             and sample_meta.vision_mode == VisionMode.VIDEO
             and not sample_meta.model_mode.is_action
             and not sample_meta.model_mode.is_reasoner

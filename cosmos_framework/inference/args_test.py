@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
+import copy
 import json
 import os
 import types
@@ -268,6 +269,42 @@ def test_edge_num_frames_default(tmp_path: Path):
     assert _num_frames("Cosmos3-Edge", "edge_t2i", model_mode=ModelMode.TEXT2IMAGE) == 1
     assert _num_frames("Cosmos3-Edge", "edge_policy", model_mode=ModelMode.POLICY) == 189
     assert _num_frames("Cosmos3-Edge", "edge_reasoner", model_mode=ModelMode.REASONER, prompt="Describe.") == 1
+
+
+def test_causal_length_is_derived_from_blocks(tmp_path: Path):
+    setup_args = OmniSetupOverrides(
+        checkpoint_path=DEFAULT_CHECKPOINT_NAME,
+        output_dir=tmp_path / "outputs_causal",
+    ).build_setup()
+    model_dict: "OmniMoTModel" = structure_config(
+        setup_args.load_model_config_dict(),
+        omegaconf.DictConfig,
+    )
+    model_config = copy.deepcopy(model_dict.config)
+    model_config.causal_training_strategy = "teacher_forcing"
+    image_path = tmp_path / "condition.png"
+    image_path.touch()
+
+    args = OmniSampleOverrides(
+        name="causal",
+        output_dir=tmp_path / "causal",
+        model_mode=ModelMode.IMAGE2VIDEO,
+        vision_path=str(image_path),
+        causal_num_blocks=3,
+        causal_block_size=2,
+    ).build_sample(model_config=model_config)
+    assert args.causal_history_blocks == 16
+    assert args.num_frames == 25  # latent T = 1 + 3*2 = 7; pixel T = (7-1)*4+1
+
+    with pytest.raises(ValueError, match="does not accept num_frames"):
+        OmniSampleOverrides(
+            name="causal_explicit_frames",
+            output_dir=tmp_path / "causal_explicit_frames",
+            model_mode=ModelMode.IMAGE2VIDEO,
+            vision_path=str(image_path),
+            causal_num_blocks=3,
+            num_frames=25,
+        ).build_sample(model_config=model_config)
 
 
 def test_build_sound_data_requires_sound_path_for_a2v():

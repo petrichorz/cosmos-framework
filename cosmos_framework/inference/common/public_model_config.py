@@ -24,6 +24,7 @@ _TARGET_ALIASES = {
     "projects.cosmos3.vfm.models.mot.unified_mot.Qwen3VLMoTConfig.from_json_file": "qwen3_vl_mot_config_from_json_file",
     "projects.cosmos3.vfm.models.mot.unified_mot.Qwen3VLTextForCausalLM": "qwen3_vl_text_for_causal_lm",
     "projects.cosmos3.vfm.models.omni_mot_model.OmniMoTModel": "omni_mot_model",
+    "projects.cosmos3.vfm.models.omni_mot_causal_model.OmniMoTCausalModel": "omni_mot_causal_model",
     "projects.cosmos3.vfm.processors.build_processor_lazy": "build_processor_lazy",
     "projects.cosmos3.vfm.tokenizers.audio.avae.AVAEInterface": "avae_interface",
     "projects.cosmos3.vfm.tokenizers.wan2pt2_vae_4x16x16.Wan2pt2VAEInterface": "wan2pt2_vae_interface",

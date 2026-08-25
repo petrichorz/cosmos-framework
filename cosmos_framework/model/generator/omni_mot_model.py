@@ -2528,6 +2528,39 @@ class OmniMoTModel(ImaginaireModel):
         else:
             return other_v_list, v_list
 
+    def _generate_causal_inference_from_prepared(
+        self,
+        *,
+        data_batch: Dict,
+        net: torch.nn.Module | None,
+        sampler: Any | None,
+        guidance: float,
+        guidance_interval: Optional[list[float]],
+        velocity_postprocess_builder: Optional[Callable],
+        seed: list[int],
+        n_sample: int,
+        has_negative_prompt: bool,
+        num_steps: int,
+        shift: float,
+        sigma_max: float,
+        skip_text_tokens_for_cfg: bool,
+        normalize_cfg: bool,
+        sequence_plans: list,
+        gen_data_clean: GenerationDataClean,
+        cond_tokens: list,
+        uncond_tokens: list,
+        initial_noise: list[torch.Tensor],
+        condition_reference: list[torch.Tensor],
+        condition_mask: list[torch.Tensor],
+        has_noisy_actions: bool,
+        causal_num_blocks: int | None,
+        causal_block_size: int,
+        causal_history_blocks: int,
+    ) -> dict[str, list[torch.Tensor]] | None:
+        """Subclass hook for causal inference after ordinary input preparation."""
+
+        return None
+
     @torch.no_grad()
     def generate_samples_from_batch(
         self,
@@ -2557,6 +2590,9 @@ class OmniMoTModel(ImaginaireModel):
         upsample_repetition_penalty: float = 1.0,
         upsample_presence_penalty: float = 0.0,
         upsample_seed: int | None = None,
+        causal_num_blocks: int | None = None,
+        causal_block_size: int = 1,
+        causal_history_blocks: int = 16,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         """
@@ -2699,6 +2735,36 @@ class OmniMoTModel(ImaginaireModel):
             n_sample = len(initial_noise)
 
         assert n_sample == len(seed), f"Number of samples {n_sample} must match number of seeds {len(seed)}"
+
+        causal_result = self._generate_causal_inference_from_prepared(
+            data_batch=data_batch,
+            net=net,
+            sampler=sampler,
+            guidance=guidance,
+            guidance_interval=guidance_interval,
+            velocity_postprocess_builder=velocity_postprocess_builder,
+            seed=seed,
+            n_sample=n_sample,
+            has_negative_prompt=has_negative_prompt,
+            num_steps=num_steps,
+            shift=shift,
+            sigma_max=sigma_max,
+            skip_text_tokens_for_cfg=skip_text_tokens_for_cfg,
+            normalize_cfg=normalize_cfg,
+            sequence_plans=sequence_plans,
+            gen_data_clean=gen_data_clean,
+            cond_tokens=cond_tokens,
+            uncond_tokens=uncond_tokens,
+            initial_noise=initial_noise,
+            condition_reference=condition_reference,
+            condition_mask=condition_mask,
+            has_noisy_actions=has_noisy_actions,
+            causal_num_blocks=causal_num_blocks,
+            causal_block_size=causal_block_size,
+            causal_history_blocks=causal_history_blocks,
+        )
+        if causal_result is not None:
+            return causal_result
 
         reuse_pack_templates = self._can_reuse_inference_pack_templates(sequence_plans, gen_data_clean)
         cond_packed_sequence_template: PackedSequence | None = None

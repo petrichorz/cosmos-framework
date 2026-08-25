@@ -76,3 +76,13 @@ def test_public_model_config_round_trip_removes_internal_metadata():
     assert restored == model_config
     assert load_model_config_from_hf_config({"model": public_model_config}) == model_config
     assert load_model_config_from_hf_config({"model": model_config}) == model_config
+
+
+def test_causal_model_target_has_public_alias():
+    model_config = {
+        "_target_": "cosmos_framework.model.generator.omni_mot_causal_model.OmniMoTCausalModel",
+        "config": {},
+    }
+    public = build_public_model_config(model_config)
+    assert public["_target"] == "omni_mot_causal_model"
+    assert restore_model_config_from_public_model_config(public) == model_config
