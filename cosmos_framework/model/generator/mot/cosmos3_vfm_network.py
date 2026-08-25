@@ -762,6 +762,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         packed_tokens_action, per_token_domain_id = self.pack_action(
             action.tokens, action.token_shapes, action.domain_id
         )
+        # The VFM root FSDP unit intentionally does not cast its structured
+        # PackedSequence input: fp32 diffusion timesteps must survive intact.
+        # Align action payloads explicitly before the bf16 projection instead.
+        packed_tokens_action = packed_tokens_action.to(target_dtype)
         packed_tokens_action = self.action2llm(packed_tokens_action, per_token_domain_id)
 
         packed_tokens_action = packed_tokens_action + self.action_modality_embed.view(

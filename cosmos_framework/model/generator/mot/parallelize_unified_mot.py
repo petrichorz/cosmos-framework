@@ -19,24 +19,24 @@ import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.distributed.fsdp import fully_shard, register_fsdp_forward_method
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard, register_fsdp_forward_method
 from torch.utils.checkpoint import (
     CheckpointPolicy,
     create_selective_checkpoint_contexts,
 )
 
-from cosmos_framework.utils import log
 from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
-from cosmos_framework.model.generator.mot.attention import SplitInfo, dispatch_attention
-from cosmos_framework.model.generator.mot.context_parallel_utils import context_parallel_attention
-from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 from cosmos_framework.data.generator.sequence_packing.runtime import (
     SequencePack,
     from_und_gen_splits,
     get_gen_seq,
     get_und_seq,
 )
+from cosmos_framework.model.generator.mot.attention import SplitInfo, dispatch_attention
+from cosmos_framework.model.generator.mot.context_parallel_utils import context_parallel_attention
+from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
+from cosmos_framework.utils import log
 from cosmos_framework.utils.generator.parallelism import ParallelDims
 
 
@@ -391,6 +391,7 @@ def apply_replicated_attention_io_cp(
 def apply_fsdp(
     model: nn.Module,
     parallel_dims: ParallelDims,
+    mp_policy: MixedPrecisionPolicy | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -408,9 +409,10 @@ def apply_fsdp(
     Args:
         model (nn.Module): The model to apply data parallelism to.
         parallel_dims (ParallelDims): The device mesh to use for data parallelism and expert parallel.
+        mp_policy: Optional FSDP2 mixed-precision policy shared by every MoT block.
     """
     for _, block in model.model.layers.named_children():
-        fully_shard(block, mesh=parallel_dims.dp_mesh)
+        fully_shard(block, mesh=parallel_dims.dp_mesh, mp_policy=mp_policy)
         register_fsdp_forward_method(block, "reasoner_forward")
 
 
@@ -420,6 +422,7 @@ def parallelize_unified_mot(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     attention_io_layout: str = "sequence_sharded",
+    fsdp_mixed_precision_policy: MixedPrecisionPolicy | None = None,
 ) -> nn.Module:
     """Optimize the model using CP, FSDP, activation checkpointing, and torch.compile.
 
@@ -439,6 +442,8 @@ def parallelize_unified_mot(
             ``save_ops_regex`` ops, mode="full", save only the outputs of
             each transformer block).
         attention_io_layout: Tensor layout at the attention boundary under CP.
+        fsdp_mixed_precision_policy: Optional policy applied uniformly to every
+            nested FSDP2 block. ``None`` preserves the historical parameter dtype.
 
     """
     if parallel_dims is not None and parallel_dims.cp_enabled:
@@ -452,5 +457,5 @@ def parallelize_unified_mot(
     if compile_config.enabled:
         apply_compile(model, compile_config)
     if parallel_dims is not None and parallel_dims.dp_enabled:
-        apply_fsdp(model, parallel_dims)
+        apply_fsdp(model, parallel_dims, mp_policy=fsdp_mixed_precision_policy)
     return model

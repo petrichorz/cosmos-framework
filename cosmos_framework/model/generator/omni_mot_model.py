@@ -46,7 +46,10 @@ from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
     restore_inference_attention_dispatch,
 )
 from cosmos_framework.model.generator.mot.modeling_utils import has_noisy_tokens
-from cosmos_framework.model.generator.mot.parallelize_vfm_network import parallelize_vfm_network
+from cosmos_framework.model.generator.mot.parallelize_vfm_network import (
+    parallelize_vfm_network,
+    resolve_vfm_parameter_storage_dtype,
+)
 from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
 from cosmos_framework.model.generator.tokenizers.interface import VideoTokenizerInterface
 from cosmos_framework.model.generator.upsampler.prompts import build_messages, clean_response
@@ -193,6 +196,11 @@ class OmniMoTModel(ImaginaireModel):
 
     def build_net(self, dtype: torch.dtype, *, lora_enabled: bool | None = None) -> torch.nn.Module:
         # Build model network and parallelize it.
+        dtype = resolve_vfm_parameter_storage_dtype(
+            dtype,
+            self.config.parallelism,
+            fsdp_enabled=self.parallel_dims is not None and self.parallel_dims.dp_enabled,
+        )
         lora_enabled = self.config.lora_enabled if lora_enabled is None else lora_enabled
         with torch.device("meta"):
             assert self.vlm_config.model_instance is not None, "Model instance should be specified"
@@ -258,6 +266,8 @@ class OmniMoTModel(ImaginaireModel):
             parallel_dims=self.parallel_dims,
             compile_config=self.config.compile,
             ac_config=self.config.activation_checkpointing,
+            parallelism_config=self.config.parallelism,
+            precision=self.config.precision,
             attention_io_layout=self.config.parallelism.attention_io_layout,
         )
 

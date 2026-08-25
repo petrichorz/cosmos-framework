@@ -2,12 +2,46 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 import torch
-from torch.distributed.fsdp import fully_shard, register_fsdp_forward_method
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard, register_fsdp_forward_method
 
 from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
+from cosmos_framework.configs.base.defaults.parallelism import (
+    PRECISION_TO_TORCH_DTYPE,
+    ParallelismConfig,
+)
 from cosmos_framework.model.generator.mot.parallelize_unified_mot import parallelize_unified_mot
 from cosmos_framework.utils.generator.parallelism import ParallelDims
+
+
+def build_vfm_fsdp_mixed_precision_policy(
+    parallelism_config: ParallelismConfig,
+    precision: str,
+    *,
+    cast_forward_inputs: bool,
+) -> MixedPrecisionPolicy | None:
+    """Build an opt-in VFM FSDP2 policy without changing legacy runs."""
+
+    if not parallelism_config.fsdp_mixed_precision_enabled:
+        return None
+    return MixedPrecisionPolicy(
+        param_dtype=PRECISION_TO_TORCH_DTYPE[precision],
+        reduce_dtype=PRECISION_TO_TORCH_DTYPE[parallelism_config.fsdp_master_dtype],
+        cast_forward_inputs=cast_forward_inputs,
+    )
+
+
+def resolve_vfm_parameter_storage_dtype(
+    requested_dtype: torch.dtype,
+    parallelism_config: ParallelismConfig,
+    *,
+    fsdp_enabled: bool,
+) -> torch.dtype:
+    """Resolve persistent parameter dtype for legacy and mixed-precision VFM."""
+
+    if not (fsdp_enabled and parallelism_config.fsdp_mixed_precision_enabled):
+        return requested_dtype
+    return PRECISION_TO_TORCH_DTYPE[parallelism_config.fsdp_master_dtype]
 
 
 def apply_compile(model: torch.nn.Module, config: CompileConfig):
@@ -47,6 +81,8 @@ def parallelize_vfm_network(
     parallel_dims: ParallelDims | None,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
+    parallelism_config: ParallelismConfig,
+    precision: str,
     attention_io_layout: str = "sequence_sharded",
 ) -> torch.nn.Module:
     """Optimize the model using FSDP, CP, activation checkpointing, and torch.compile.
@@ -63,11 +99,29 @@ def parallelize_vfm_network(
             ``OmniMoTModelConfig.sac``. Forwarded to
             ``parallelize_unified_mot``; ``None`` falls back to the
             ``ActivationCheckpointingConfig`` defaults.
+        parallelism_config: FSDP topology, opt-in mixed-precision switch, and
+            persistent master-parameter dtype.
+        precision: Forward/backward compute dtype name.
         attention_io_layout: Tensor layout at the attention boundary under CP.
     """
     model.attention_io_layout = attention_io_layout
     if parallel_dims is not None and parallel_dims.cp_enabled:
         model.parallel_dims = parallel_dims
+
+    # The root receives a structured PackedSequence containing floating-point
+    # metadata (notably diffusion timesteps) that must remain fp32. Nested MoT
+    # blocks receive ordinary hidden-state tensors and should retain FSDP's
+    # automatic cast to the bf16 compute dtype.
+    root_mp_policy = build_vfm_fsdp_mixed_precision_policy(
+        parallelism_config,
+        precision,
+        cast_forward_inputs=False,
+    )
+    block_mp_policy = build_vfm_fsdp_mixed_precision_policy(
+        parallelism_config,
+        precision,
+        cast_forward_inputs=True,
+    )
 
     model.language_model = parallelize_unified_mot(
         model.language_model,
@@ -75,6 +129,7 @@ def parallelize_vfm_network(
         compile_config=compile_config,
         ac_config=ac_config,
         attention_io_layout=attention_io_layout,
+        fsdp_mixed_precision_policy=block_mp_policy,
     )
 
     if compile_config.enabled and compile_config.compiled_region == "all":
@@ -88,6 +143,7 @@ def parallelize_vfm_network(
             module=model,
             mesh=parallel_dims.dp_mesh,
             ignored_params=ignored_params,
+            mp_policy=root_mp_policy,
         )
 
         # Make ``model.generate_reasoner_text(...)`` trigger the same

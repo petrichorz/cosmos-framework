@@ -173,6 +173,21 @@ class ParallelismConfig(BaseModel):
             "Almost always 1 for SFT."
         ),
     )
+    fsdp_mixed_precision_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable VFM FSDP2 mixed precision. When enabled, persistent FSDP "
+            "parameter shards use fsdp_master_dtype while forward/backward use "
+            "model.precision. Disabled by default to preserve existing VFM behavior."
+        ),
+    )
+    fsdp_master_dtype: str = Field(
+        default="float32",
+        description=(
+            "Persistent FSDP parameter-shard and gradient-reduction dtype. "
+            "Used by VLM and by VFM when fsdp_mixed_precision_enabled is true."
+        ),
+    )
 
 
 class CompileConfig(BaseModel):

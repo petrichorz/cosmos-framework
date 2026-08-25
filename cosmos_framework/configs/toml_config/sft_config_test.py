@@ -31,6 +31,22 @@ _CUSTOM_PAYLOAD = {
 # 1. pydantic schema validation                                               #
 # --------------------------------------------------------------------------- #
 class TestSchemaValidation:
+    def test_vfm_fsdp_mixed_precision_fields_validate(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge"},
+            "model": {
+                "parallelism": {
+                    "fsdp_mixed_precision_enabled": True,
+                    "fsdp_master_dtype": "float32",
+                }
+            },
+        }
+
+        cfg = SFTExperimentConfig.model_validate(raw)
+
+        assert cfg.model.parallelism.fsdp_mixed_precision_enabled is True
+        assert cfg.model.parallelism.fsdp_master_dtype == "float32"
+
     def test_teacher_forcing_model_fields_validate(self) -> None:
         raw = {
             "job": {"task": "vfm", "experiment": "vision_sft_edge"},
@@ -103,6 +119,22 @@ class TestSchemaValidation:
 # 2. build_hydra_overrides must NOT emit [custom] as per-leaf overrides        #
 # --------------------------------------------------------------------------- #
 class TestBuildHydraOverrides:
+    def test_vfm_fsdp_mixed_precision_fields_route_to_parallelism_config(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge"},
+            "model": {
+                "parallelism": {
+                    "fsdp_mixed_precision_enabled": True,
+                    "fsdp_master_dtype": "float32",
+                }
+            },
+        }
+
+        overrides = build_hydra_overrides(raw)
+
+        assert "model.config.parallelism.fsdp_mixed_precision_enabled=true" in overrides
+        assert "model.config.parallelism.fsdp_master_dtype=float32" in overrides
+
     def test_teacher_forcing_model_fields_route_to_vfm_model_config(self) -> None:
         raw = {
             "job": {"task": "vfm", "experiment": "vision_sft_edge"},
