@@ -727,12 +727,17 @@ class DataloaderTrainConfig(BaseModel):
             "recipe default. Skipped on VLM (the data packer caps via max_sequence_length)."
         ),
     )
+    align_teacher_forcing_block_frames: bool = Field(
+        default=False,
+        description=(
+            "VFM only. After the normal temporal-compression alignment, trim one temporal "
+            "chunk when needed so the latent frame count is even. This aligns two-frame "
+            "teacher-forcing blocks with 128-token Block Attention tiles."
+        ),
+    )
     seed: int = Field(
         default=42,
-        description=(
-            "Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has "
-            "no seed ctor kwarg there)."
-        ),
+        description=("Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has no seed ctor kwarg there)."),
     )
 
 

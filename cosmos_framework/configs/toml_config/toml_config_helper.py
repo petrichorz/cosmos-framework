@@ -50,11 +50,24 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         # not config.job.* — hoist it out of the job section.
         ("job", "upload_reproducible_setup"): ("upload_reproducible_setup",),
         ("model", "attn_implementation"): None,
-        ("model", "backbone"): None,                                           # VLM-only — VFM has no model.config.backbone
+        ("model", "backbone"): None,  # VLM-only — VFM has no model.config.backbone
         # Per-caption token cap lives on the nested SFT dataset, not a top-level
         # dataloader scalar — route it to the get_sft_dataset node.
         ("dataloader_train", "max_caption_tokens"): (
-            "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_caption_tokens",
+            "dataloader_train",
+            "dataloader",
+            "datasets",
+            "video",
+            "dataset",
+            "max_caption_tokens",
+        ),
+        ("dataloader_train", "align_teacher_forcing_block_frames"): (
+            "dataloader_train",
+            "dataloader",
+            "datasets",
+            "video",
+            "dataset",
+            "align_teacher_forcing_block_frames",
         ),
         ("model",): ("model", "config"),
     },
@@ -103,7 +116,8 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         # PoolPackingBatcher (dataloader_train.batcher.*), not flat on the loader.
         ("dataloader_train", "max_samples_per_batch"): ("dataloader_train", "batcher", "max_batch_size"),
         ("dataloader_train", "max_sequence_length"): ("dataloader_train", "batcher", "max_tokens"),
-        ("dataloader_train", "max_caption_tokens"): None,                       # VFM-only knob — VLM packer caps via max_sequence_length
+        ("dataloader_train", "max_caption_tokens"): None,  # VFM-only knob — VLM packer caps via max_sequence_length
+        ("dataloader_train", "align_teacher_forcing_block_frames"): None,
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
     },

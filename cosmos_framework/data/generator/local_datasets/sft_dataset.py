@@ -37,6 +37,26 @@ _MAX_CAPTION_TOKENS = 1024
 _DURATION_TEMPLATE = "The video is {duration:.1f} seconds long and is of {fps:.0f} FPS."
 _RESOLUTION_TEMPLATE = "This video is of {height}x{width} resolution."
 
+
+def align_pixel_frames_for_even_latent_t(num_pixel_frames: int, temporal_compression_factor: int) -> int:
+    """Return a ``tcf*N+1`` pixel length whose compressed latent length is even."""
+
+    if num_pixel_frames < 1:
+        raise ValueError(f"num_pixel_frames must be positive, got {num_pixel_frames}")
+    if temporal_compression_factor < 1:
+        raise ValueError(f"temporal_compression_factor must be positive, got {temporal_compression_factor}")
+    aligned_frames = (num_pixel_frames - 1) // temporal_compression_factor * temporal_compression_factor + 1
+    latent_frames = 1 + (aligned_frames - 1) // temporal_compression_factor
+    if latent_frames % 2 != 0:
+        aligned_frames -= temporal_compression_factor
+    if aligned_frames < 1:
+        raise ValueError(
+            "cannot produce a positive pixel sequence with an even latent frame count: "
+            f"num_pixel_frames={num_pixel_frames}, temporal_compression_factor={temporal_compression_factor}"
+        )
+    return aligned_frames
+
+
 # Caption types available in the SFT JSONL.
 # Format: {model}_{style}
 #   model: qwen3_235b | qwen3_32b | qwen3p5_397b
@@ -118,6 +138,7 @@ class SFTDataset(torch.utils.data.IterableDataset):
         conditioning_fps_noise_std: float = 0.0,
         conditioning_config: dict[int, float] | None = None,
         temporal_compression_factor: int = 4,
+        align_teacher_forcing_block_frames: bool = False,
     ):
         assert temporal_interval_mode in ("force_one", "max_30fps", "entire_chunk"), (
             f"Unknown temporal_interval_mode={temporal_interval_mode!r}"
@@ -144,6 +165,7 @@ class SFTDataset(torch.utils.data.IterableDataset):
         self.conditioning_fps_noise_std = conditioning_fps_noise_std
 
         self.temporal_compression_factor = temporal_compression_factor
+        self.align_teacher_forcing_block_frames = align_teacher_forcing_block_frames
         self.conditioning_config: dict[int, float] | None = None
         if conditioning_config is not None:
             total_prob = sum(conditioning_config.values())
@@ -273,6 +295,11 @@ class SFTDataset(torch.utils.data.IterableDataset):
 
         # Truncate temporally to temporal_compression_factor * N + 1
         target_t = (video_chunk.shape[0] - 1) // self.temporal_compression_factor * self.temporal_compression_factor + 1
+        if self.align_teacher_forcing_block_frames:
+            target_t = align_pixel_frames_for_even_latent_t(
+                target_t,
+                self.temporal_compression_factor,
+            )
 
         # Apply spatial center crop and temporal truncation
         video_chunk = video_chunk[:target_t, crop_y : crop_y + target_h, crop_x : crop_x + target_w]  # [T,H,W,3]
@@ -594,6 +621,7 @@ def get_sft_dataset(
     conditioning_fps_noise_std: float = 0.0,
     conditioning_config: dict[int, float] | None = None,
     temporal_compression_factor: int = 4,
+    align_teacher_forcing_block_frames: bool = False,
     **kwargs,
 ) -> SFTDataset:
     """Create SFT video dataset from one or more JSONL files on S3.
@@ -647,6 +675,8 @@ def get_sft_dataset(
             conditioning (all frames are generation targets).
         temporal_compression_factor: VAE temporal compression factor used to
             convert pixel frame count to latent frame count.
+        align_teacher_forcing_block_frames: If True, trim at most one temporal
+            compression chunk so the resulting latent frame count is even.
     Returns:
         SFTDataset instance
     """
@@ -709,5 +739,6 @@ def get_sft_dataset(
         conditioning_fps_noise_std=conditioning_fps_noise_std,
         conditioning_config=conditioning_config,
         temporal_compression_factor=temporal_compression_factor,
+        align_teacher_forcing_block_frames=align_teacher_forcing_block_frames,
     )
     return dataset
