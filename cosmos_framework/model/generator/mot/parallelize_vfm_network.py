@@ -139,12 +139,19 @@ def parallelize_vfm_network(
         # Collect parameters to ignore during FSDP wrapping
         ignored_params = set()
 
-        model = fully_shard(
-            module=model,
-            mesh=parallel_dims.dp_mesh,
-            ignored_params=ignored_params,
-            mp_policy=root_mp_policy,
-        )
+        if root_mp_policy is None:
+            model = fully_shard(
+                module=model,
+                mesh=parallel_dims.dp_mesh,
+                ignored_params=ignored_params,
+            )
+        else:
+            model = fully_shard(
+                module=model,
+                mesh=parallel_dims.dp_mesh,
+                ignored_params=ignored_params,
+                mp_policy=root_mp_policy,
+            )
 
         # Make ``model.generate_reasoner_text(...)`` trigger the same
         # pre-forward unshard / post-forward reshard hooks that

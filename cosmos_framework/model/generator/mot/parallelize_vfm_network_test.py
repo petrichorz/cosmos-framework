@@ -96,3 +96,47 @@ def test_nested_mot_fsdp_units_receive_mixed_precision_policy() -> None:
 
     assert fully_shard.call_count == 2
     assert all(call.kwargs["mp_policy"] is policy for call in fully_shard.call_args_list)
+
+
+def test_nested_mot_fsdp_units_omit_disabled_mixed_precision_policy() -> None:
+    model = _TinyMoT()
+    parallel_dims = SimpleNamespace(dp_mesh=object())
+
+    with (
+        patch("cosmos_framework.model.generator.mot.parallelize_unified_mot.fully_shard") as fully_shard,
+        patch("cosmos_framework.model.generator.mot.parallelize_unified_mot.register_fsdp_forward_method"),
+    ):
+        apply_fsdp(model, parallel_dims, mp_policy=None)
+
+    assert fully_shard.call_count == 2
+    assert all("mp_policy" not in call.kwargs for call in fully_shard.call_args_list)
+
+
+def test_parallelize_vfm_omits_disabled_root_mixed_precision_policy() -> None:
+    config = ParallelismConfig(fsdp_mixed_precision_enabled=False, fsdp_master_dtype="float32")
+    model = SimpleNamespace(language_model=object())
+    parallel_dims = SimpleNamespace(cp_enabled=False, dp_enabled=True, dp_mesh=object())
+    compile_config = SimpleNamespace(enabled=False, compiled_region="language")
+
+    with (
+        patch(
+            "cosmos_framework.model.generator.mot.parallelize_vfm_network.parallelize_unified_mot",
+            side_effect=lambda language_model, **_: language_model,
+        ),
+        patch(
+            "cosmos_framework.model.generator.mot.parallelize_vfm_network.fully_shard",
+            side_effect=lambda **kwargs: kwargs["module"],
+        ) as fully_shard,
+        patch("cosmos_framework.model.generator.mot.parallelize_vfm_network.register_fsdp_forward_method"),
+    ):
+        result = parallelize_vfm_network(
+            model,
+            parallel_dims=parallel_dims,
+            compile_config=compile_config,
+            ac_config=SimpleNamespace(),
+            parallelism_config=config,
+            precision="bfloat16",
+        )
+
+    assert result is model
+    assert "mp_policy" not in fully_shard.call_args.kwargs

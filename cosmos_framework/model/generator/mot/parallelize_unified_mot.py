@@ -412,7 +412,10 @@ def apply_fsdp(
         mp_policy: Optional FSDP2 mixed-precision policy shared by every MoT block.
     """
     for _, block in model.model.layers.named_children():
-        fully_shard(block, mesh=parallel_dims.dp_mesh, mp_policy=mp_policy)
+        if mp_policy is None:
+            fully_shard(block, mesh=parallel_dims.dp_mesh)
+        else:
+            fully_shard(block, mesh=parallel_dims.dp_mesh, mp_policy=mp_policy)
         register_fsdp_forward_method(block, "reasoner_forward")
 
 
