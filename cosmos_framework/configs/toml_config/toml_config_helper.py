@@ -78,16 +78,23 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "teacher_forcing_history_blocks_max"): None,
         ("model", "teacher_forcing_max_sequence_length"): None,
         ("model", "teacher_forcing_dense_mode"): None,
+        ("model", "teacher_forcing_attention_backend"): None,
+        ("model", "teacher_forcing_block_shape"): None,
+        ("model", "teacher_forcing_block_strict"): None,
         ("model", "teacher_forcing_visualize_sdpa_mask"): None,
         ("model", "lora_enabled"): None,
         ("model", "lora_rank"): None,
         ("model", "lora_alpha"): None,
         ("model", "lora_target_modules"): None,
-        ("model", "tokenizer"): None,                                          # blocks model.tokenizer.*
+        ("model", "tokenizer"): None,  # blocks model.tokenizer.*
         ("dataloader_train", "seed"): None,
-        ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
-        ("scheduler", "verbosity_interval"): None,                             # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
-        ("trainer", "callbacks", "compile_tokenizer"): None,                   # VFM-only callback (VLM has no torch.compile of the tokenizer)
+        ("optimizer", "eps"): None,  # VLM_OPTIMIZER_KWARGS has no eps field
+        ("scheduler", "verbosity_interval"): None,  # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
+        (
+            "trainer",
+            "callbacks",
+            "compile_tokenizer",
+        ): None,  # VFM-only callback (VLM has no torch.compile of the tokenizer)
         # Rename / re-route to the VLM path
         ("model", "attn_implementation"): ("model", "config", "policy", "attn_implementation"),
         ("model", "ema"): ("model", "config", "ema"),

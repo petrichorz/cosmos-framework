@@ -223,6 +223,9 @@ class OmniMoTModel(ImaginaireModel):
                 video_temporal_causal=self.config.video_temporal_causal,
                 teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
                 teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
+                teacher_forcing_attention_backend=self.config.teacher_forcing_attention_backend,
+                teacher_forcing_block_shape=self.config.teacher_forcing_block_shape,
+                teacher_forcing_block_strict=self.config.teacher_forcing_block_strict,
                 teacher_forcing_visualize_sdpa_mask=self.config.teacher_forcing_visualize_sdpa_mask,
                 # Sound generation parameters
                 sound_dim=self.config.sound_dim,

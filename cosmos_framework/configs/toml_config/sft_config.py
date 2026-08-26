@@ -368,6 +368,18 @@ class ModelConfig(BaseModel):
             "call per packed sample to skip cross-sample QK regions."
         ),
     )
+    teacher_forcing_attention_backend: Literal["masked_sdpa", "block_attention"] = Field(
+        default="masked_sdpa",
+        description="GEN teacher-forcing attention backend. masked_sdpa remains the safe default.",
+    )
+    teacher_forcing_block_shape: tuple[int, int] = Field(
+        default=(128, 128),
+        description="Q/KV tile shape for the opt-in block-attention backend.",
+    )
+    teacher_forcing_block_strict: bool = Field(
+        default=False,
+        description="Raise instead of falling back when block-attention eligibility fails.",
+    )
     teacher_forcing_visualize_sdpa_mask: bool = Field(
         default=False,
         description=(

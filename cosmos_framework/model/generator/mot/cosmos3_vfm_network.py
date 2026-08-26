@@ -17,7 +17,11 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     build_dense_teacher_forcing_gen_mask,
     visualize_dense_teacher_forcing_gen_mask,
 )
-from cosmos_framework.model.generator.mot.attention import SplitInfo, build_packed_sequence
+from cosmos_framework.model.generator.mot.attention import (
+    SplitInfo,
+    TeacherForcingAttentionInfo,
+    build_packed_sequence,
+)
 from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_last_hidden_state,
     get_context_parallel_sharded_sequence,
@@ -58,6 +62,9 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         video_temporal_causal=False,
         teacher_forcing_max_sequence_length: int | None = None,
         teacher_forcing_dense_mode: str = "global",
+        teacher_forcing_attention_backend: str = "masked_sdpa",
+        teacher_forcing_block_shape: tuple[int, int] = (128, 128),
+        teacher_forcing_block_strict: bool = False,
         teacher_forcing_visualize_sdpa_mask: bool = False,
         # Sound generation parameters
         sound_dim: int | None = None,
@@ -95,10 +102,19 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.teacher_forcing_max_sequence_length = teacher_forcing_max_sequence_length
         if teacher_forcing_dense_mode not in {"global", "per_sample"}:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-                f"got {teacher_forcing_dense_mode!r}"
+                f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {teacher_forcing_dense_mode!r}"
             )
         self.teacher_forcing_dense_mode = teacher_forcing_dense_mode
+        if teacher_forcing_attention_backend not in {"masked_sdpa", "block_attention"}:
+            raise ValueError(
+                "teacher_forcing_attention_backend must be 'masked_sdpa' or 'block_attention', "
+                f"got {teacher_forcing_attention_backend!r}"
+            )
+        if tuple(teacher_forcing_block_shape) != (128, 128):
+            raise ValueError(f"teacher_forcing_block_shape must be (128, 128), got {teacher_forcing_block_shape}")
+        self.teacher_forcing_attention_backend = teacher_forcing_attention_backend
+        self.teacher_forcing_block_shape = tuple(teacher_forcing_block_shape)
+        self.teacher_forcing_block_strict = teacher_forcing_block_strict
         self.teacher_forcing_visualize_sdpa_mask = teacher_forcing_visualize_sdpa_mask
         self.enable_input_bias = enable_input_bias
 
@@ -191,6 +207,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         self.config = config
         self.parallel_dims = None
         self._teacher_forcing_sdpa_mask_visualized = False
+        self._teacher_forcing_backend_logged = False
 
     def init_weights(self, buffer_device: torch.device | None):
         if self.config.vision_gen or self.config.action_gen or self.config.sound_gen:
@@ -1053,7 +1070,6 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         sequence_shard_world_size = (
             1 if replicated_attention_io_cp else (self.parallel_dims.cp_size if self.parallel_dims else 1)
         )
-
         input_pack, attention_meta, natten_metadata_list = build_packed_sequence(
             self.config.joint_attn_implementation,
             packed_sequence=packed_sequence,
@@ -1079,8 +1095,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             teacher_forcing_layout=teacher_forcing_layout,
             teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
             teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
+            teacher_forcing_attention_backend=self.config.teacher_forcing_attention_backend,
+            teacher_forcing_block_shape=self.config.teacher_forcing_block_shape,
+            teacher_forcing_block_strict=self.config.teacher_forcing_block_strict,
         )
-
         if (
             teacher_forcing_layout is not None
             and self.config.teacher_forcing_visualize_sdpa_mask
@@ -1170,6 +1188,20 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             natten_metadata_list=natten_metadata_list,
             memory=memory,
         )
+        if isinstance(attention_meta, TeacherForcingAttentionInfo) and not self._teacher_forcing_backend_logged:
+            log.info(
+                "Teacher-forcing attention backend: "
+                f"requested={attention_meta.requested_backend}, selected={attention_meta.selected_backend}, "
+                f"block_calls={attention_meta.block_calls}, fallback_calls={attention_meta.fallback_calls}, "
+                f"fallback_reason={attention_meta.fallback_reason!r}"
+            )
+            if (
+                self.config.teacher_forcing_block_strict
+                and attention_meta.requested_backend == "block_attention"
+                and attention_meta.block_calls == 0
+            ):
+                raise RuntimeError("strict teacher-forcing block attention completed without a block kernel call")
+            self._teacher_forcing_backend_logged = True
         last_hidden_state = get_context_parallel_last_hidden_state(
             packed_outputs=packed_outputs,
             parallel_dims=sequence_shard_parallel_dims,

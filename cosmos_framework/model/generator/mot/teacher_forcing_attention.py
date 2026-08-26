@@ -6,6 +6,11 @@
 import torch
 
 from cosmos_framework.model.attention import attention
+from cosmos_framework.model.generator.mot.teacher_forcing_block_attention import (
+    TeacherForcingBlockMetadata,
+    TeacherForcingKVPermutation,
+    reorder_teacher_forcing_kv,
+)
 
 
 def teacher_forcing_dense_attention(
@@ -56,9 +61,7 @@ def teacher_forcing_per_sample_dense_attention(
     outputs: list[torch.Tensor] = []
     query_offset = 0
     kv_offset = 0
-    for sample_len, gen_len, allowed_mask in zip(
-        sample_lens, gen_sample_lens, allowed_masks, strict=True
-    ):
+    for sample_len, gen_len, allowed_mask in zip(sample_lens, gen_sample_lens, allowed_masks, strict=True):
         query_end = query_offset + gen_len
         kv_end = kv_offset + sample_len
         outputs.append(
@@ -73,3 +76,42 @@ def teacher_forcing_per_sample_dense_attention(
         query_offset = query_end
         kv_offset = kv_end
     return torch.cat(outputs, dim=0)
+
+
+def teacher_forcing_block_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    permutation: TeacherForcingKVPermutation,
+    metadata: TeacherForcingBlockMetadata,
+    block_sparse_mask: torch.Tensor,
+    scale: float | None = None,
+) -> torch.Tensor:
+    """Run one packed GEN attention call with reordered K/V and a block mask."""
+
+    reordered_key, reordered_value = reorder_teacher_forcing_kv(key, value, permutation)
+
+    def cumulative_offsets(lengths: tuple[int, ...]) -> torch.Tensor:
+        offsets = [0]
+        for length in lengths:
+            offsets.append(offsets[-1] + length)
+        return torch.tensor(offsets, dtype=torch.int32, device=query.device)
+
+    output = attention(
+        query.unsqueeze(0),
+        reordered_key.unsqueeze(0),
+        reordered_value.unsqueeze(0),
+        cumulative_seqlen_Q=cumulative_offsets(metadata.q_actual_lengths),
+        cumulative_seqlen_KV=cumulative_offsets(metadata.kv_actual_lengths),
+        max_seqlen_Q=max(metadata.q_actual_lengths),
+        max_seqlen_KV=max(metadata.kv_actual_lengths),
+        backend="block_attention",
+        backend_kwargs={
+            "block_sparse_mask": block_sparse_mask,
+            "block_shape": list(metadata.block_shape),
+            "inner_precise": 0 if query.dtype == torch.bfloat16 else 1,
+        },
+        scale=scale,
+    )
+    return output.squeeze(0)

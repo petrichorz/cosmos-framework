@@ -30,6 +30,9 @@ class TeacherForcingConfig(Protocol):
     teacher_forcing_history_blocks_max: int
     teacher_forcing_max_sequence_length: int | None
     teacher_forcing_dense_mode: str
+    teacher_forcing_attention_backend: str
+    teacher_forcing_block_shape: tuple[int, int]
+    teacher_forcing_block_strict: bool
     parallelism: _ParallelismConfig
 
 
@@ -71,8 +74,17 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
         raise ValueError("teacher_forcing_max_sequence_length must be explicitly configured to a positive integer")
     if config.teacher_forcing_dense_mode not in {"global", "per_sample"}:
         raise ValueError(
-            "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-            f"got {config.teacher_forcing_dense_mode!r}"
+            f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {config.teacher_forcing_dense_mode!r}"
+        )
+    if config.teacher_forcing_attention_backend not in {"masked_sdpa", "block_attention"}:
+        raise ValueError(
+            "teacher_forcing_attention_backend must be 'masked_sdpa' or 'block_attention', "
+            f"got {config.teacher_forcing_attention_backend!r}"
+        )
+    if tuple(config.teacher_forcing_block_shape) != (128, 128):
+        raise ValueError(
+            "teacher_forcing_block_shape must be (128, 128) for the first block-attention implementation, "
+            f"got {config.teacher_forcing_block_shape}"
         )
 
 

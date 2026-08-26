@@ -250,6 +250,13 @@ class OmniMoTModelConfig:
     # "global" builds one packed Dense Mask; "per_sample" loops over packed
     # samples and builds one smaller Dense Mask for each sample.
     teacher_forcing_dense_mode: str = "global"
+    # GEN attention backend. Keep masked_sdpa as the global safe default.
+    teacher_forcing_attention_backend: str = attrs.field(
+        default="masked_sdpa",
+        validator=attrs.validators.in_({"masked_sdpa", "block_attention"}),
+    )
+    teacher_forcing_block_shape: tuple[int, int] = (128, 128)
+    teacher_forcing_block_strict: bool = False
     # Rank 0 saves one compact block-level visualization of the complete
     # attention pattern: causal UND plus the bool mask used by GEN SDPA.
     # The file is written below IMAGINAIRE_OUTPUT_ROOT.

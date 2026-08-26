@@ -15,8 +15,16 @@ from cosmos_framework.model.attention import (
 )
 from cosmos_framework.model.attention.masks import CausalType
 from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
+    teacher_forcing_block_attention,
     teacher_forcing_dense_attention,
     teacher_forcing_per_sample_dense_attention,
+)
+from cosmos_framework.model.generator.mot.teacher_forcing_block_attention import (
+    TeacherForcingBlockMetadata,
+    TeacherForcingKVPermutation,
+    build_teacher_forcing_block_metadata,
+    build_teacher_forcing_block_sparse_mask,
+    build_teacher_forcing_kv_permutation,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
@@ -84,6 +92,12 @@ class TeacherForcingAttentionInfo(SplitInfo):
         dense_mode: str,
         dense_gen_mask: torch.BoolTensor | None,
         sample_gen_masks: tuple[torch.BoolTensor, ...],
+        requested_backend: str,
+        selected_backend: str,
+        block_permutation: TeacherForcingKVPermutation | None,
+        block_metadata: TeacherForcingBlockMetadata | None,
+        block_sparse_mask: torch.Tensor | None,
+        fallback_reason: str | None,
         split_lens: list[int],
         attn_modes: list[str],
         sample_lens: list[int],
@@ -101,6 +115,14 @@ class TeacherForcingAttentionInfo(SplitInfo):
         self.dense_mode = dense_mode
         self.dense_gen_mask = dense_gen_mask
         self.sample_gen_masks = sample_gen_masks
+        self.requested_backend = requested_backend
+        self.selected_backend = selected_backend
+        self.block_permutation = block_permutation
+        self.block_metadata = block_metadata
+        self.block_sparse_mask = block_sparse_mask
+        self.fallback_reason = fallback_reason
+        self.block_calls = 0
+        self.fallback_calls = 0
 
 
 AttentionMaskType = SplitInfo
@@ -281,7 +303,23 @@ def teacher_forcing_attention(
     gen_sample_lens = tuple(attention_meta.layout.split_lens[1::2])
     num_gen_queries = sum(gen_sample_lens)
     key_pack_for_gen = packed_key_states_normalized if packed_key_states_normalized is not None else packed_key_states
-    if attention_meta.dense_mode == "global":
+    if attention_meta.selected_backend == "block_attention":
+        if (
+            attention_meta.block_permutation is None
+            or attention_meta.block_metadata is None
+            or attention_meta.block_sparse_mask is None
+        ):
+            raise RuntimeError("block-attention dispatch requires permutation, metadata, and block mask")
+        full_res = teacher_forcing_block_attention(
+            full_q[:num_gen_queries],
+            get_all_seq(key_pack_for_gen),
+            get_all_seq(packed_value_states),
+            permutation=attention_meta.block_permutation,
+            metadata=attention_meta.block_metadata,
+            block_sparse_mask=attention_meta.block_sparse_mask,
+        )
+        attention_meta.block_calls += 1
+    elif attention_meta.dense_mode == "global":
         if attention_meta.dense_gen_mask is None:
             raise ValueError("global teacher-forcing attention requires dense_gen_mask")
         full_res = teacher_forcing_dense_attention(
@@ -301,6 +339,8 @@ def teacher_forcing_attention(
         )
     else:
         raise ValueError(f"Unsupported teacher-forcing dense mode: {attention_meta.dense_mode!r}")
+    if attention_meta.requested_backend == "block_attention" and attention_meta.selected_backend == "masked_sdpa":
+        attention_meta.fallback_calls += 1
     full_out = full_q.new_zeros((full_q.shape[0], full_res.shape[1] * full_res.shape[2]))
     full_out[:num_gen_queries] = full_res.flatten(-2, -1)
     return from_mode_splits(causal_out, full_out, packed_query_states)
@@ -682,6 +722,9 @@ def build_packed_sequence(
     teacher_forcing_layout: TeacherForcingLayout | None = None,
     teacher_forcing_max_sequence_length: int | None = None,
     teacher_forcing_dense_mode: str = "global",
+    teacher_forcing_attention_backend: str = "masked_sdpa",
+    teacher_forcing_block_shape: tuple[int, int] = (128, 128),
+    teacher_forcing_block_strict: bool = False,
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
     Build the model input pack and attention meta for joint attention.
@@ -704,7 +747,55 @@ def build_packed_sequence(
             or tuple(attn_modes) != teacher_forcing_layout.attn_modes
         ):
             raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
-        if teacher_forcing_dense_mode == "global":
+        if teacher_forcing_dense_mode not in {"global", "per_sample"}:
+            raise ValueError(
+                f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {teacher_forcing_dense_mode!r}"
+            )
+        if teacher_forcing_attention_backend not in {"masked_sdpa", "block_attention"}:
+            raise ValueError(f"Unsupported teacher-forcing attention backend: {teacher_forcing_attention_backend!r}")
+
+        selected_backend = teacher_forcing_attention_backend
+        fallback_reason: str | None = None
+        block_permutation: TeacherForcingKVPermutation | None = None
+        block_metadata: TeacherForcingBlockMetadata | None = None
+        block_sparse_mask: torch.Tensor | None = None
+        if selected_backend == "block_attention":
+            eligibility_failures: list[str] = []
+            if device.type != "npu":
+                eligibility_failures.append(f"device must be npu, got {device.type}")
+            if packed_sequence.dtype not in {torch.float16, torch.bfloat16}:
+                eligibility_failures.append(f"dtype must be float16 or bfloat16, got {packed_sequence.dtype}")
+            if head_dim != 128:
+                eligibility_failures.append(f"training head_dim must be 128, got {head_dim}")
+            if cp_world_size != 1:
+                eligibility_failures.append(f"context parallel world size must be 1, got {cp_world_size}")
+            if tuple(teacher_forcing_block_shape) != (128, 128):
+                eligibility_failures.append(f"block shape must be (128, 128), got {teacher_forcing_block_shape}")
+            if not eligibility_failures:
+                block_layout = teacher_forcing_layout.to(device)
+                try:
+                    block_permutation = build_teacher_forcing_kv_permutation(block_layout)
+                    block_metadata = build_teacher_forcing_block_metadata(
+                        block_layout,
+                        block_permutation,
+                        block_shape=tuple(teacher_forcing_block_shape),
+                    )
+                    block_sparse_mask = build_teacher_forcing_block_sparse_mask(
+                        block_metadata,
+                        num_q_heads=num_heads,
+                    )
+                except ValueError as error:
+                    eligibility_failures.append(str(error))
+            if eligibility_failures:
+                fallback_reason = "; ".join(eligibility_failures)
+                if teacher_forcing_block_strict:
+                    raise ValueError(f"teacher-forcing block attention is ineligible: {fallback_reason}")
+                selected_backend = "masked_sdpa"
+
+        if selected_backend == "block_attention":
+            dense_gen_mask = None
+            sample_gen_masks = ()
+        elif teacher_forcing_dense_mode == "global":
             dense_gen_mask = build_dense_teacher_forcing_gen_mask(
                 teacher_forcing_layout,
                 max_sequence_length=teacher_forcing_max_sequence_length,
@@ -721,14 +812,19 @@ def build_packed_sequence(
             )
         else:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-                f"got {teacher_forcing_dense_mode!r}"
+                f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {teacher_forcing_dense_mode!r}"
             )
         attention_meta = TeacherForcingAttentionInfo(
             layout=teacher_forcing_layout,
             dense_mode=teacher_forcing_dense_mode,
             dense_gen_mask=dense_gen_mask,
             sample_gen_masks=sample_gen_masks,
+            requested_backend=teacher_forcing_attention_backend,
+            selected_backend=selected_backend,
+            block_permutation=block_permutation,
+            block_metadata=block_metadata,
+            block_sparse_mask=block_sparse_mask,
+            fallback_reason=fallback_reason,
             split_lens=split_lens,
             attn_modes=attn_modes,
             sample_lens=sample_lens,
