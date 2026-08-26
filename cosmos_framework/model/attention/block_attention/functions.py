@@ -24,25 +24,24 @@ def _as_list_of_positive_ints(value: object, name: str) -> list[int]:
 def _validate_block_shape(block_shape: list[int]) -> None:
     block_size_y = block_shape[1]
     if block_size_y % 128 != 0:
-        raise ValueError(
-            "block_attention requires block_shape[1] to be a multiple of 128, "
-            f"got {block_size_y}"
-        )
+        raise ValueError(f"block_attention requires block_shape[1] to be a multiple of 128, got {block_size_y}")
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:
     return (numerator + denominator - 1) // denominator
 
 
-def _cumulative_to_actual(cumulative_seqlen: Tensor) -> list[int]:
+def _cumulative_to_actual(cumulative_seqlen: Tensor, *, total_tokens: int) -> list[int]:
     """Convert Cosmos ``[0, s1, s1+s2, ...]`` offsets to Ascend actual lengths."""
 
     values = cumulative_seqlen.tolist()
     if not values or values[0] != 0:
         raise ValueError("cumulative sequence lengths must start with 0")
+    if values[-1] != total_tokens:
+        raise ValueError(f"final sequence offset must equal the packed token count ({total_tokens}), got {values[-1]}")
     actual = [values[i] - values[i - 1] for i in range(1, len(values))]
-    if not actual or any(x < 0 for x in actual):
-        raise ValueError("cumulative sequence lengths must be monotonically non-decreasing")
+    if not actual or any(x <= 0 for x in actual):
+        raise ValueError("cumulative sequence lengths must be strictly increasing")
     return actual
 
 
@@ -56,12 +55,10 @@ def _validate_mask(
     max_kv_len: int,
     block_shape: list[int],
 ) -> None:
-    if mask.dtype != torch.int8:
-        raise TypeError(f"block_sparse_mask must be int8, got {mask.dtype}")
+    if mask.dtype != torch.uint8:
+        raise TypeError(f"block_sparse_mask must be uint8, got {mask.dtype}")
     if mask.device != query.device:
-        raise ValueError(
-            f"block_sparse_mask must be on the same device as query, got {mask.device} and {query.device}"
-        )
+        raise ValueError(f"block_sparse_mask must be on the same device as query, got {mask.device} and {query.device}")
 
     expected_shape = (
         batch,
@@ -70,9 +67,7 @@ def _validate_mask(
         _ceil_div(max_kv_len, block_shape[1]),
     )
     if tuple(mask.shape) != expected_shape:
-        raise ValueError(
-            f"block_sparse_mask must have shape {expected_shape}, got {tuple(mask.shape)}"
-        )
+        raise ValueError(f"block_sparse_mask must have shape {expected_shape}, got {tuple(mask.shape)}")
 
 
 def _resolve_inner_precise(dtype: torch.dtype, inner_precise: int | None) -> int:
@@ -103,7 +98,7 @@ def block_attention(
     """Run ``torch_npu.npu_block_sparse_attention`` through the unified backend API.
 
     Required ``backend_kwargs``:
-        block_sparse_mask: int8 tensor ``[batch, heads, ceil_q, ceil_kv]``.
+        block_sparse_mask: uint8 tensor ``[batch, heads, ceil_q, ceil_kv]``.
         block_shape: ``[block_shape_x, block_shape_y]``. ``block_shape_y`` must be
             a multiple of 128.
 
@@ -122,13 +117,14 @@ def block_attention(
 
     from cosmos_framework.model.attention.block_attention.checks import block_attention_check
 
+    requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
     assert block_attention_check(
         query_shape=query.shape,
         key_shape=key.shape,
         value_shape=value.shape,
         dtype=query.dtype,
         device=query.device,
-        requires_grad=query.requires_grad or key.requires_grad or value.requires_grad,
+        requires_grad=requires_grad,
         is_causal=is_causal,
         causal_type=causal_type,
         is_varlen=is_varlen,
@@ -190,7 +186,9 @@ def block_attention(
             inner_precise=inner_precise,
             actual_seq_lengths=actual_seq_lengths,
             actual_seq_lengths_kv=actual_seq_lengths_kv,
-            softmax_lse_flag=0,
+            # Backward consumes the forward softmax LSE even though the unified
+            # frontend does not return it to its caller.
+            softmax_lse_flag=int(requires_grad),
         )
         return output.permute(0, 2, 1, 3)
 
@@ -200,14 +198,10 @@ def block_attention(
     if cumulative_seqlen_Q is None or cumulative_seqlen_KV is None:
         raise ValueError("block_attention varlen path requires cumulative_seqlen_Q and cumulative_seqlen_KV")
 
-    actual_seq_lengths = _cumulative_to_actual(cumulative_seqlen_Q)
-    actual_seq_lengths_kv = _cumulative_to_actual(cumulative_seqlen_KV)
+    actual_seq_lengths = _cumulative_to_actual(cumulative_seqlen_Q, total_tokens=query.shape[1])
+    actual_seq_lengths_kv = _cumulative_to_actual(cumulative_seqlen_KV, total_tokens=key.shape[1])
     if len(actual_seq_lengths) != len(actual_seq_lengths_kv):
         raise ValueError("query and key/value sequence metadata must contain the same number of samples")
-    if actual_seq_lengths[-1] != query.shape[1]:
-        raise ValueError("final query sequence offset must equal the packed query token count")
-    if actual_seq_lengths_kv[-1] != key.shape[1]:
-        raise ValueError("final key/value sequence offset must equal the packed key/value token count")
 
     q = query.squeeze(0).contiguous()
     k = key.squeeze(0).contiguous()
@@ -236,6 +230,6 @@ def block_attention(
         inner_precise=inner_precise,
         actual_seq_lengths=actual_seq_lengths,
         actual_seq_lengths_kv=actual_seq_lengths_kv,
-        softmax_lse_flag=0,
+        softmax_lse_flag=int(requires_grad),
     )
     return output.unsqueeze(0)
