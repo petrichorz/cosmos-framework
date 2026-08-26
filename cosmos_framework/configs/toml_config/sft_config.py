@@ -368,14 +368,6 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
     )
-    teacher_forcing_max_sequence_length: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Required safety limit for the expanded one-dimensional "
-            "[UND|clean|noisy] teacher-forcing sequence."
-        ),
-    )
     teacher_forcing_dense_mode: Literal["global", "per_sample"] = Field(
         default="global",
         description=(

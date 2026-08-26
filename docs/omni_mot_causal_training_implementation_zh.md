@@ -199,20 +199,21 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 3. 不依赖 Ascend `npu_fusion_attention` 是否正确返回 LSE；
 4. 当前阶段允许牺牲一部分吞吐，优先确认网络逻辑正确。
 
-代价是 Dense Mask 的显存随 query×key 二次增长。因此配置必须显式设置展开后的
-一维序列上限 `teacher_forcing_max_sequence_length`，超过上限时提前报错。真实尺寸性能
-优化属于后续工作，不在当前功能闭环中。
+代价是 Dense Mask 的显存随 query×key 二次增长。Mask 尺寸直接由当前 packed layout
+展开后的实际长度决定；原始 packed sequence 仍可由 dataloader 的 token budget 控制，
+但 teacher forcing 不再提供第二个独立的展开后长度配置。真实尺寸性能优化属于后续工作，
+不在当前功能闭环中。
 
 对应代码位置：
 
-- mask 构造和一维上限：
-  [`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)；
+- mask 构造：
+  [`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L270)；
 - attention metadata 构造：
-  [`attention.py::build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L636)；
+  [`attention.py::build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L685)；
 - UND/GEN attention 分发：
-  [`attention.py::teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L246)；
+  [`attention.py::teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L278)；
 - 单次 SDPA：
-  [`teacher_forcing_attention.py::teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L52)。
+  [`teacher_forcing_attention.py::teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L11)。
 
 ### 6.5 输出和 loss
 
@@ -619,18 +620,16 @@ attention 的 kernel 调用数从 1 增加为 packed sample 数，可能降低�
 | EMA | 关闭 | 减少额外参数副本 |
 | activation checkpointing | 关闭 | 先验证原始 backward |
 | optimizer | 非 fused AdamW | 避免 CUDA-only fused optimizer |
-| 展开后序列上限 | 4,096 tokens | 限制 `[UND|clean|noisy]` 的一维总长度 |
 
 17 个 RGB frames 经 Wan VAE 后约得到 5 个 latent frames。随机 `S=1..4` 时既能产生
 多个 causal blocks，又能覆盖尾部 partial block，同时比正式长视频显著省显存。
 
-### 11.1 一维序列长度如何限制 Dense Mask
+### 11.1 Teacher forcing 展开与 Dense Mask 规模
 
 原 Edge 配置中的 `max_num_tokens_after_packing=45056` 和
 `dataloader_train.max_sequence_length=45056` 是**一维 packed sequence 的 token 数上限**。
-方案 B 会再把每个视觉 token 展开为 clean/noisy 两条流，因此新增的
-`teacher_forcing_max_sequence_length=4096` 限制的是展开后
-`[UND | clean GEN | noisy GEN]` 的实际一维总长度。
+方案 B 会再把每个视觉 token 展开为 clean/noisy 两条流；展开后的长度不再由另一个配置
+截断或拒绝，而是直接根据当前 batch 的实际 layout 构造 attention mask。
 
 设原始样本包含 `U` 个 UND token 和 `V` 个 GEN 视觉 token。方案 B 展开为
 `[UND | clean GEN | noisy GEN]` 后：
@@ -648,13 +647,12 @@ mask 元素数 = 2V × (U + 2V)
 
 当前 smoke 使用 256×256、17 RGB frames：Wan VAE 约得到 5 个 latent frames，每帧
 patch 后约 8×8=64 个视觉 token，所以 `V≈320`。若文字侧按约 512 token 估算，展开后
-一维长度约为 `512+2×320=1,152`，低于 4,096；对应的实际 mask 约为
-`640×1,152=737,280` 个元素。代码不再直接配置二维元素数，而是用更直观的一维长度
-限制输入；Dense Mask 的实际大小仍由 `2V×(U+2V)` 自动确定。
+一维长度约为 `512+2×320=1,152`；对应的实际 mask 约为
+`640×1,152=737,280` 个元素。Dense Mask 的实际大小由 `2V×(U+2V)` 自动确定。
 
 另外，`PackingDataLoader` 要求 `max_sequence_length` 与 `max_samples_per_batch` 二选一。
 smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
-`dataloader_train.max_sequence_length=null`；不能同时把它设为 4096。
+`dataloader_train.max_sequence_length=null`，依靠短视频和单样本自然控制展开后的规模。
 
 ## 12. 正式训练配置与启动位置
 
@@ -755,7 +753,6 @@ $OUTPUT_ROOT/logs/vision_causal_smoke_edge_sft.log
 
 | 错误 | 含义 | 下一步 |
 | --- | --- | --- |
-| `teacher_forcing_max_sequence_length` | 样本仍太长 | 先减视频帧/文字长度，不直接无限增大上限 |
 | SDPA mask/dtype/shape 错误 | NPU SDPA 分支不兼容 Dense bool mask | 记录 Q/K/V/mask shape 和 dtype，单独修 NPU backend |
 | OOM | Dense attention 或模型激活过大 | 先确认 mask 元素数，再考虑开启 AC；不要同时开 compile |
 | clean/noisy shape mismatch | VAE/patch packing 两条流不一致 | 检查 token shape 和 position index，不绕过校验 |

@@ -214,7 +214,6 @@ def _make_teacher_forcing_packs(dense_mode: str = "global"):
         head_dim=3,
         num_layers=1,
         teacher_forcing_layout=layout,
-        teacher_forcing_max_sequence_length=layout.source_sequence_indexes.numel(),
         teacher_forcing_dense_mode=dense_mode,
     )
     query_pack, attention_meta, natten_metadata = build_packed_sequence(packed_sequence=query, **common_kwargs)
@@ -231,10 +230,7 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
     assert attention_meta.is_three_way is False
     torch.testing.assert_close(
         attention_meta.dense_gen_mask,
-        build_dense_teacher_forcing_gen_mask(
-            layout,
-            max_sequence_length=layout.source_sequence_indexes.numel(),
-        ),
+        build_dense_teacher_forcing_gen_mask(layout),
     )
     assert natten_metadata is None
 
@@ -260,7 +256,6 @@ def test_build_packed_sequence_rejects_implicit_teacher_forcing_override(impleme
             head_dim=4,
             num_layers=1,
             teacher_forcing_layout=layout,
-            teacher_forcing_max_sequence_length=20,
         )
 
 
@@ -270,12 +265,8 @@ def test_per_sample_masks_match_global_mask_diagonal_blocks():
         vision_token_shapes=[(3, 1, 1), (2, 1, 2)],
         geometry=_geometry(2, 1, num_samples=2),
     )
-    global_mask = build_dense_teacher_forcing_gen_mask(
-        layout, max_sequence_length=sum(layout.sample_lens)
-    )
-    sample_masks = build_per_sample_teacher_forcing_gen_masks(
-        layout, max_sequence_length=sum(layout.sample_lens)
-    )
+    global_mask = build_dense_teacher_forcing_gen_mask(layout)
+    sample_masks = build_per_sample_teacher_forcing_gen_masks(layout)
 
     query_offset = 0
     key_offset = 0
@@ -309,8 +300,8 @@ def test_per_sample_dense_attention_matches_global_output_and_gradients():
     )
     global_inputs = [tensor.detach().clone().requires_grad_() for tensor in inputs]
     sample_inputs = [tensor.detach().clone().requires_grad_() for tensor in inputs]
-    global_mask = build_dense_teacher_forcing_gen_mask(layout, max_sequence_length=num_keys)
-    sample_masks = build_per_sample_teacher_forcing_gen_masks(layout, max_sequence_length=num_keys)
+    global_mask = build_dense_teacher_forcing_gen_mask(layout)
+    sample_masks = build_per_sample_teacher_forcing_gen_masks(layout)
 
     global_output = teacher_forcing_dense_attention(*global_inputs, global_mask)
     sample_output = teacher_forcing_per_sample_dense_attention(
@@ -344,10 +335,7 @@ def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
         vision_token_shapes=[(3, 1, 1), (2, 1, 1)],
         geometry=_geometry(1, 2, num_samples=2),
     )
-    dense_mask = build_dense_teacher_forcing_gen_mask(
-        layout,
-        max_sequence_length=layout.source_sequence_indexes.numel(),
-    )
+    dense_mask = build_dense_teacher_forcing_gen_mask(layout)
 
     output_path = visualize_dense_teacher_forcing_gen_mask(dense_mask, layout, tmp_path / "mask.png")
 
@@ -402,7 +390,7 @@ def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen
         get_all_seq(query_pack)[layout.gen_query_indexes],
         get_all_seq(key_pack),
         get_all_seq(value_pack),
-        build_dense_teacher_forcing_gen_mask(layout, max_sequence_length=sum(layout.sample_lens)),
+        build_dense_teacher_forcing_gen_mask(layout),
     ).flatten(-2, -1)
 
     torch.testing.assert_close(get_gen_seq(output_pack)[: expected_gen.shape[0]], expected_gen)
@@ -433,31 +421,6 @@ def test_dispatch_teacher_forcing_attention_uses_normalized_und_keys_for_gen():
     torch.testing.assert_close(get_gen_seq(output_pack)[: expected_gen.shape[0]], expected_gen)
 
 
-def test_build_packed_sequence_applies_teacher_forcing_sequence_length_guard():
-    layout = build_teacher_forcing_layout(
-        und_token_counts=[1],
-        vision_token_shapes=[(2, 1, 1)],
-        geometry=_geometry(1, 1),
-    )
-    packed_sequence = torch.randn(sum(layout.sample_lens), 2, 4)
-
-    with pytest.raises(ValueError, match="max_sequence_length"):
-        build_packed_sequence(
-            "teacher_forcing",
-            packed_sequence=packed_sequence,
-            attn_modes=list(layout.attn_modes),
-            split_lens=list(layout.split_lens),
-            sample_lens=list(layout.sample_lens),
-            packed_und_token_indexes=torch.tensor([0]),
-            packed_gen_token_indexes=layout.gen_query_indexes,
-            num_heads=2,
-            head_dim=4,
-            num_layers=1,
-            teacher_forcing_layout=layout,
-            teacher_forcing_max_sequence_length=1,
-        )
-
-
 def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch():
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
@@ -479,5 +442,4 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
             head_dim=4,
             num_layers=1,
             teacher_forcing_layout=layout,
-            teacher_forcing_max_sequence_length=20,
         )

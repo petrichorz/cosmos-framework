@@ -102,22 +102,16 @@ def test_encode_vision_fills_clean_and_noisy_streams_with_distinct_timesteps():
     torch.testing.assert_close(packed_embeddings[packed_seq.text_indexes], torch.zeros(1, 1))
 
 
-def test_network_config_keeps_dense_mask_limit_explicit():
+def test_network_config_keeps_dense_mode_and_visualization_explicit():
     config = Cosmos3VFMNetworkConfig(
-        teacher_forcing_max_sequence_length=123,
         teacher_forcing_dense_mode="per_sample",
         teacher_forcing_visualize_sdpa_mask=True,
     )
 
-    assert config.teacher_forcing_max_sequence_length == 123
     assert config.teacher_forcing_dense_mode == "per_sample"
     assert config.teacher_forcing_visualize_sdpa_mask is True
-    assert Cosmos3VFMNetworkConfig().teacher_forcing_max_sequence_length is None
     assert Cosmos3VFMNetworkConfig().teacher_forcing_dense_mode == "global"
     assert Cosmos3VFMNetworkConfig().teacher_forcing_visualize_sdpa_mask is False
-
-    with pytest.raises(ValueError, match="teacher_forcing_max_sequence_length"):
-        Cosmos3VFMNetworkConfig(teacher_forcing_max_sequence_length=0)
 
     with pytest.raises(ValueError, match="teacher_forcing_dense_mode"):
         Cosmos3VFMNetworkConfig(teacher_forcing_dense_mode="invalid")

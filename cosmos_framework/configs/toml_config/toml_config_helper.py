@@ -76,7 +76,6 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "teacher_forcing_block_size_max"): None,
         ("model", "teacher_forcing_history_blocks_min"): None,
         ("model", "teacher_forcing_history_blocks_max"): None,
-        ("model", "teacher_forcing_max_sequence_length"): None,
         ("model", "teacher_forcing_dense_mode"): None,
         ("model", "teacher_forcing_visualize_sdpa_mask"): None,
         # VLM already uses FSDP2 mixed precision unconditionally. This switch

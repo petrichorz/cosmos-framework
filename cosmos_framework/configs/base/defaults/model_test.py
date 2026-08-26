@@ -18,7 +18,7 @@ def test_causal_model_groups_select_causal_subclass_without_changing_base_groups
     assert MOT_CAUSAL_FSDP_CONFIG["model"]["_target_"] is OmniMoTCausalModel
 
 
-def test_causal_model_groups_enable_teacher_forcing_but_require_explicit_dense_limit():
+def test_causal_model_groups_enable_teacher_forcing():
     for group in (MOT_CAUSAL_DDP_CONFIG, MOT_CAUSAL_FSDP_CONFIG):
         config = group["model"]["config"]
         assert config.causal_training_strategy == "teacher_forcing"
@@ -27,6 +27,5 @@ def test_causal_model_groups_enable_teacher_forcing_but_require_explicit_dense_l
         assert config.teacher_forcing_block_size_max == 4
         assert config.teacher_forcing_history_blocks_min == 1
         assert config.teacher_forcing_history_blocks_max == 32
-        assert config.teacher_forcing_max_sequence_length is None
         assert config.teacher_forcing_dense_mode == "global"
         assert config.teacher_forcing_visualize_sdpa_mask is False

@@ -60,7 +60,6 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         temporal_compression_factor_action=1,
         natten_parameter_list=None,
         video_temporal_causal=False,
-        teacher_forcing_max_sequence_length: int | None = None,
         teacher_forcing_dense_mode: str = "global",
         teacher_forcing_visualize_sdpa_mask: bool = False,
         # Sound generation parameters
@@ -91,12 +90,6 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.temporal_compression_factor_vision = temporal_compression_factor_vision
         self.natten_parameter_list = natten_parameter_list
         self.video_temporal_causal = video_temporal_causal
-        if teacher_forcing_max_sequence_length is not None and teacher_forcing_max_sequence_length < 1:
-            raise ValueError(
-                "teacher_forcing_max_sequence_length must be >= 1 when configured, "
-                f"got {teacher_forcing_max_sequence_length}"
-            )
-        self.teacher_forcing_max_sequence_length = teacher_forcing_max_sequence_length
         if teacher_forcing_dense_mode not in {"global", "per_sample"}:
             raise ValueError(
                 "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
@@ -1035,10 +1028,6 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         if teacher_forcing_layout is not None:
             if use_video_temporal_causal:
                 raise ValueError("teacher-forcing block causality cannot be combined with video_temporal_causal")
-            if self.config.teacher_forcing_max_sequence_length is None:
-                raise ValueError(
-                    "teacher_forcing_max_sequence_length must be configured when teacher-forcing data is present"
-                )
             if self.parallel_dims is not None and self.parallel_dims.cp_enabled:
                 raise ValueError("teacher-forcing Dense attention does not support context parallelism")
 
@@ -1089,7 +1078,6 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             null_action_supertokens=packed_seq.null_action_supertokens,
             pad_for_cuda_graphs=self.pad_for_cuda_graphs,
             teacher_forcing_layout=teacher_forcing_layout,
-            teacher_forcing_max_sequence_length=self.config.teacher_forcing_max_sequence_length,
             teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
         )
 
@@ -1105,10 +1093,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 try:
                     visualization_mask = attention_meta.dense_gen_mask
                     if visualization_mask is None:
-                        visualization_mask = build_dense_teacher_forcing_gen_mask(
-                            teacher_forcing_layout,
-                            max_sequence_length=self.config.teacher_forcing_max_sequence_length,
-                        )
+                        visualization_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout)
                     saved_path = visualize_dense_teacher_forcing_gen_mask(
                         visualization_mask,
                         teacher_forcing_layout,

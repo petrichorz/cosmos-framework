@@ -243,9 +243,7 @@ def test_dense_mask_matches_s1_k1_block_causal_matrix():
         geometry=_geometry(1, 1),
     )
 
-    mask = build_dense_teacher_forcing_gen_mask(
-        layout, max_sequence_length=layout.source_sequence_indexes.numel()
-    )
+    mask = build_dense_teacher_forcing_gen_mask(layout)
 
     expected = torch.tensor(
         [
@@ -276,9 +274,7 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
         geometry=_geometry(2, 1),
     )
 
-    mask = build_dense_teacher_forcing_gen_mask(
-        layout, max_sequence_length=layout.source_sequence_indexes.numel()
-    )
+    mask = build_dense_teacher_forcing_gen_mask(layout)
 
     clean_columns = layout.clean_token_indexes
     noisy_columns = layout.noisy_output_indexes
@@ -306,10 +302,7 @@ def test_dense_mask_matches_singleton_first_latent_boundaries(block_size: int, h
         vision_token_shapes=[(num_frames, 1, 1)],
         geometry=_geometry(block_size, history_blocks),
     )
-    mask = build_dense_teacher_forcing_gen_mask(
-        layout,
-        max_sequence_length=layout.source_sequence_indexes.numel(),
-    )
+    mask = build_dense_teacher_forcing_gen_mask(layout)
 
     clean_columns = layout.clean_token_indexes
     noisy_columns = layout.noisy_output_indexes
@@ -340,27 +333,11 @@ def test_dense_mask_isolates_packed_samples():
         geometry=_geometry(1, 2, num_samples=2),
     )
 
-    mask = build_dense_teacher_forcing_gen_mask(
-        layout, max_sequence_length=layout.source_sequence_indexes.numel()
-    )
+    mask = build_dense_teacher_forcing_gen_mask(layout)
     query_sample_ids = layout.sample_ids[layout.gen_query_indexes]
 
     assert not mask[query_sample_ids == 0][:, layout.sample_ids == 1].any()
     assert not mask[query_sample_ids == 1][:, layout.sample_ids == 0].any()
-
-
-def test_dense_mask_rejects_sequences_over_the_configured_limit():
-    layout = build_teacher_forcing_layout(
-        und_token_counts=[1],
-        vision_token_shapes=[(3, 1, 1)],
-        geometry=_geometry(1, 1),
-    )
-    sequence_length = layout.source_sequence_indexes.numel()
-
-    with pytest.raises(ValueError, match="max_sequence_length"):
-        build_dense_teacher_forcing_gen_mask(layout, max_sequence_length=sequence_length - 1)
-    with pytest.raises(ValueError, match="max_sequence_length"):
-        build_dense_teacher_forcing_gen_mask(layout, max_sequence_length=0)
 
 
 def test_dense_mask_rejects_und_queries_in_gen_query_indexes():
@@ -372,7 +349,7 @@ def test_dense_mask_rejects_und_queries_in_gen_query_indexes():
     corrupted = replace(layout, gen_query_indexes=torch.tensor([0], dtype=torch.long))
 
     with pytest.raises(ValueError, match="GEN queries"):
-        build_dense_teacher_forcing_gen_mask(corrupted, max_sequence_length=3)
+        build_dense_teacher_forcing_gen_mask(corrupted)
 
 
 def test_teacher_forcing_api_is_exported():

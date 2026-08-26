@@ -269,20 +269,10 @@ def build_teacher_forcing_layout(
 
 def build_dense_teacher_forcing_gen_mask(
     layout: TeacherForcingLayout,
-    *,
-    max_sequence_length: int,
 ) -> torch.BoolTensor:
     """Build the reference GEN-query mask over all dual-stream KV tokens."""
 
-    if max_sequence_length < 1:
-        raise ValueError(f"max_sequence_length must be >= 1, got {max_sequence_length}")
-
     num_queries = layout.gen_query_indexes.numel()
-    num_keys = layout.source_sequence_indexes.numel()
-    if num_keys > max_sequence_length:
-        raise ValueError(
-            f"Teacher-forcing sequence has {num_keys} tokens, exceeding max_sequence_length={max_sequence_length}"
-        )
 
     query_indexes = layout.gen_query_indexes[:, None]
     query_sample_ids = layout.sample_ids[query_indexes]
@@ -326,21 +316,11 @@ def build_dense_teacher_forcing_gen_mask(
 
 def build_per_sample_teacher_forcing_gen_masks(
     layout: TeacherForcingLayout,
-    *,
-    max_sequence_length: int,
 ) -> tuple[torch.BoolTensor, ...]:
     """Build one GEN-query dense mask per packed sample without a global 2D allocation."""
 
-    if max_sequence_length < 1:
-        raise ValueError(f"max_sequence_length must be >= 1, got {max_sequence_length}")
-
-    num_keys = layout.source_sequence_indexes.numel()
-    if num_keys > max_sequence_length:
-        raise ValueError(
-            f"Teacher-forcing sequence has {num_keys} tokens, exceeding max_sequence_length={max_sequence_length}"
-        )
-
     masks: list[torch.BoolTensor] = []
+    num_keys = layout.source_sequence_indexes.numel()
     sample_offset = 0
     for sample_len, history_blocks in zip(
         layout.sample_lens,
