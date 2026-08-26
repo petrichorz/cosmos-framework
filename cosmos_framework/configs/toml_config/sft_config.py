@@ -527,6 +527,11 @@ class SchedulerConfig(BaseModel):
 
     model_config = _PYDANTIC_MODEL_CONFIG
 
+    lr_scheduler_type: Literal["LambdaLinear", "LambdaCosine"] | None = Field(
+        default=None,
+        description=("Scheduler implementation. None retains the type selected by the experiment config."),
+    )
+
     cycle_lengths: list[int] = Field(
         default_factory=lambda: [20000],
         description=(

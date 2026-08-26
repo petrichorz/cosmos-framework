@@ -175,6 +175,7 @@ LambdaLinear / LambdaCosine LR scheduler. All four `f_*` values are **ratios of 
 
 | field                | default    | description                                                                                                                                   |
 | -------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lr_scheduler_type`  | `null`     | Scheduler implementation: `LambdaLinear` or `LambdaCosine`. `null` retains the type selected by the experiment.                             |
 | `cycle_lengths`      | `[20000]`  | Length of each cycle in optimizer steps. With one entry, the scheduler completes one full warmup→peak→trough cycle over that many iterations. |
 | `f_max`              | `[1.0]`    | Peak LR multiplier reached at the end of warmup.                                                                                              |
 | `f_min`              | `[0.0]`    | Final LR multiplier at the end of each cycle (the "floor"). For LambdaCosine the LR decays toward `lr × f_min`.                               |
