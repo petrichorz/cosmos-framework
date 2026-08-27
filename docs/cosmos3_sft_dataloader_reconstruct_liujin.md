@@ -69,16 +69,16 @@
 
 ### 3.1 uuid
 
-**格式**：`chunk_{chunk_index}_file_{file_index}_episode_{episode_index}`
+**格式**：`{dataset_name}_chunk_{chunk_index}_file_{file_index}_episode_{episode_index}`
 
-- 来源：episodes 表的三列
-- 目的：跨 chunk、跨 file、跨 episode 唯一，且能从名字看出各 index 含义
+- 来源：数据集目录名（`root.name`）+ episodes 表的三列
+- 目的：跨**数据集**、跨 chunk、跨 file、跨 episode 唯一，且能从名字看出各 index 含义
 
 ```python
-uuid = f"chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}"
+uuid = f"{root.name}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}"
 ```
 
-> 说明：episode_index 在单数据集内虽唯一，但拼接多分片会重复；chunk_index + file_index + episode_index 三者才能唯一定位到「哪个文件里的哪个 episode」。
+> 说明：episode_index 在单数据集内虽唯一，但**多个数据集合并时**，不同数据集可能有相同的 chunk/file/episode 编号，会冲突。所以 uuid 前面加数据集目录名（`root.name`），保证跨数据集唯一。
 
 ### 3.2 vision_path
 
@@ -434,7 +434,8 @@ class SFTDataset(...):
 
 | 问题 | 结论 |
 |------|------|
-| uuid 格式 | `chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}` |
+| uuid 格式 | `{dataset_name}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}`（含数据集目录名，跨数据集唯一） |
+| 多数据集加载 | `lerobot_root` 支持单数据集根 or 父目录；父目录自动 `rglob("meta/info.json")` 递归发现所有数据集 |
 | width/height 来源 | 第一个 `dtype=video` 字段的 shape 前两位，`width=shape[1]`, `height=shape[0]` |
 | t2w_windows 存什么 | **帧编号**（非 timestamp）：`start=round(from×fps)`, `end=round(to×fps)-1` |
 | end_frame 是最后一帧吗 | 是「该 episode 的最后一帧」（文件内帧编号），不是「整个 mp4 最后一帧」 |
@@ -619,15 +620,44 @@ class LeRobotSFTDataset(SFTDataset):
 
 ---
 
-### 9.4 改动 4：新增 3 个 LeRobot metadata 函数
+### 9.4 改动 4：新增 5 个 LeRobot metadata 函数
 
-**位置**：✅ 已落地在 **704-853 行**（`_load_sft_metadata_from_s3` 结束之后、`get_sft_dataset` 之前）。
+**位置**：✅ 已落地（`_load_sft_metadata_from_s3` 结束之后、`get_sft_dataset` 之前）。
 
-**类型**：新增模块函数（3 个：`_select_lerobot_video_key` + `_get_lerobot_video_width_height` + `_load_lerobot_metadata`）
+**类型**：新增模块函数（5 个）
 
-**目的**：读 LeRobot → 产出和 `_load_sft_metadata_from_s3` **结构完全一致**的 metadata list。
+| 函数 | 作用 |
+|------|------|
+| `_select_lerobot_video_key` | 选定 video 字段（显式指定 → 第一个 usable → 第一个 video） |
+| `_get_lerobot_video_width_height` | 从 video 字段 shape 抓 (width, height) |
+| `_discover_lerobot_roots` | **多数据集发现**（新增） |
+| `_load_single_lerobot_metadata` | 加载**单个**数据集（原 `_load_lerobot_metadata` 拆分而来） |
+| `_load_lerobot_metadata` | 统一入口：发现多个数据集 → 逐个加载 → 合并 |
 
-> 落地时把「选 video 字段」和「抓 width/height」拆成两个独立辅助函数（`_select_lerobot_video_key` 704-729 行、`_get_lerobot_video_width_height` 731-745 行），主函数 `_load_lerobot_metadata` 在 747-853 行。
+**目的**：读 LeRobot（支持**单个数据集根 or 父目录**）→ 产出和 `_load_sft_metadata_from_s3` **结构完全一致**的 metadata list。
+
+### 9.4.1 多数据集发现（`_discover_lerobot_roots`）
+
+支持两种 `lerobot_root`：
+
+1. **单个数据集根**（直接含 `meta/info.json`）→ 返回 `[lerobot_root]`
+2. **父目录**（不含 `meta/info.json`，其任意深度子目录含多个数据集）→ 递归 `rglob("meta/info.json")` 发现所有
+
+```python
+def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
+    root = Path(lerobot_root)
+    if (root / "meta" / "info.json").is_file():   # 单数据集根
+        return [str(root)]
+    # 父目录：递归找所有 meta/info.json，取其上级目录
+    dataset_roots = [str(Path(p).parent.parent) for p in root.rglob("meta/info.json")]
+    if not dataset_roots:
+        raise ValueError(f"在 {lerobot_root} 下没找到任何含 meta/info.json 的 LeRobot 数据集目录")
+    return sorted(dataset_roots)
+```
+
+**关键**：不写死层数，`rglob` 递归查找任意深度。
+
+### 9.4.2 字段映射
 
 ```python
 def _load_lerobot_metadata(
@@ -635,49 +665,39 @@ def _load_lerobot_metadata(
     min_frames: int = 61,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
-    caption_key: str = "caption",        # ← 新增：episodes 表里 caption 列的列名
+    caption_key: str = "caption",        # episodes 表里 caption 列的列名
 ) -> list[dict]:
-    """读 LeRobot 3.x 数据集（episodes 表带 caption 列），产出 metadata list。
-
-    步骤：
-    1. 读 meta/info.json → fps、video_path 模板、features
-    2. 读 meta/episodes/*.parquet → 每行一个 episode（含 caption 列）
-    3. 动态抓第一个 dtype=video 字段 → (width, height)（见 3.3 节 get_video_width_height）
-    4. 对每个 episode 构造 metadata dict：
-       - uuid = f"chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}"
-       - vision_path = info["video_path"] 模板填充
-       - width/height = video 字段 shape 前两位（shape=[H,W,C]）
-       - aspect_ratio = get_aspect_ratio(width, height)
-       - t2w_windows = [{
-           start_frame: round(from_timestamp * fps),
-           end_frame:   round(to_timestamp * fps) - 1,   # to 开区间，-1
-           temporal_interval: 1,
-           caption: episodes 表的 caption 列,   # 见下方「caption 处理」
-         }]
-    5. 过滤（duration > 61s、短边、window 帧数 < min_frames），对齐 _load_sft_metadata_from_s3
-    """
-    ...
-    return metadata_list   # 结构对齐 _load_sft_metadata_from_s3 的返回
+    roots = _discover_lerobot_roots(lerobot_root)   # 发现多个数据集
+    metadata_list = []
+    for root in roots:
+        metadata_list.extend(_load_single_lerobot_metadata(root, ...))
+    return metadata_list
 ```
 
-**caption 处理逻辑**（已落地，802-837 行）：
+单数据集内部字段映射（`_load_single_lerobot_metadata`）：
+
+| 字段 | 来源 |
+|------|------|
+| `uuid` | `{root.name}_chunk_{c}_file_{f}_episode_{e}`（**含数据集目录名，保证跨数据集唯一**） |
+| `vision_path` | info.json["video_path"] 模板填充 |
+| `width`/`height` | video 字段 shape 前两位（shape=[H,W,C]） |
+| `aspect_ratio` | `get_aspect_ratio(width, height)` |
+| `t2w_windows` | 每 episode 一个 window，start/end 存**帧编号**：`start=round(from×fps)`, `end=round(to×fps)-1` |
+
+### 9.4.3 caption 处理逻辑
 
 ```python
-caption = row.get(caption_key)   # 802 行：只读 caption_key 指定的列，取不到为 None（不做 tasks 兜底）
+caption = row.get(caption_key)   # 只读 caption_key 指定的列，取不到为 None（不做 tasks 兜底）
 
-# 830-837 行：caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过
-window = {
-    "start_frame": start_frame,
-    "end_frame": end_frame,
-    "temporal_interval": 1,
-}
+# caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过
+window = {"start_frame": ..., "end_frame": ..., "temporal_interval": 1}
 if caption:
     window["caption"] = caption
 ```
 
 > 关键边界行为：缺 caption 列（或值为空）时，`window` 里**没有** `caption` key，下游 `_select_caption` 找不到已知 key → `return None` → `process_one_sample` 跳过该样本（对齐 JSONL 版本对缺 caption 的处理）。**不写 `caption: None`**，否则下游 `raw.strip()` 会 `AttributeError` 崩溃。
 
-**关键**：返回的 metadata dict 字段必须和 `_load_sft_metadata_from_s3`（554-563 行产出）**完全一致**：`uuid` / `vision_path` / `width` / `height` / `nb_frames` / `framerate` / `aspect_ratio` / `t2w_windows`。
+**关键**：返回的 metadata dict 字段必须和 `_load_sft_metadata_from_s3` **完全一致**：`uuid` / `vision_path` / `width` / `height` / `nb_frames` / `framerate` / `aspect_ratio` / `t2w_windows`。
 
 ---
 

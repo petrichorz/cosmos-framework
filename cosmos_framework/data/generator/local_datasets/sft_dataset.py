@@ -744,24 +744,43 @@ def _get_lerobot_video_width_height(info: dict, video_key: str) -> tuple[int, in
     return w, h
 
 
-def _load_lerobot_metadata(
-    lerobot_root: str,
-    min_frames: int = 61,
-    min_short_edge: int = 0,
-    video_feature_key: str | None = None,
-    caption_key: str = "caption",
-) -> list[dict]:
-    """LeRobot 3.x 适配（额外新增）：读 LeRobot 数据集，产出 SFTDataset 认识的 metadata list。
+def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
+    """LeRobot 3.x 适配（额外新增）：发现给定路径下的所有 LeRobot 数据集根目录。
 
+    - 若 ``lerobot_root`` 本身直接含 ``meta/info.json``，则它就是单个数据集，返回 ``[lerobot_root]``。
+    - 否则递归遍历所有子目录，把每个含 ``meta/info.json`` 的子目录当作一个数据集根。
+
+    不写死层数：任意深度下含 ``meta/info.json`` 的目录都会被当作一个数据集。
+    """
+    root = Path(lerobot_root)
+    if (root / "meta" / "info.json").is_file():
+        return [str(root)]
+
+    roots = sorted(
+        str(p)
+        for p in root.rglob("meta/info.json")
+    )
+    # rglob 找到的是 .../meta/info.json，取其上一级目录（去掉 /meta/info.json）
+    dataset_roots = [str(Path(p).parent.parent) for p in roots]
+    if not dataset_roots:
+        raise ValueError(
+            f"在 {lerobot_root} 下没找到任何含 meta/info.json 的 LeRobot 数据集目录"
+        )
+    return dataset_roots
+
+
+def _load_single_lerobot_metadata(
+    lerobot_root: str,
+    min_frames: int,
+    min_short_edge: int,
+    video_feature_key: str | None,
+    caption_key: str,
+) -> list[dict]:
+    """LeRobot 3.x 适配（额外新增）：读【单个】LeRobot 数据集，产出 metadata list。
+
+    被 ``_load_lerobot_metadata`` 调用（后者负责发现多个数据集根并逐个加载合并）。
     输出的 metadata dict 结构与 ``_load_sft_metadata_from_s3`` 完全一致：
     {uuid, vision_path, width, height, nb_frames, framerate, aspect_ratio, t2w_windows}。
-
-    关键字段映射（详见方案文档 cosmos3_sft_dataloader_reconstruct_liujin.md 第 3 章）：
-    - uuid        = chunk_{data/chunk_index}_file_{data/file_index}_episode_{episode_index}
-    - vision_path = info.json["video_path"] 模板填充
-    - width/height = 选定 video 字段 shape 前两位
-    - t2w_windows = 每个 episode 一个 window，start/end 存**帧编号**（非 timestamp）
-                    start = round(from_timestamp * fps), end = round(to_timestamp * fps) - 1
     """
     import pandas as pd
 
@@ -813,7 +832,7 @@ def _load_lerobot_metadata(
         if frames_in_window < min_frames:
             continue
 
-        uuid = f"chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
+        uuid = f"{root.name}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
 
         # 用 info.json 的 video_path 模板拼本地 mp4 路径
         vision_path = str(
@@ -849,6 +868,38 @@ def _load_lerobot_metadata(
             }
         )
 
+    return metadata_list
+
+
+def _load_lerobot_metadata(
+    lerobot_root: str,
+    min_frames: int = 61,
+    min_short_edge: int = 0,
+    video_feature_key: str | None = None,
+    caption_key: str = "caption",
+) -> list[dict]:
+    """LeRobot 3.x 适配（额外新增）：读 LeRobot 数据集（单个根或父目录），产出 metadata list。
+
+    支持两种 ``lerobot_root``：
+    1. 单个数据集根目录（含 meta/info.json）
+    2. 父目录（不含 meta/info.json，其任意深度子目录下含多个 meta/info.json）
+
+    父目录场景会自动递归发现所有含 ``meta/info.json`` 的子目录，逐个加载并合并。
+    """
+    roots = _discover_lerobot_roots(lerobot_root)
+    log.info(f"LeRobot 数据加载：发现 {len(roots)} 个数据集目录")
+
+    metadata_list: list[dict] = []
+    for root in roots:
+        metadata_list.extend(
+            _load_single_lerobot_metadata(
+                root,
+                min_frames=min_frames,
+                min_short_edge=min_short_edge,
+                video_feature_key=video_feature_key,
+                caption_key=caption_key,
+            )
+        )
     return metadata_list
 
 
