@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # SFT dataset loader — reads video metadata + captions from a JSONL file on S3.
+import contextlib
 import gzip
 import hashlib
 import io
@@ -176,6 +177,30 @@ class SFTDataset(torch.utils.data.IterableDataset):
         text_ids = text_ids[: self.max_caption_tokens]
         return text_ids, caption
 
+    @contextlib.contextmanager
+    def _prepare_video(self, metadata: dict):
+        """准备视频源，yield ``(video_path, fps, total_frames)``。
+
+        父类（JSONL / S3 场景）：download 到临时文件，yield 临时文件路径。
+        子类（LeRobotSFTDataset）：override 为直接 yield 本地 mp4 路径，
+        跳过 download + 临时文件，让 decoder 缓存按真实路径命中。
+
+        yield 一个三元组；download 失败时 yield ``(None, None, None)``。
+        """
+        video_bytes = download_from_s3(self.s3_client, metadata["vision_path"])
+        if video_bytes is None:
+            yield None, None, None
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_input:
+            tmp_input.write(video_bytes)
+            tmp_input.flush()
+            video_info = get_video_metadata(tmp_input.name)
+            try:
+                yield tmp_input.name, video_info["fps"], video_info["total_frames"]
+            finally:
+                tmp_input.close()
+
     def _decode_video_frames(
         self,
         video_path: str,
@@ -225,19 +250,12 @@ class SFTDataset(torch.utils.data.IterableDataset):
         resize_h, resize_w = (round(input_h * resize_ratio), round(input_w * resize_ratio))
         crop_y, crop_x = (round((resize_h - target_h) / 2), round((resize_w - target_w) / 2))
 
-        video_bytes = download_from_s3(self.s3_client, metadata["vision_path"])
-        if video_bytes is None:
-            log.warning(f"Failed to download video from S3: {metadata['vision_path']}")
-            return None
-
-        # Decode all frames to (T, H, W, 3)
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_input:
-            tmp_input.write(video_bytes)
-            tmp_input.flush()
-            input_video_path = tmp_input.name
-            video_info = get_video_metadata(input_video_path)
-            original_fps = video_info["fps"]
-            total_frames = video_info["total_frames"]
+        # LeRobot 3.x 适配：视频源准备抽象成可 override 的 _prepare_video 上下文管理器。
+        # 父类 = download + 临时文件；子类（LeRobotSFTDataset）= 直接本地路径，跳过 download/临时文件。
+        with self._prepare_video(metadata) as (input_video_path, original_fps, total_frames):
+            if input_video_path is None:
+                log.warning(f"Failed to download video from S3: {metadata['vision_path']}")
+                return None
 
             # Constrain to the t2w window
             actual_end = min(window_end, total_frames - 1)
@@ -538,6 +556,17 @@ class LeRobotSFTDataset(SFTDataset):
     def __init__(self, *args, decoder_cache_max_size: int = 64, **kwargs):
         super().__init__(*args, **kwargs)
         self._decoder_cache = _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
+
+    @contextlib.contextmanager
+    def _prepare_video(self, metadata: dict):
+        """LeRobot 3.x 适配（额外新增）：override 父类，直接用本地 mp4 路径，跳过 download + 临时文件。
+
+        这样传给 _decode_video_frames 的是真实 mp4 路径（稳定），
+        _LeRobotVideoDecoderCache 才能按真实路径命中，同一个 mp4 只建一次 decoder。
+        """
+        video_path = metadata["vision_path"]
+        video_info = get_video_metadata(video_path)
+        yield video_path, video_info["fps"], video_info["total_frames"]
 
     def _decode_video_frames(
         self,

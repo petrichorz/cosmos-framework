@@ -7,7 +7,7 @@ export COSMOS_DEVICE=npu  # Cosmos 模型强制在NPU芯片上运行
 
 # 当前的数据集、权重和输出路径
 # 【LeRobot 3.x 适配】DATASET_PATH 改为 LeRobot 数据集根目录（含 meta/info.json）
-export DATASET_PATH="/mi/data2T/liujin/dataset/toy_lerobot3_with_caption/00ri/so100_battery"
+export DATASET_PATH="/mi/data2T/liujin/dataset/toy_lerobot3_multi_with_caption"
 # 【留档】原 JSONL 数据集路径（改用 LeRobot 后注释掉，未删除）
 # export DATASET_PATH="/mi/data2T/Embodied-AI/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge"
 export BASE_CHECKPOINT_PATH="/mi/data2T/Embodied-AI/ckpts/Cosmos/Cosmos3-Edge-DCP"
@@ -22,7 +22,7 @@ if [ ! -e ~/.cache/huggingface ]; then
 fi
 
 # torchrun 单机单卡设置
-export ASCEND_RT_VISIBLE_DEVICES="1"  
+export ASCEND_RT_VISIBLE_DEVICES="10"  
 export NPROC_PER_NODE=1
 export NNODES=1
 export NODE_RANK=0
@@ -40,6 +40,7 @@ export MASTER_PORT=50012
 CONDA_HOME="/mi/sfs_turbo/lilin_v1/anaconda3"
 source "$CONDA_HOME/etc/profile.d/conda.sh"
 conda activate cosmos-framework
+
 
 # 安装当前cosmos-framework包
 cd /mi/data2T/liujin/code/cosmos_ascend/cosmos-framework
@@ -80,8 +81,8 @@ TOML_FILE="examples/toml/sft_config/vision_sft_edge.toml"
 : "${DATASET_PATH:=examples/data/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
 
-# 【LeRobot 3.x 适配】校验 LeRobot 数据集的 info.json 存在
-EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/meta/info.json" ]] || { echo "ERROR: missing $DATASET_PATH/meta/info.json" >&2; exit 1; }'
+# 【LeRobot 3.x 适配】校验 LeRobot 数据集：$DATASET_PATH 下任意深度存在 meta/info.json（支持父目录下多个数据集）
+EXTRA_DATASET_CHECK='[[ -n "$(find "$DATASET_PATH" -path "*/meta/info.json" -print -quit)" ]] || { echo "ERROR: no meta/info.json found under $DATASET_PATH" >&2; exit 1; }'
 # 【留档】原 JSONL 校验（改用 LeRobot 后注释掉，未删除）
 # EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }'
 TAIL_OVERRIDES=(

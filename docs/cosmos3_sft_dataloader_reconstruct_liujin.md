@@ -337,6 +337,121 @@ class SFTDataset(...):
 3. **seek + 区间解码**：替换「全量 decode + 过滤」为 `get_frames_in_range(start, end+1)` 按帧区间解码。
 4. **帧编号定位**：因为存帧编号，seek 用帧索引，避开 timestamp 的浮点误差/开区间问题。
 
+### 4.10 性能优化：抽象 `_prepare_video`，让 decoder 缓存真正命中（已落地）
+
+> 这是基于性能基线测试发现的 bug 修复 + 优化。详见 11.4 节基线测试。
+
+#### 问题（优化前）
+
+`LeRobotSFTDataset` 虽然 override 了 `_decode_video_frames` 用 torchcodec seek，但 `process_one_sample` 里**视频源准备**这段走的是父类为 JSONL/S3 写的硬编码逻辑：
+
+```python
+# 优化前 process_one_sample 里的视频源准备
+video_bytes = read_video_to_bytes(self.s3_client, metadata["vision_path"])  # 本地路径 = read_bytes 整个 mp4
+with tempfile.NamedTemporaryFile(...) as tmp_input:
+    tmp_input.write(video_bytes)          # 写临时文件
+    input_video_path = tmp_input.name     # ← 每次随机的临时文件路径
+    video_info = get_video_metadata(input_video_path)
+    ...
+    video_chunk = self._decode_video_frames(video_path=input_video_path, ...)  # 临时路径传给 seek
+```
+
+**两个问题**：
+1. 本地 mp4 不需要 `read_bytes`（整个 198MB 读内存）+ 写临时文件 + ffprobe，全是浪费。
+2. `input_video_path` 是每次随机的临时路径 → `_LeRobotVideoDecoderCache` 的 key 永远不同 → **缓存永远 miss** → 每个 episode 都新建 decoder（exact 扫描整个文件）。
+
+#### 优化方案：抽象成可 override 的 `_prepare_video`
+
+父类 `SFTDataset`（JSONL/S3 场景，保持原逻辑）：
+
+```python
+@contextlib.contextmanager
+def _prepare_video(self, metadata):
+    """yield (video_path, fps, total_frames)。download 失败 yield (None, None, None)。"""
+    video_bytes = read_video_to_bytes(self.s3_client, metadata["vision_path"])
+    if video_bytes is None:
+        yield None, None, None
+        return
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_input:
+        tmp_input.write(video_bytes); tmp_input.flush()
+        video_info = get_video_metadata(tmp_input.name)
+        yield tmp_input.name, video_info["fps"], video_info["total_frames"]
+```
+
+子类 `LeRobotSFTDataset`（本地 mp4，直接路径）：
+
+```python
+@contextlib.contextmanager
+def _prepare_video(self, metadata):
+    """直接本地路径，跳过 download + 临时文件，让 decoder 缓存按真实路径命中。"""
+    video_path = metadata["vision_path"]
+    video_info = get_video_metadata(video_path)
+    yield video_path, video_info["fps"], video_info["total_frames"]
+```
+
+`process_one_sample` 改为统一走 `_prepare_video`：
+
+```python
+with self._prepare_video(metadata) as (input_video_path, original_fps, total_frames):
+    if input_video_path is None:
+        log.warning(...); return None
+    # 后续 window 计算 + decode 不变
+```
+
+#### 效果（10 个 episode，同一 mp4）
+
+| 指标 | 优化前 | 优化后 |
+|------|--------|--------|
+| read_bytes 整个 mp4 | 10 次 | 0 次 |
+| 写临时文件 | 10 次 | 0 次 |
+| decoder 新建（exact 扫描） | 10 次 | 1 次 |
+| 平均单 episode | 3.138s | 2.823s |
+
+#### 关键结论（诚实）
+
+- ✅ 修复了「decoder 缓存失效」的 bug（语义正确了，缓存真正命中）。
+- ✅ 消除了 read_bytes + 写临时文件的浪费（约 10% 收益）。
+- ⚠️ **但真正的瓶颈是 av1 软解 1341 帧的固定成本（~2.45s/个），数据加载代码改不了**。更大的优化空间在配置层：`num_video_frames=-1`（全帧）→ `93`（抽帧），能把 seek 时间降一个数量级。
+
+#### 端到端数据流前后对比
+
+**优化前（有 bug）**：
+
+```
+process_one_sample(metadata)
+  ├─ read_video_to_bytes(vision_path)     ← 本地路径 = read_bytes 整个 mp4（198MB）
+  ├─ tempfile.NamedTemporaryFile          ← 写随机临时文件
+  ├─ get_video_metadata(临时文件)          ← ffprobe
+  └─ _decode_video_frames(临时文件路径)
+       └─ _LeRobotVideoDecoderCache.get_decoder(临时路径)
+            └─ 临时路径每次不同 → cache 永远 miss → 每次都新建 decoder
+```
+
+**优化后（bug 已修）**：
+
+```
+process_one_sample(metadata)
+  └─ with self._prepare_video(metadata) as (video_path, fps, total_frames):
+       │  ← 多态钩子：父类=download+临时文件；子类=直接本地路径
+       └─ _decode_video_frames(video_path=真实 mp4 路径)
+            └─ _LeRobotVideoDecoderCache.get_decoder(真实路径)
+                 └─ 真实路径稳定 → cache 命中 → 复用 decoder
+```
+
+**本质**：这不是算法优化，而是**抽象层次修正**——把「数据源差异（S3 vs 本地）」从硬编码在通用流程，改为抽象到 `_prepare_video` 这个可 override 的钩子上。与之前 `_decode_video_frames`（ffmpeg vs torchcodec）是同一思路：**把"会变的部分"抽成可 override 的方法，父类保持通用逻辑，子类按场景覆盖**。
+
+#### 函数改名
+
+`download_from_s3` → `read_video_to_bytes`（原函数名误导：它对本地路径也生效，走 `Path.read_bytes()`，本质是「把视频读成 bytes」而非「仅从 S3 下载」）。
+
+涉及文件：
+
+| 文件 | 改动 |
+|------|------|
+| `helper.py` | 函数定义改名 + docstring 更新 |
+| `sft_dataset.py` | import + 调用处（`_prepare_video` 父类）改名 |
+| `transfer_sft_dataset.py` | import + 调用处改名 |
+
 ---
 
 ## 5. 待落地时确认的实现细节
@@ -455,19 +570,23 @@ class SFTDataset(...):
 
 | 锚点 | 行号 | 备注 |
 |------|------|------|
-| `SFTDataset` 类定义 | 98 | 原有，未动 |
-| `_tokenize_caption` 方法 | 167-177 | 原有，未动 |
-| **`_decode_video_frames`（父类默认）** | **179-207** | ✅ 新增（改动 1） |
-| `process_one_sample` 方法 | 210 | 原有，decode 循环被替换（改动 2） |
-| `_LeRobotVideoDecoderCache` | **495-528** | ✅ 新增（改动 3） |
-| `LeRobotSFTDataset` | **530-577** | ✅ 新增（改动 3） |
-| `_flatten_metadata_by_window` | 580 | 原有，偏移后 |
-| `_load_sft_metadata_from_s3` | 600-696 | 原有，偏移后 |
-| `_select_lerobot_video_key` | **704-729** | ✅ 新增（改动 4） |
-| `_get_lerobot_video_width_height` | **731-745** | ✅ 新增（改动 4） |
-| `_load_lerobot_metadata` | **747-853** | ✅ 新增（改动 4） |
-| `get_sft_dataset` | 856-992 | 原有，偏移后 |
-| `get_sft_dataset_from_lerobot` | **999-1085** | ✅ 新增（改动 5，文件末尾） |
+| `SFTDataset` 类定义 | 99 | 原有，未动 |
+| `_tokenize_caption` 方法 | 168-178 | 原有，未动 |
+| **`_prepare_video`（父类默认）** | **181-202** | ✅ 新增（改动 6，性能优化） |
+| **`_decode_video_frames`（父类默认）** | **204-233** | ✅ 新增（改动 1） |
+| `process_one_sample` 方法 | 235 | 原有，视频源准备段改用 `_prepare_video`（改动 6） |
+| `_LeRobotVideoDecoderCache` | **513-545** | ✅ 新增（改动 3） |
+| `LeRobotSFTDataset` | **548-607** | ✅ 新增（改动 3） |
+| `_prepare_video`（子类 override） | **561-569** | ✅ 新增（改动 6，性能优化） |
+| `_decode_video_frames`（子类 override） | **571-607** | ✅ 新增（改动 3） |
+| `_flatten_metadata_by_window` | 609 | 原有，偏移后 |
+| `_select_lerobot_video_key` | **733-758** | ✅ 新增（改动 4） |
+| `_get_lerobot_video_width_height` | **760-774** | ✅ 新增（改动 4） |
+| `_discover_lerobot_roots` | **776-799** | ✅ 新增（改动 7，多数据集发现） |
+| `_load_single_lerobot_metadata` | **801-901** | ✅ 新增（改动 7，拆分） |
+| `_load_lerobot_metadata` | **903-933** | ✅ 新增（改动 4，统一入口） |
+| `get_sft_dataset` | 935 | 原有，偏移后 |
+| `get_sft_dataset_from_lerobot` | **1079-...** | ✅ 新增（改动 5，文件末尾） |
 
 ---
 
@@ -762,14 +881,31 @@ def get_sft_dataset_from_lerobot(
 | 项 | 说明 |
 |----|------|
 | `SFTDataset.__init__`（101 行） | 纯 metadata 驱动，不关心来源 |
-| `SFTDataset.__len__`（164 行） | 不动 |
-| `SFTDataset._tokenize_caption`（167-177 行） | 不动 |
-| `process_one_sample` 的 download + window 计算部分 | 不动（LeRobot 走 native chunk mode 分支） |
+| `SFTDataset.__len__` | 不动 |
+| `SFTDataset._tokenize_caption` | 不动 |
+| `process_one_sample` 的 window 计算部分 | 不动（LeRobot 走 native chunk mode 分支） |
 | `process_one_sample` 的 stack/crop/caption tokenize/ret 构造部分 | 不动 |
-| `__iter__`（391 行） | 不动 |
-| `_flatten_metadata_by_window`（580 行） | 不动（被 get_sft_dataset_from_lerobot 复用） |
-| `_load_sft_metadata_from_s3`（600 行） | 不动（JSONL 入口保留） |
-| `get_sft_dataset`（856 行） | 不动（JSONL 入口保留） |
+| `__iter__` | 不动 |
+| `_flatten_metadata_by_window` | 不动（被 get_sft_dataset_from_lerobot 复用） |
+| `_load_sft_metadata_from_s3` | 不动（JSONL 入口保留） |
+| `get_sft_dataset` | 不动（JSONL 入口保留） |
+
+### 9.8 改动 6：性能优化（抽象 `_prepare_video`，详见 4.10）
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `SFTDataset._prepare_video`（父类） | 181-202 | 新增：download + 临时文件（JSONL/S3 原逻辑搬移） |
+| `LeRobotSFTDataset._prepare_video`（子类） | 561-569 | 新增：直接本地 mp4 路径，跳过 download + 临时文件 |
+| `process_one_sample` 视频源准备段 | 255 | 改用 `with self._prepare_video(...)`，替代原硬编码 download |
+
+### 9.9 改动 7：多数据集加载（`_discover_lerobot_roots`）
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `_discover_lerobot_roots` | 776-799 | 新增：单根 or 父目录递归发现 |
+| `_load_single_lerobot_metadata` | 801-901 | 拆分：加载单个数据集 |
+| `_load_lerobot_metadata` | 903-933 | 重构：发现多个 → 逐个加载 → 合并 |
+| uuid 加数据集名 | 835 | `{root.name}_chunk_...`，保证跨数据集唯一 |
 
 ---
 
@@ -839,6 +975,34 @@ PackedSequence(sample_lens=[11184, 10464, 11184, 10544], ...)（4 个 sample 打
 loss = 2.0362（前向成功）
 ```
 
+### 11.4 性能基线测试（demo 数据集 `toy_lerobot3_multi_with_caption`）
+
+**测试数据集**：`toy_lerobot3_multi_with_caption`（3 个副本，每个 40 episode，side 4 mp4 + wrist 2 mp4，共 120 episode）。
+
+**优化前基线**（10 个 episode，同一 mp4）：
+
+| 指标 | 数值 |
+|------|------|
+| 平均单 episode | 3.138s |
+| torchcodec seek 占比 | 88%（2.76s/个） |
+| 同一 mp4 被 read_bytes | 10 次 |
+| decoder 缓存 miss | 10 次 |
+
+**优化后**（同一批 10 个 episode）：
+
+| 指标 | 数值 |
+|------|------|
+| 平均单 episode | 2.823s |
+| read_bytes | 0 次 |
+| 写临时文件 | 0 次 |
+| decoder 新建 | 1 次（缓存命中） |
+
+**诊断结论**：
+
+- 优化修复了「decoder 缓存失效」bug，消除了 read_bytes + 临时文件浪费（约 10%）。
+- 但真正的瓶颈是 **av1 软解 1341 帧的固定成本（~2.45s/个）**，数据加载代码无法消除。
+- 更大的优化空间在**配置层**：`num_video_frames=-1`（全帧）→ `93`（抽帧），seek 时间可降一个数量级。
+
 ---
 
 ## 附录：相关文件索引
@@ -846,7 +1010,7 @@ loss = 2.0362（前向成功）
 | 文件 | 作用 |
 |------|------|
 | `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | vision SFT 数据加载（`SFTDataset` + `get_sft_dataset` + `get_sft_dataset_from_lerobot` + metadata 解析） |
-| `cosmos_framework/data/generator/local_datasets/helper.py` | `ffmpeg_decode_video`、`get_aspect_ratio`、`download_from_s3` |
+| `cosmos_framework/data/generator/local_datasets/helper.py` | `ffmpeg_decode_video`、`get_aspect_ratio`、`read_video_to_bytes` |
 | `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴） |
 | `cosmos_framework/data/generator/action/datasets/base_dataset.py` | `_video_path`（video_path 模板拼接，可参考） |
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | vision SFT 实验配置（dataloader 接入点，已改为 LeRobot） |
