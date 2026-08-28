@@ -7,10 +7,10 @@
 
 [job]
 task         = "vfm"
-experiment   = "vision_sft_edge"
+experiment   = "vision_sft_edge_lerobot3"     # 需匹配对应的文件名
 project      = "cosmos3"
 group        = "sft"
-name         = "vision_sft_edge"
+name         = "vision_sft_edge_test_lerobot3"
 wandb_mode   = "offline"
 
 [model]
@@ -67,7 +67,7 @@ warm_up_steps      = [50]
 distributed_parallelism = "fsdp"
 grad_accum_iter         = 2
 logging_iter            = 1
-max_iter                = 500
+max_iter                = 110
 
 [trainer.callbacks.compile_tokenizer]
 compile_after_iterations = 3

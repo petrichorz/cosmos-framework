@@ -1,38 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""``vision_sft_edge`` — Cosmos3-Edge vision SFT recipe.
+"""``vision_sft_edge_lerobot3`` — Cosmos3-Edge vision SFT recipe (LeRobot 3.x 数据源).
 
-Nemotron-2B-Dense-VL / Cosmos3-Edge backbone, T2V/I2V/V2V SFT, PackingDataLoader +
-RankPartitionedDataLoader stack. EMA enabled.
-
-Sibling of ``vision_sft_nano``: same Hydra defaults, same dataloader stack, same
-optimizer / scheduler / trainer / checkpoint blocks. The only differences are the
-model config (``EDGE_MODEL_CONFIG`` — dense Nemotron backbone, no audio) and the
-recipe name. Edge has no sound tokenizer, matching nano's
-``{"override /sound_tokenizer": None}`` default.
-
-Notes:
-    * ``_target_`` references for ``model``, ``optimizer``, ``scheduler``,
-      ``checkpoint``, ``callbacks``, ``ema``, ``tokenizer``, ``cluster``,
-      ``vlm_config``, and ``ckpt_type`` flow from the ``defaults:`` group
-      choices, matching the YAML's ``defaults:`` list (``_self_`` is placed
-      LAST per prerelease convention so the experiment overrides the
-      defaults, but no setting changes semantically).
-    * The YAML's giant ``model_parallel`` block, ``trainer.profiling``,
-      ``trainer.straggler_detection`` and ``trainer.type`` are populated by
-      the base ``Config`` (``cosmos_framework/configs/base/config.py``) defaults and
-      are therefore omitted here.
+继承自 ``vision_sft_edge``（Nemotron-2B-Dense-VL / Cosmos3-Edge backbone，
+T2V/I2V/V2V SFT，PackingDataLoader + RankPartitionedDataLoader stack，EMA enabled），
+唯一差异：dataloader 改用 ``get_sft_dataset_from_lerobot`` 动态加载 LeRobot 3.x
+数据集（episodes 表带 caption 列），而非 JSONL。
 
 ``checkpoint.load_path`` is left as ``???`` (a Hydra MISSING marker); supply
 via CLI / a downstream experiment that inherits from this one.
 
 Usage::
 
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. torchrun --nproc_per_node=1 \\
+    DATASET_PATH=<lerobot_root> PYTHONPATH=. torchrun --nproc_per_node=1 \\
         --master_port=12341 -m cosmos_framework.scripts.train \\
         --config=cosmos_framework/configs/base/config.py -- \\
-        experiment=vision_sft_edge \\
+        experiment=vision_sft_edge_lerobot3 \\
         checkpoint.load_path=<path>
 """
 
@@ -45,32 +29,24 @@ from cosmos_framework.data.generator.joint_dataloader import (
     PackingDataLoader,
     RankPartitionedDataLoader,
 )
-from cosmos_framework.data.generator.local_datasets.sft_dataset import get_sft_dataset
+from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import get_sft_dataset_from_lerobot
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
 
 cs = ConfigStore.instance()
 
 # Vision SFT trains no action tokens, so drop the action head (recipe semantics).
-# Historical: pre-renewal (< 2026-07-16) Edge checkpoints shipped no action weights,
-# so action_gen=True NaN'd (uninitialized frozen head made the graph-consistency
-# dummy forward's 0.0 * preds_action NaN).
 _EDGE_VISION_MODEL_CONFIG = copy.deepcopy(EDGE_MODEL_CONFIG)
 _EDGE_VISION_MODEL_CONFIG["action_gen"] = False
 
 
-vision_sft_edge = LazyDict(
+vision_sft_edge_lerobot3 = LazyDict(
     dict(
         defaults=[
             {"override /model": "mot_fsdp"},
             {"override /data_train": None},
             {"override /data_val": None},
             {"override /optimizer": "adamw"},
-            # YAML used `scheduler: warmup_cosine_lr` but that group is only
-            # registered in cosmos_framework/configs/base/reasoner/defaults/optimizer.py
-            # (reachable from the vlm config tree). The base vfm config path
-            # only knows `lambdacosine`, which also sets
-            # lr_scheduler_type="LambdaCosine" — behaviorally identical.
             {"override /scheduler": "lambdacosine"},
             {"override /checkpoint": "s3"},
             {
@@ -91,7 +67,7 @@ vision_sft_edge = LazyDict(
         job=dict(
             project="cosmos3",
             group="sft",
-            name="vision_sft_edge",
+            name="vision_sft_edge_lerobot3",
             wandb_mode="disabled",
         ),
         model=dict(
@@ -128,11 +104,6 @@ vision_sft_edge = LazyDict(
             logging_iter=1,
             max_iter=500,
             max_val_iter=None,
-            # YAML had `memory_format: preserve_format` as a string, but the
-            # prerelease trainer passes this verbatim to model.to(memory_format=…)
-            # which requires a torch.memory_format enum (not a string).
-            # Omit and let the framework default apply, matching how
-            # mixed_modality_sft_nano.py handles it.
             run_validation=False,
             run_validation_on_start=False,
             save_zero_checkpoint=False,
@@ -246,23 +217,21 @@ vision_sft_edge = LazyDict(
                 datasets=dict(
                     video=dict(
                         ratio=1,
-                        dataset=L(get_sft_dataset)(
+                        dataset=L(get_sft_dataset_from_lerobot)(
                             append_duration_fps_timestamps=True,
                             append_resolution_info=True,
-                            # Per-caption token cap. Structured-JSON captions are long, so
-                            # default to 2048 (measured max ~1790); tune via the TOML knob
-                            # [dataloader_train].max_caption_tokens. See sft_dataset.py
-                            # _MAX_CAPTION_TOKENS.
                             max_caption_tokens=2048,
                             caption_suffix="",
                             cfg_dropout_keep_metadata=False,
                             cfg_dropout_rate=0.1,
-                            # 70% T2V, 20% I2V (first frame), 10% V2V (first 5 frames / 2 latent frames)
                             conditioning_config={0: 0.7, 1: 0.2, 2: 0.1},
                             conditioning_fps=-1,
                             conditioning_fps_noise_std=0.0,
                             frame_selection_mode="first",
-                            jsonl_paths=["${oc.env:DATASET_PATH}/train/video_dataset_file.jsonl"],
+                            lerobot_root="${oc.env:DATASET_PATH}",   # LeRobot 数据集根目录（含 meta/info.json）
+                            video_feature_key=None,  # 显式指定 feature 名（精确匹配）；None 则不显式指定
+                            video_feature_keywords=["top", "head"],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
+                            caption_key="caption",                   # episodes 表里的 caption 列名
                             min_short_edge=0,
                             num_video_frames=-1,
                             resolution="256",
@@ -270,15 +239,6 @@ vision_sft_edge = LazyDict(
                             temporal_compression_factor=4,
                             temporal_interval_mode="max_30fps",
                             use_system_prompt=False,
-                            # YAML spells this out as
-                            #   _target_: create_qwen2_tokenizer_with_download
-                            #   config_variant: gcp
-                            # but that pins the dataset's tokenizer to the GCP
-                            # variant, requiring credentials/gcp_checkpoint.secret.
-                            # Use a Hydra interpolation instead so launchers
-                            # (e.g. launch_vision_sft_edge_toml.sh) can flip
-                            # model.config.vlm_config.tokenizer.config_variant=hf
-                            # and have the dataset inherit the same setting.
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
                         ),
                     ),
@@ -292,6 +252,6 @@ vision_sft_edge = LazyDict(
 )
 
 
-for _item in [vision_sft_edge]:
+for _item in [vision_sft_edge_lerobot3]:
     _name = [k for k, v in globals().items() if v is _item][0]
     cs.store(group="experiment", package="_global_", name=_name, node=_item)
