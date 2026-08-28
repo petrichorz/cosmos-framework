@@ -730,31 +730,34 @@ def _load_sft_metadata_from_s3(
 # ============================================================================
 
 
-def _select_lerobot_video_key(info: dict, video_feature_key: str | None) -> str:
+def _select_lerobot_video_key(
+    info: dict,
+    video_feature_key: str | None = None,
+    video_feature_keywords: list[str] | None = None,
+) -> str:
     """LeRobot 3.x 适配（额外新增）：从 info.json 的 features 里选定要用的 video 字段名。
 
     优先级：
-    1. 显式传入的 ``video_feature_key``（若其 dtype == video）
-    2. 第一个 ``dtype == "video"`` 且 ``curation.usable`` 的字段
+    1. 显式传入的 ``video_feature_key``（精确匹配）
+    2. 关键字匹配：``video_feature_keywords`` 里任一关键字是 key 名的子串
+       （如 ["top", "head"] 命中 "observation.images.top"），取第一个命中字段
     3. 第一个 ``dtype == "video"`` 的字段（兜底）
     """
-    video_feats = [(k, v) for k, v in info["features"].items() if v.get("dtype") == "video"]
-    if not video_feats:
+    video_keys = [k for k, v in info["features"].items() if v.get("dtype") == "video"]
+    if not video_keys:
         raise ValueError("info.json 的 features 里没有 dtype=video 的字段")
 
-    def _usable(feat: dict) -> bool:
-        return feat.get("info", {}).get("curation", {}).get("usable", True)
+    if video_feature_key:
+        if video_feature_key not in video_keys:
+            raise ValueError(f"video_feature_key={video_feature_key!r} 不在 features 里")
+        return video_feature_key
 
-    if video_feature_key is not None:
-        for k, v in video_feats:
-            if k == video_feature_key:
+    if video_feature_keywords:
+        for k in video_keys:
+            if any(kw in k for kw in video_feature_keywords):
                 return k
-        raise ValueError(f"video_feature_key={video_feature_key!r} 不在 features 里")
 
-    for k, v in video_feats:
-        if _usable(v):
-            return k
-    return video_feats[0][0]
+    return video_keys[0]
 
 
 def _get_lerobot_video_width_height(info: dict, video_key: str) -> tuple[int, int]:
@@ -804,6 +807,7 @@ def _load_single_lerobot_metadata(
     min_short_edge: int,
     video_feature_key: str | None,
     caption_key: str,
+    video_feature_keywords: list[str] | None = None,
 ) -> list[dict]:
     """LeRobot 3.x 适配（额外新增）：读【单个】LeRobot 数据集，产出 metadata list。
 
@@ -817,7 +821,7 @@ def _load_single_lerobot_metadata(
     info = json.loads((root / "meta" / "info.json").read_text())
     fps = float(info["fps"])
 
-    video_key = _select_lerobot_video_key(info, video_feature_key)
+    video_key = _select_lerobot_video_key(info, video_feature_key, video_feature_keywords)
     width, height = _get_lerobot_video_width_height(info, video_key)
 
     # 读 episodes 表（可能跨多个 chunk/file parquet），每行一个 episode
@@ -906,6 +910,7 @@ def _load_lerobot_metadata(
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
+    video_feature_keywords: list[str] | None = None,
 ) -> list[dict]:
     """LeRobot 3.x 适配（额外新增）：读 LeRobot 数据集（单个根或父目录），产出 metadata list。
 
@@ -927,6 +932,7 @@ def _load_lerobot_metadata(
                 min_short_edge=min_short_edge,
                 video_feature_key=video_feature_key,
                 caption_key=caption_key,
+                video_feature_keywords=video_feature_keywords,
             )
         )
     return metadata_list
@@ -1098,13 +1104,14 @@ def get_sft_dataset_from_lerobot(
     temporal_compression_factor: int = 4,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
+    video_feature_keywords: list[str] | None = None,
     decoder_cache_max_size: int = 64,
     **kwargs,
 ) -> LeRobotSFTDataset:
     """LeRobot 3.x 适配（额外新增）：LeRobot 版 get_sft_dataset，动态加载 LeRobot 数据集。
 
     与 ``get_sft_dataset`` 的差异仅 3 处：
-    1. 签名：``lerobot_root`` + ``video_feature_key`` 替代 ``jsonl_paths``
+    1. 签名：``lerobot_root`` + ``video_feature_key``/``video_feature_keywords`` 替代 ``jsonl_paths``
     2. metadata 来源：``_load_lerobot_metadata`` 替代 ``_load_sft_metadata_from_s3``
     3. 构造类：``LeRobotSFTDataset`` 替代 ``SFTDataset``（后者 override 视频解码为按帧编号 seek）
 
@@ -1126,6 +1133,7 @@ def get_sft_dataset_from_lerobot(
         min_short_edge=min_short_edge,
         video_feature_key=video_feature_key,
         caption_key=caption_key,
+        video_feature_keywords=video_feature_keywords,
     )
 
     total_windows = sum(len(m["t2w_windows"]) for m in metadata_list)
