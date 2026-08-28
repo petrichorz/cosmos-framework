@@ -61,6 +61,9 @@ def init_wandb(config: Config, model: ImaginaireModel) -> None:
         config_resolved = easy_io.load(local_safe_yaml_fp)
     else:
         config_resolved = attrs.asdict(config)
+    import swanlab
+
+    swanlab.sync_wandb(mode=config_job.wandb_mode, wandb_run=False)
     # Initialize the wandb library. If we attempt to resume an existing run
     # but the current user does not have permission to update that run
     # (common when re-using an ID created by someone else), fall back to
