@@ -74,12 +74,12 @@ torchrun --nproc_per_node=1 \
 
 这套训练的最终配置不是任何一个文件单独决定的，而是四层叠加：
 
-| 优先级 | 来源 | 主要作用 |
-|---|---|---|
-| 低 | VFM 基础配置与 config group | 建立完整对象图，例如 trainer、optimizer、model 的 `_target_` |
-| 中 | `vision_sft_edge.py` | 选择 Edge 模型、数据管线、AdamW、FSDP 等实验默认值 |
-| 高 | `vision_sft_edge.toml` | 覆盖本次训练希望暴露的超参数 |
-| 最高 | launcher 末尾的 Hydra 参数 | 把在线 tokenizer 配置替换为本地 processor 路径 |
+| 优先级 | 来源                        | 主要作用                                                     |
+| ------ | --------------------------- | ------------------------------------------------------------ |
+| 低     | VFM 基础配置与 config group | 建立完整对象图，例如 trainer、optimizer、model 的 `_target_` |
+| 中     | `vision_sft_edge.py`        | 选择 Edge 模型、数据管线、AdamW、FSDP 等实验默认值           |
+| 高     | `vision_sft_edge.toml`      | 覆盖本次训练希望暴露的超参数                                 |
+| 最高   | launcher 末尾的 Hydra 参数  | 把在线 tokenizer 配置替换为本地 processor 路径               |
 
 ### 3.1 TOML 先负责“校验”，再变成 Hydra override
 
@@ -165,23 +165,23 @@ Edge 的具体模型值来自
 
 ### 3.4 当前关键有效值
 
-| 配置 | 当前有效值 | 最终来源 |
-|---|---:|---|
-| model class | `OmniMoTModel` | `mot_fsdp` group |
-| backbone | Nemotron 2B Dense VL MoT | `EDGE_MODEL_CONFIG` |
-| causal strategy | `none` | Edge model config |
-| model precision | `bfloat16` | TOML |
-| distributed mode | `fsdp` | experiment/TOML |
-| torch compile | `false` | 当前 TOML |
-| activation checkpoint | `full` | TOML |
-| optimizer class | `torch.optim.AdamW` | experiment 的 `adamw` group |
-| optimizer fused 参数 | `true` | 当前 TOML |
-| learning rate | `1e-4` | 当前 TOML 覆盖实验的 `5e-4` |
-| grad accumulation | 2 | TOML |
-| optimizer steps | 500 | TOML |
-| checkpoint interval | 100 steps | TOML |
-| packed token budget | 45056 | TOML/experiment |
-| caption token cap | 2048 | TOML/experiment |
+| 配置                  |               当前有效值 | 最终来源                    |
+| --------------------- | -----------------------: | --------------------------- |
+| model class           |           `OmniMoTModel` | `mot_fsdp` group            |
+| backbone              | Nemotron 2B Dense VL MoT | `EDGE_MODEL_CONFIG`         |
+| causal strategy       |                   `none` | Edge model config           |
+| model precision       |               `bfloat16` | TOML                        |
+| distributed mode      |                   `fsdp` | experiment/TOML             |
+| torch compile         |                  `false` | 当前 TOML                   |
+| activation checkpoint |                   `full` | TOML                        |
+| optimizer class       |      `torch.optim.AdamW` | experiment 的 `adamw` group |
+| optimizer fused 参数  |                   `true` | 当前 TOML                   |
+| learning rate         |                   `1e-4` | 当前 TOML 覆盖实验的 `5e-4` |
+| grad accumulation     |                        2 | TOML                        |
+| optimizer steps       |                      500 | TOML                        |
+| checkpoint interval   |                100 steps | TOML                        |
+| packed token budget   |                    45056 | TOML/experiment             |
+| caption token cap     |                     2048 | TOML/experiment             |
 
 `adamw` group 明确选择 `optimizer_type="AdamW"`，见
 [AdamW config group](../cosmos_framework/configs/base/defaults/optimizer.py#L108,1)，
@@ -314,11 +314,11 @@ conditioning_config = {0: 0.7, 1: 0.2, 2: 0.1}
 dataset 会按这个分布随机选 `num_cond`，并把最前面的 latent frame index 写入 `SequencePlan.condition_frame_indexes_vision`，见
 [SequencePlan 构造](../cosmos_framework/data/generator/local_datasets/sft_dataset.py#L348,1)。
 
-| num_cond | 训练形式 | 条件内容 |
-|---:|---|---|
-| 0 | T2V，70% | 没有 clean vision latent，仅文本条件 |
-| 1 | I2V，20% | 第 1 个 VAE latent frame 为 clean 条件 |
-| 2 | V2V，10% | 前 2 个 VAE latent frame 为 clean 条件 |
+| num_cond | 训练形式 | 条件内容                               |
+| -------: | -------- | -------------------------------------- |
+|        0 | T2V，70% | 没有 clean vision latent，仅文本条件   |
+|        1 | I2V，20% | 第 1 个 VAE latent frame 为 clean 条件 |
+|        2 | V2V，10% | 前 2 个 VAE latent frame 为 clean 条件 |
 
 Wan VAE 时间压缩因子是 4。这里的 2 个 latent frame 对应从像素时间轴开头覆盖 5 帧的因果编码范围，即 `1 + (5-1)/4 = 2`，因此实验注释写的是 “first 5 frames / 2 latent frames”。
 

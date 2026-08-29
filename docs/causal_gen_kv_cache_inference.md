@@ -66,21 +66,21 @@ examples/run_causal_gen_kv_cache_bridge_val.sh
 
 主要变量：
 
-| 变量 | 默认值 | 含义 |
-|---|---:|---|
-| `NUM_BLOCKS` | `16` | 顺序生成的 block 数 `B` |
-| `BLOCK_SIZE` | `2` | 脚本默认每个 block 联合去噪的 VAE latent frame 数 `S`；模型参数自身默认仍为 1 |
-| `HISTORY_BLOCKS` | `16` | GenKVCache 最多保留的 clean block 数 `K` |
-| `NUM_STEPS` | `35` | 每个 block 的 diffusion steps |
-| `GUIDANCE` | `1.0` | CFG scale；`1.0` 表示关闭 CFG |
-| `SEED` | `1` | 整次推理的随机种子 |
-| `DEVICE_ID` | `0` | 对脚本可见的 Ascend NPU 编号 |
-| `USE_TORCH_COMPILE` | `0` | `1` 开启 torch compile；Ascend 首次调试建议保持关闭 |
-| `SAMPLE_ID` | `002345` | BridgeData2 验证集 episode 编号，不带 `episode_` 前缀；`2345` 和 `002345` 均可 |
-| `CHECKPOINT_ROOT` | iter 400 路径 | checkpoint 根目录；其下必须存在 `model/.metadata` |
-| `CONFIG_FILE` | run 的 `config.yaml` | 模型配置文件 |
-| `VAL_ROOT` | BridgeData2 val 路径 | 验证集根目录 |
-| `OUTPUT_ROOT` | 仓库 `outputs/causal_gen_kv_cache/...` | 输出根目录 |
+| 变量                |                                 默认值 | 含义                                                                           |
+| ------------------- | -------------------------------------: | ------------------------------------------------------------------------------ |
+| `NUM_BLOCKS`        |                                   `16` | 顺序生成的 block 数 `B`                                                        |
+| `BLOCK_SIZE`        |                                    `2` | 脚本默认每个 block 联合去噪的 VAE latent frame 数 `S`；模型参数自身默认仍为 1  |
+| `HISTORY_BLOCKS`    |                                   `16` | GenKVCache 最多保留的 clean block 数 `K`                                       |
+| `NUM_STEPS`         |                                   `35` | 每个 block 的 diffusion steps                                                  |
+| `GUIDANCE`          |                                  `1.0` | CFG scale；`1.0` 表示关闭 CFG                                                  |
+| `SEED`              |                                    `1` | 整次推理的随机种子                                                             |
+| `DEVICE_ID`         |                                    `0` | 对脚本可见的 Ascend NPU 编号                                                   |
+| `USE_TORCH_COMPILE` |                                    `0` | `1` 开启 torch compile；Ascend 首次调试建议保持关闭                            |
+| `SAMPLE_ID`         |                               `002345` | BridgeData2 验证集 episode 编号，不带 `episode_` 前缀；`2345` 和 `002345` 均可 |
+| `CHECKPOINT_ROOT`   |                          iter 400 路径 | checkpoint 根目录；其下必须存在 `model/.metadata`                              |
+| `CONFIG_FILE`       |                   run 的 `config.yaml` | 模型配置文件                                                                   |
+| `VAL_ROOT`          |                   BridgeData2 val 路径 | 验证集根目录                                                                   |
+| `OUTPUT_ROOT`       | 仓库 `outputs/causal_gen_kv_cache/...` | 输出根目录                                                                     |
 
 `BLOCK_SIZE` 必须落在 checkpoint 训练时的 block-size 范围内；当前 checkpoint 的训练范围是 1 到 4。`HISTORY_BLOCKS` 当前最大为 16。
 

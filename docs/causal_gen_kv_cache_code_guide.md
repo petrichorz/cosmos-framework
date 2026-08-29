@@ -38,11 +38,11 @@ T_pixel = 1 + 4 * B * S
 
 新增三个参数：
 
-| 参数 | 默认/约束 | 作用 |
-|---|---|---|
-| `causal_num_blocks` | causal 推理必须显式提供 | 循环生成的 block 数 `B` |
-| `causal_block_size` | 默认 `1` | 每个 block 的 latent frame 数 `S` |
-| `causal_history_blocks` | 默认 `16`，范围 `[1,16]` | cache 历史窗口 `K` |
+| 参数                    | 默认/约束                | 作用                              |
+| ----------------------- | ------------------------ | --------------------------------- |
+| `causal_num_blocks`     | causal 推理必须显式提供  | 循环生成的 block 数 `B`           |
+| `causal_block_size`     | 默认 `1`                 | 每个 block 的 latent frame 数 `S` |
+| `causal_history_blocks` | 默认 `16`，范围 `[1,16]` | cache 历史窗口 `K`                |
 
 当 checkpoint 配置的 `causal_training_strategy == "teacher_forcing"` 时：
 
@@ -125,12 +125,12 @@ T_pixel = 1 + 4 * B * S
 
 因此 cache 内容是：
 
-| 内容 | 是否缓存 | 原因 |
-|---|---|---|
-| UND 文本 K/V | 是，只写一次 | prompt 在整个请求中不变 |
-| 已完成 CLEAN block K/V | 是，最多最近 K 个 block | 已经定稿，后续 block 需要参考 |
-| 当前 NOISE block K/V | 否 | 每个 diffusion step 都会变化，缓存后会污染下一步 |
-| 未来 block K/V | 否 | 还没有生成，不存在真实 CLEAN latent |
+| 内容                   | 是否缓存                | 原因                                             |
+| ---------------------- | ----------------------- | ------------------------------------------------ |
+| UND 文本 K/V           | 是，只写一次            | prompt 在整个请求中不变                          |
+| 已完成 CLEAN block K/V | 是，最多最近 K 个 block | 已经定稿，后续 block 需要参考                    |
+| 当前 NOISE block K/V   | 否                      | 每个 diffusion step 都会变化，缓存后会污染下一步 |
+| 未来 block K/V         | 否                      | 还没有生成，不存在真实 CLEAN latent              |
 
 这也是为什么不能从不存在的“完整 CLEAN video”复制 K/V。推理开始时只有真实图片 block 0；后续 CLEAN history 必须等每个 block 去噪结束后逐步产生。
 
