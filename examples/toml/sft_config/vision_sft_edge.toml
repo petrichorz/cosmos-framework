@@ -7,11 +7,11 @@
 
 [job]
 task         = "vfm"
-experiment   = "vision_sft_edge"
+experiment   = "vision_sft_edge_lerobot3"     # 需匹配对应的文件名
 project      = "cosmos3"
 group        = "sft"
-name         = "vision_sft_edge"
-wandb_mode   = "disabled"
+name         = "vision_sft_edge_test_lerobot3"
+wandb_mode   = "offline"
 
 [model]
 max_num_tokens_after_packing = 45056
@@ -28,7 +28,7 @@ data_parallel_shard_degree      = -1                     # -1 = auto from WORLD_
 data_parallel_replicate_degree  = 1
 
 [model.compile]
-enabled                         = true                   # was [model.parallelism].use_torch_compile
+enabled                         = false                   # was [model.parallelism].use_torch_compile
 compile_dynamic                 = true
 
 [model.activation_checkpointing]
@@ -67,7 +67,7 @@ warm_up_steps      = [50]
 distributed_parallelism = "fsdp"
 grad_accum_iter         = 2
 logging_iter            = 1
-max_iter                = 500
+max_iter                = 110
 
 [trainer.callbacks.compile_tokenizer]
 compile_after_iterations = 3
