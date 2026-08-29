@@ -32,6 +32,8 @@ A `justfile` is provided at the root with longer recipes (`just install`, `just 
 - When unsure, point the user to the closest doc rather than guessing.
 - Keep this file short. Link out to skills and docs for detail — this file is included in every prompt.
 - Inference code belongs under `cosmos_framework/inference/`; training infrastructure belongs under the other `cosmos_framework/` subpackages. Don't blur the two — if you find yourself adding training-time imports inside `cosmos_framework/inference/` (or vice versa), reconsider.
+- Markdown pipe tables must satisfy rumdl `MD060`: align every column, including the delimiter row; do not leave compact tables such as `|---|---|` in files you add or modify.
+- After changing Markdown, run `pre-commit run rumdl-fmt --files <changed-markdown-files>`, include its automatic formatting in the change, and rerun the hook until it exits cleanly.
 
 ## Key File Locations
 
