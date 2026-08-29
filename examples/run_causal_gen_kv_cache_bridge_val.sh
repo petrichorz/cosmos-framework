@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 
 # Run causal Text+Image-to-Video inference with the request-local GenKVCache.
 # The source validation JSON is converted to the causal length contract:

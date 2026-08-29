@@ -32,6 +32,11 @@ A `justfile` is provided at the root with longer recipes (`just install`, `just 
 - When unsure, point the user to the closest doc rather than guessing.
 - Keep this file short. Link out to skills and docs for detail — this file is included in every prompt.
 - Inference code belongs under `cosmos_framework/inference/`; training infrastructure belongs under the other `cosmos_framework/` subpackages. Don't blur the two — if you find yourself adding training-time imports inside `cosmos_framework/inference/` (or vice versa), reconsider.
+- Markdown pipe tables must satisfy rumdl `MD060`: align every column, including the delimiter row; do not leave compact tables such as `|---|---|` in files you add or modify.
+- After changing Markdown, run `pre-commit run rumdl-fmt --files <changed-markdown-files>`, include its automatic formatting in the change, and rerun the hook until it exits cleanly.
+- Keep `[tool.uv].required-version` in `pyproject.toml` pinned to an exact version (`==X.Y.Z`). Do not replace it with a minimum constraint such as `>=X.Y.Z`: `setup-uv` resolves minimum constraints to the latest uv release, which can rewrite `uv.lock` in CI.
+- After changing project dependencies or the pinned uv version, regenerate and check `uv.lock` with that exact uv version (for example, `uvx uv@0.12.7 lock` followed by `uvx uv@0.12.7 lock --check`) and commit `pyproject.toml` and `uv.lock` together when both change.
+- Package mirrors may be used temporarily to warm the uv cache, but generate the final committed `uv.lock` with the repository's configured indexes. Confirm that temporary mirror URLs are absent, then run the full pre-commit suite with the pinned uv version available on `PATH`.
 
 ## Key File Locations
 

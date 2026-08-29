@@ -167,12 +167,12 @@ vllm = [
 ]
 # suit for Ascend (Huawei NPU). Mirrors cu128 but drops CUDA/nvidia packages.
 # Requires CANN toolkit on the host. torch_npu must match the torch version.
-# torch/torchvision/torchcodec use +cpu builds to avoid pulling nvidia CUDA deps;
+# torch/torchvision use +cpu builds to avoid pulling nvidia CUDA deps;
 # NPU acceleration is provided by torch_npu + CANN.
 ascend = [
   "torch==2.10.0+cpu",
   "torch_npu==2.10.0", # Ascend NPU support; must match torch version (requires matching CANN)
-  "torchcodec==0.10.0+cpu", # https://github.com/meta-pytorch/torchcodec/releases
+  "torchcodec==0.10.0", # https://github.com/meta-pytorch/torchcodec/releases
   "torchvision==0.25.0+cpu", # https://github.com/pytorch/vision/releases
   # CUDA/nvidia-only packages removed for Ascend (kept as comments for parity with cu128):
   # "flash-attn-3-nv==1.0.3+cu128.torch210; platform_machine == 'x86_64'",
@@ -294,7 +294,7 @@ issues = "https://github.com/NVIDIA/cosmos-framework/issues"
 repository = "https://github.com/NVIDIA/cosmos-framework"
 
 [tool.uv]
-required-version = ">=0.11.3"
+required-version = "==0.12.7"
 conflicts = [
   [
     {group = "cu128"},

@@ -92,9 +92,9 @@ lo(i) = max(0, i - K)
 对应实现位置：
 [`teacher_forcing.py::build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)。
 
-| Query | 可以读取的视觉 KV | 禁止读取 |
-| --- | --- | --- |
-| clean `Ci` | `Clo(i)..Ci` | 所有 noisy、窗口外 clean、未来 clean |
+| Query      | 可以读取的视觉 KV            | 禁止读取                                 |
+| ---------- | ---------------------------- | ---------------------------------------- |
+| clean `Ci` | `Clo(i)..Ci`                 | 所有 noisy、窗口外 clean、未来 clean     |
 | noisy `Ni` | `Clo(i)..C(i-1)` 和当前 `Ni` | 当前 clean `Ci`、未来、其他 noisy blocks |
 
 所有视觉 query 都可以读取同一条样本的 UND/text token。不同 packed samples 之间完全
@@ -233,21 +233,21 @@ Q_GEN x K_[UND|clean|noisy] -> one masked softmax
 
 这里使用 `文件路径::类/函数` 标记实现位置，不写固定行号，避免后续代码调整后行号失效。
 
-| 功能 | 对应代码位置 |
-| --- | --- |
-| causal 模型入口 | [`OmniMoTCausalModel`](../cosmos_framework/model/generator/omni_mot_causal_model.py#L16) |
-| 参数合法性与 S/K 采样入口 | [`validate_teacher_forcing_config()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L35)、[`expand_teacher_forcing_training_sequence()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L73) |
-| S/K 随机采样 | [`sample_teacher_forcing_parameters()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L83) |
-| block/sample/stream 布局 | [`build_teacher_forcing_layout()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L103) |
-| clean/noisy 双流展开 | [`expand_packed_sequence_for_teacher_forcing()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L349) |
-| Dense mask 与一维长度保护 | [`build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197) |
-| clean timestep=0 | [`Cosmos3VFMNetwork._encode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L574) |
-| attention metadata | [`build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L636) |
-| teacher-forcing attention 分发 | [`teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L246) |
-| 单 softmax Dense SDPA | [`teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L52) |
-| noisy stream 输出与 loss | [`Cosmos3VFMNetwork._decode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L662)、[`OmniMoTModel._compute_flow_matching_loss()`](../cosmos_framework/model/generator/omni_mot_model.py#L1097) |
-| Hydra causal 模型组 | [`MOT_CAUSAL_DDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L37)、[`MOT_CAUSAL_FSDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L50) |
-| TOML causal 字段定义 | [`ModelConfig`](../cosmos_framework/configs/toml_config/sft_config.py#L300) |
+| 功能                           | 对应代码位置                                                                                                                                                                                                                |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| causal 模型入口                | [`OmniMoTCausalModel`](../cosmos_framework/model/generator/omni_mot_causal_model.py#L16)                                                                                                                                    |
+| 参数合法性与 S/K 采样入口      | [`validate_teacher_forcing_config()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L35)、[`expand_teacher_forcing_training_sequence()`](../cosmos_framework/model/generator/causal_teacher_forcing.py#L73) |
+| S/K 随机采样                   | [`sample_teacher_forcing_parameters()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L83)                                                                                                         |
+| block/sample/stream 布局       | [`build_teacher_forcing_layout()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L103)                                                                                                             |
+| clean/noisy 双流展开           | [`expand_packed_sequence_for_teacher_forcing()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L349)                                                                                               |
+| Dense mask 与一维长度保护      | [`build_dense_teacher_forcing_gen_mask()`](../cosmos_framework/data/generator/sequence_packing/teacher_forcing.py#L197)                                                                                                     |
+| clean timestep=0               | [`Cosmos3VFMNetwork._encode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L574)                                                                                                                 |
+| attention metadata             | [`build_packed_sequence()`](../cosmos_framework/model/generator/mot/attention.py#L636)                                                                                                                                      |
+| teacher-forcing attention 分发 | [`teacher_forcing_attention()`](../cosmos_framework/model/generator/mot/attention.py#L246)                                                                                                                                  |
+| 单 softmax Dense SDPA          | [`teacher_forcing_dense_attention()`](../cosmos_framework/model/generator/mot/teacher_forcing_attention.py#L52)                                                                                                             |
+| noisy stream 输出与 loss       | [`Cosmos3VFMNetwork._decode_vision()`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L662)、[`OmniMoTModel._compute_flow_matching_loss()`](../cosmos_framework/model/generator/omni_mot_model.py#L1097)    |
+| Hydra causal 模型组            | [`MOT_CAUSAL_DDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L37)、[`MOT_CAUSAL_FSDP_CONFIG`](../cosmos_framework/configs/base/defaults/model.py#L50)                                                       |
+| TOML causal 字段定义           | [`ModelConfig`](../cosmos_framework/configs/toml_config/sft_config.py#L300)                                                                                                                                                 |
 
 ## 7. 为什么采用这种方案
 
@@ -608,18 +608,18 @@ attention 的 kernel 调用数从 1 增加为 packed sample 数，可能降低�
 
 关键配置：
 
-| 配置 | 值 | 原因 |
-| --- | --- | --- |
-| 设备数 | 1 | 先排除多卡通信变量 |
-| 模型组 | `mot_causal_ddp` | 实例化 `OmniMoTCausalModel` |
-| 精度 | BF16 | 目标 Ascend 训练精度 |
-| 数据 | T2V-only、17 RGB frames | 不混入条件帧并控制序列长度 |
-| batch | 最多 1 sample | 控制 Dense Mask 和激活显存 |
-| 迭代 | 3 | 足够覆盖初始化、forward、backward、step |
-| compile | 关闭 | 首轮不混入图编译问题 |
-| EMA | 关闭 | 减少额外参数副本 |
-| activation checkpointing | 关闭 | 先验证原始 backward |
-| optimizer | 非 fused AdamW | 避免 CUDA-only fused optimizer |
+| 配置                     | 值                      | 原因                                    |
+| ------------------------ | ----------------------- | --------------------------------------- |
+| 设备数                   | 1                       | 先排除多卡通信变量                      |
+| 模型组                   | `mot_causal_ddp`        | 实例化 `OmniMoTCausalModel`             |
+| 精度                     | BF16                    | 目标 Ascend 训练精度                    |
+| 数据                     | T2V-only、17 RGB frames | 不混入条件帧并控制序列长度              |
+| batch                    | 最多 1 sample           | 控制 Dense Mask 和激活显存              |
+| 迭代                     | 3                       | 足够覆盖初始化、forward、backward、step |
+| compile                  | 关闭                    | 首轮不混入图编译问题                    |
+| EMA                      | 关闭                    | 减少额外参数副本                        |
+| activation checkpointing | 关闭                    | 先验证原始 backward                     |
+| optimizer                | 非 fused AdamW          | 避免 CUDA-only fused optimizer          |
 
 17 个 RGB frames 经 Wan VAE 后约得到 5 个 latent frames。随机 `S=1..4` 时既能产生
 多个 causal blocks，又能覆盖尾部 partial block，同时比正式长视频显著省显存。
@@ -659,14 +659,14 @@ smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
 正式训练入口放在 sibling `cosmos` 仓库的 cookbook 中，而不是
 `cosmos-framework/examples`：
 
-| 内容 | 对应位置 |
-| --- | --- |
-| 正式 TOML | [`vision_causal_edge.toml`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml) |
-| causal 参数 | 上述 TOML 的 `[model]` block |
-| FSDP/500 iterations | 上述 TOML 的 `[trainer]` block |
-| packing 45,056 | 上述 TOML 的 `[dataloader_train]` block |
-| 完整下载、转换和训练流程 | [`launch_sft_vision_causal_edge.sh`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh) |
-| causal 模型选择 | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp` |
+| 内容                     | 对应位置                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| 正式 TOML                | `cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml` |
+| causal 参数              | 上述 TOML 的 `[model]` block                                                                      |
+| FSDP/500 iterations      | 上述 TOML 的 `[trainer]` block                                                                    |
+| packing 45,056           | 上述 TOML 的 `[dataloader_train]` block                                                           |
+| 完整下载、转换和训练流程 | `cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh`        |
+| causal 模型选择          | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp`                                              |
 
 正式启动命令：
 
@@ -751,13 +751,13 @@ $OUTPUT_ROOT/logs/vision_causal_smoke_edge_sft.log
 
 ## 14. 首轮失败时如何判断问题位置
 
-| 错误 | 含义 | 下一步 |
-| --- | --- | --- |
-| SDPA mask/dtype/shape 错误 | NPU SDPA 分支不兼容 Dense bool mask | 记录 Q/K/V/mask shape 和 dtype，单独修 NPU backend |
-| OOM | Dense attention 或模型激活过大 | 先确认 mask 元素数，再考虑开启 AC；不要同时开 compile |
-| clean/noisy shape mismatch | VAE/patch packing 两条流不一致 | 检查 token shape 和 position index，不绕过校验 |
-| NaN/Inf loss | BF16/backend/optimizer 数值问题 | 固定一个 batch，对照 FP32/CPU 小尺寸 reference |
-| checkpoint key mismatch | 基础 DCP 与 Edge recipe 不匹配 | 核对转换来源和 `BASE_CHECKPOINT_PATH` |
+| 错误                       | 含义                                | 下一步                                                |
+| -------------------------- | ----------------------------------- | ----------------------------------------------------- |
+| SDPA mask/dtype/shape 错误 | NPU SDPA 分支不兼容 Dense bool mask | 记录 Q/K/V/mask shape 和 dtype，单独修 NPU backend    |
+| OOM                        | Dense attention 或模型激活过大      | 先确认 mask 元素数，再考虑开启 AC；不要同时开 compile |
+| clean/noisy shape mismatch | VAE/patch packing 两条流不一致      | 检查 token shape 和 position index，不绕过校验        |
+| NaN/Inf loss               | BF16/backend/optimizer 数值问题     | 固定一个 batch，对照 FP32/CPU 小尺寸 reference        |
+| checkpoint key mismatch    | 基础 DCP 与 Edge recipe 不匹配      | 核对转换来源和 `BASE_CHECKPOINT_PATH`                 |
 
 ## 15. 验证通过后的顺序
 

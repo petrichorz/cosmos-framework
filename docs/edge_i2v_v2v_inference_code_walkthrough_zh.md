@@ -40,10 +40,10 @@ Edge 默认使用 `two_way` attention：
 
 ### 1.3 存在两种完全不同的 KV cache
 
-| KV cache | 使用阶段 | 作用 | 是否直接交给扩散 generator |
-| --- | --- | --- | --- |
-| `ReasonerKVCache` | 自回归文本生成 | 缓存 prompt 和已生成文本 token 的 K/V | 否 |
-| `InferenceTextKVMemoryState` | 多步扩散去噪 | 缓存静态 prompt 的 und/text K/V，供后续去噪步复用 | 是 |
+| KV cache                     | 使用阶段       | 作用                                              | 是否直接交给扩散 generator |
+| ---------------------------- | -------------- | ------------------------------------------------- | -------------------------- |
+| `ReasonerKVCache`            | 自回归文本生成 | 缓存 prompt 和已生成文本 token 的 K/V             | 否                         |
+| `InferenceTextKVMemoryState` | 多步扩散去噪   | 缓存静态 prompt 的 und/text K/V，供后续去噪步复用 | 是                         |
 
 ## 2. 推理启动方式
 
@@ -753,18 +753,18 @@ packed_outputs, lbl_metadata = self.language_model(
 
 第一次导读不建议直接钻进所有 attention kernel。按以下顺序设置断点，更容易建立完整心智模型：
 
-| 顺序 | 断点 | 观察内容 |
-| --- | --- | --- |
-| 1 | [`scripts/inference.py:34`](../cosmos_framework/scripts/inference.py#L34) | CLI 和输入文件如何解析 |
-| 2 | [`inference.py:638`](../cosmos_framework/inference/inference.py#L638) | I2V/V2V 条件媒体分支 |
-| 3 | [`inference.py:1483`](../cosmos_framework/inference/inference.py#L1483) | batch 参数、CFG、采样器选择 |
-| 4 | [`omni_mot_model.py:1749`](../cosmos_framework/model/generator/omni_mot_model.py#L1749) | VAE latent、condition mask、初始噪声 |
-| 5 | [`omni_mot_model.py:2453`](../cosmos_framework/model/generator/omni_mot_model.py#L2453) | 整体采样入口 |
-| 6 | [`unipc.py:83`](../cosmos_framework/model/generator/diffusion/samplers/unipc.py#L83) | 真正的 35 步循环 |
-| 7 | [`omni_mot_model.py:2730`](../cosmos_framework/model/generator/omni_mot_model.py#L2730) | 单步 `velocity_fn` 和 CFG |
-| 8 | [`omni_mot_model.py:2248`](../cosmos_framework/model/generator/omni_mot_model.py#L2248) | 单次网络调用前的 packed data |
-| 9 | [`cosmos3_vfm_network.py:928`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L928) | 真正的多模态 forward |
-| 10 | [`attention.py:143`](../cosmos_framework/model/generator/mot/attention.py#L143) | 文本 causal 与 generator full attention |
+| 顺序 | 断点                                                                                                | 观察内容                                |
+| ---- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| 1    | [`scripts/inference.py:34`](../cosmos_framework/scripts/inference.py#L34)                           | CLI 和输入文件如何解析                  |
+| 2    | [`inference.py:638`](../cosmos_framework/inference/inference.py#L638)                               | I2V/V2V 条件媒体分支                    |
+| 3    | [`inference.py:1483`](../cosmos_framework/inference/inference.py#L1483)                             | batch 参数、CFG、采样器选择             |
+| 4    | [`omni_mot_model.py:1749`](../cosmos_framework/model/generator/omni_mot_model.py#L1749)             | VAE latent、condition mask、初始噪声    |
+| 5    | [`omni_mot_model.py:2453`](../cosmos_framework/model/generator/omni_mot_model.py#L2453)             | 整体采样入口                            |
+| 6    | [`unipc.py:83`](../cosmos_framework/model/generator/diffusion/samplers/unipc.py#L83)                | 真正的 35 步循环                        |
+| 7    | [`omni_mot_model.py:2730`](../cosmos_framework/model/generator/omni_mot_model.py#L2730)             | 单步 `velocity_fn` 和 CFG               |
+| 8    | [`omni_mot_model.py:2248`](../cosmos_framework/model/generator/omni_mot_model.py#L2248)             | 单次网络调用前的 packed data            |
+| 9    | [`cosmos3_vfm_network.py:928`](../cosmos_framework/model/generator/mot/cosmos3_vfm_network.py#L928) | 真正的多模态 forward                    |
+| 10   | [`attention.py:143`](../cosmos_framework/model/generator/mot/attention.py#L143)                     | 文本 causal 与 generator full attention |
 
 建议重点观察这些变量：
 

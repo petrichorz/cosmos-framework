@@ -1,7 +1,7 @@
 # Cosmos3 Edge SFT 代码导读：从启动脚本到 loss 与参数更新
 
 本文以当前工作区中的
-[launch_sft_vision_edge_local.sh](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh#L1,1)
+`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh:1`
 为唯一入口，追踪普通 Cosmos3-Edge Vision SFT 的真实执行路径。
 
 > 当前 local 脚本第 28 行调用普通 `launch_sft_vision_edge.sh`，第 29 行的 causal launcher 已被注释。因此本文主角是 `OmniMoTModel`，不是 `OmniMoTCausalModel`；训练策略是 `causal_training_strategy="none"`，不是 teacher forcing。
@@ -38,9 +38,9 @@ launch_sft_vision_edge_local.sh
 ## 2. 第一站：本机启动脚本
 
 本机脚本主要做三件事：选择 NPU、写入本机路径、配置 `torchrun`。对应代码在
-[本机环境和路径](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh#L6,1)、
-[分布式参数](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh#L18,1)
-和[实际 launcher 选择](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh#L28,1)。
+本机环境和路径（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh:6`）、
+分布式参数（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh:18`）
+和实际 launcher 选择（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh:28`）。
 
 当前值得注意的有效设置是：
 
@@ -50,9 +50,9 @@ launch_sft_vision_edge_local.sh
 - 普通 Edge launcher 被执行，causal launcher 只是一行注释。
 
 第二层脚本的职责是补默认路径、在资源不存在时下载或转换、导出 TOML 使用的环境变量，并启动 Python。可直接看
-[资源准备](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh#L16,1)、
-[环境变量到 TOML 的桥接](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh#L38,1)
-和[最终 torchrun 命令](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh#L47,1)。
+资源准备（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh:16`）、
+环境变量到 TOML 的桥接（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh:38`）
+和最终 torchrun 命令（`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh:47`）。
 
 真正执行的命令可简化为：
 
@@ -74,17 +74,17 @@ torchrun --nproc_per_node=1 \
 
 这套训练的最终配置不是任何一个文件单独决定的，而是四层叠加：
 
-| 优先级 | 来源 | 主要作用 |
-|---|---|---|
-| 低 | VFM 基础配置与 config group | 建立完整对象图，例如 trainer、optimizer、model 的 `_target_` |
-| 中 | `vision_sft_edge.py` | 选择 Edge 模型、数据管线、AdamW、FSDP 等实验默认值 |
-| 高 | `vision_sft_edge.toml` | 覆盖本次训练希望暴露的超参数 |
-| 最高 | launcher 末尾的 Hydra 参数 | 把在线 tokenizer 配置替换为本地 processor 路径 |
+| 优先级 | 来源                        | 主要作用                                                     |
+| ------ | --------------------------- | ------------------------------------------------------------ |
+| 低     | VFM 基础配置与 config group | 建立完整对象图，例如 trainer、optimizer、model 的 `_target_` |
+| 中     | `vision_sft_edge.py`        | 选择 Edge 模型、数据管线、AdamW、FSDP 等实验默认值           |
+| 高     | `vision_sft_edge.toml`      | 覆盖本次训练希望暴露的超参数                                 |
+| 最高   | launcher 末尾的 Hydra 参数  | 把在线 tokenizer 配置替换为本地 processor 路径               |
 
 ### 3.1 TOML 先负责“校验”，再变成 Hydra override
 
 当前 TOML 在
-[vision_sft_edge.toml](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_sft_edge.toml#L16,1)。
+`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_sft_edge.toml:16`。
 它声明 `task="vfm"`、`experiment="vision_sft_edge"`，并给出本次训练的 bf16、FSDP、AdamW 参数、训练步数和数据 token 上限。
 
 TOML 的 Pydantic 总入口是
@@ -165,23 +165,23 @@ Edge 的具体模型值来自
 
 ### 3.4 当前关键有效值
 
-| 配置 | 当前有效值 | 最终来源 |
-|---|---:|---|
-| model class | `OmniMoTModel` | `mot_fsdp` group |
-| backbone | Nemotron 2B Dense VL MoT | `EDGE_MODEL_CONFIG` |
-| causal strategy | `none` | Edge model config |
-| model precision | `bfloat16` | TOML |
-| distributed mode | `fsdp` | experiment/TOML |
-| torch compile | `false` | 当前 TOML |
-| activation checkpoint | `full` | TOML |
-| optimizer class | `torch.optim.AdamW` | experiment 的 `adamw` group |
-| optimizer fused 参数 | `true` | 当前 TOML |
-| learning rate | `1e-4` | 当前 TOML 覆盖实验的 `5e-4` |
-| grad accumulation | 2 | TOML |
-| optimizer steps | 500 | TOML |
-| checkpoint interval | 100 steps | TOML |
-| packed token budget | 45056 | TOML/experiment |
-| caption token cap | 2048 | TOML/experiment |
+| 配置                  |               当前有效值 | 最终来源                    |
+| --------------------- | -----------------------: | --------------------------- |
+| model class           |           `OmniMoTModel` | `mot_fsdp` group            |
+| backbone              | Nemotron 2B Dense VL MoT | `EDGE_MODEL_CONFIG`         |
+| causal strategy       |                   `none` | Edge model config           |
+| model precision       |               `bfloat16` | TOML                        |
+| distributed mode      |                   `fsdp` | experiment/TOML             |
+| torch compile         |                  `false` | 当前 TOML                   |
+| activation checkpoint |                   `full` | TOML                        |
+| optimizer class       |      `torch.optim.AdamW` | experiment 的 `adamw` group |
+| optimizer fused 参数  |                   `true` | 当前 TOML                   |
+| learning rate         |                   `1e-4` | 当前 TOML 覆盖实验的 `5e-4` |
+| grad accumulation     |                        2 | TOML                        |
+| optimizer steps       |                      500 | TOML                        |
+| checkpoint interval   |                100 steps | TOML                        |
+| packed token budget   |                    45056 | TOML/experiment             |
+| caption token cap     |                     2048 | TOML/experiment             |
 
 `adamw` group 明确选择 `optimizer_type="AdamW"`，见
 [AdamW config group](../cosmos_framework/configs/base/defaults/optimizer.py#L108,1)，
@@ -314,11 +314,11 @@ conditioning_config = {0: 0.7, 1: 0.2, 2: 0.1}
 dataset 会按这个分布随机选 `num_cond`，并把最前面的 latent frame index 写入 `SequencePlan.condition_frame_indexes_vision`，见
 [SequencePlan 构造](../cosmos_framework/data/generator/local_datasets/sft_dataset.py#L348,1)。
 
-| num_cond | 训练形式 | 条件内容 |
-|---:|---|---|
-| 0 | T2V，70% | 没有 clean vision latent，仅文本条件 |
-| 1 | I2V，20% | 第 1 个 VAE latent frame 为 clean 条件 |
-| 2 | V2V，10% | 前 2 个 VAE latent frame 为 clean 条件 |
+| num_cond | 训练形式 | 条件内容                               |
+| -------: | -------- | -------------------------------------- |
+|        0 | T2V，70% | 没有 clean vision latent，仅文本条件   |
+|        1 | I2V，20% | 第 1 个 VAE latent frame 为 clean 条件 |
+|        2 | V2V，10% | 前 2 个 VAE latent frame 为 clean 条件 |
 
 Wan VAE 时间压缩因子是 4。这里的 2 个 latent frame 对应从像素时间轴开头覆盖 5 帧的因果编码范围，即 `1 + (5-1)/4 = 2`，因此实验注释写的是 “first 5 frames / 2 latent frames”。
 
@@ -569,9 +569,9 @@ print(float(fm_loss_vision), float(total_loss))
 
 如果时间有限，只读下面八处即可形成闭环：
 
-1. [本机 launcher](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh#L1,1)
-2. [正式 launcher 的 torchrun](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh#L38,1)
-3. [Edge TOML](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_sft_edge.toml#L16,1)
+1. 本机 launcher：`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_local.sh:1`
+2. 正式 launcher 的 torchrun：`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge.sh:38`
+3. Edge TOML：`cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_sft_edge.toml:16`
 4. [vision_sft_edge 实验对象图](../cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py#L62,1)
 5. [dataset 单样本处理](../cosmos_framework/data/generator/local_datasets/sft_dataset.py#L179,1)
 6. [OmniMoTModel.training_step](../cosmos_framework/model/generator/omni_mot_model.py#L816,1)
