@@ -659,14 +659,14 @@ smoke 采用“每 batch 最多 1 个样本”，因此 launcher 显式覆盖
 正式训练入口放在 sibling `cosmos` 仓库的 cookbook 中，而不是
 `cosmos-framework/examples`：
 
-| 内容                     | 对应位置                                                                                                                             |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 正式 TOML                | [`vision_causal_edge.toml`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml)   |
-| causal 参数              | 上述 TOML 的 `[model]` block                                                                                                         |
-| FSDP/500 iterations      | 上述 TOML 的 `[trainer]` block                                                                                                       |
-| packing 45,056           | 上述 TOML 的 `[dataloader_train]` block                                                                                              |
-| 完整下载、转换和训练流程 | [`launch_sft_vision_causal_edge.sh`](../../cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh) |
-| causal 模型选择          | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp`                                                                                 |
+| 内容                     | 对应位置                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| 正式 TOML                | `cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/toml/sft_config/vision_causal_edge.toml` |
+| causal 参数              | 上述 TOML 的 `[model]` block                                                                      |
+| FSDP/500 iterations      | 上述 TOML 的 `[trainer]` block                                                                    |
+| packing 45,056           | 上述 TOML 的 `[dataloader_train]` block                                                           |
+| 完整下载、转换和训练流程 | `cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_causal_edge.sh`        |
+| causal 模型选择          | 上述脚本 torchrun block 中的 `model=mot_causal_fsdp`                                              |
 
 正式启动命令：
 
