@@ -3,7 +3,6 @@
 > 本文档基于 `launch_sft_vision_edge_yundao.sh`（已验证可正常拉起 Edge SFT 训练），
 > 对 Cosmos3 的 SFT（Supervised Fine-Tuning）代码流程进行完整串讲。
 
-
 ---
 
 ## 目录
@@ -26,7 +25,7 @@
    - [6.3 配置加载](#63-配置加载第-286-行)
 7. [第五层：模型定义](#7-第五层模型定义)
    - [7.1 实验层 vision_sft_edge.py](#71-实验层-vision_sft_edgepy)
-   - [7.2 模型骨干 edge_model_config.py](#72-模型骨干-edge_model_configpy)
+   - [7.2 模型骨干：三类模型的配置差异](#72-模型骨干三类模型的配置差异)
    - [7.3 OmniMoT 模型 omni_mot_model.py](#73-omnimot-模型-omni_mot_modelpy)
    - [7.4 MoT 网络架构 cosmos3_vfm_network.py](#74-mot-网络架构-cosmos3_vfm_networkpy)
 8. [第六层：数据加载](#8-第六层数据加载)
@@ -43,21 +42,21 @@
    - [9.7 时间加权 TrainTimeWeight](#97-时间加权-traintimeweight)
    - [9.8 MoE 负载均衡损失](#98-moe-负载均衡损失-compute_load_balancing_loss)
 10. [第八层：NPU 适配](#10-第八层npu-适配)
-   - [10.1 设备后端自动检测](#101-设备后端自动检测)
-   - [10.2 CUDA → NPU 重定向](#102-cuda--npu-重定向)
-   - [10.3 注意力后端](#103-注意力后端)
-   - [10.4 FusedAdam on NPU](#104-fusedadam-on-npu)
-   - [10.5 全局设备标志](#105-全局设备标志)
+    - [10.1 设备后端自动检测](#101-设备后端自动检测)
+    - [10.2 CUDA → NPU 重定向](#102-cuda--npu-重定向)
+    - [10.3 注意力后端](#103-注意力后端)
+    - [10.4 FusedAdam on NPU](#104-fusedadam-on-npu)
+    - [10.5 全局设备标志](#105-全局设备标志)
 11. [如何修改脚本跑起来](#11-如何修改脚本跑起来)
-   - [11.1 必需的环境变量](#111-必需的环境变量)
-   - [11.2 必需的特殊环境变量](#112-必需的特殊环境变量)
-   - [11.3 分布式拓扑（单卡示例）](#113-分布式拓扑单卡示例)
-   - [11.4 TOML 需要改的项](#114-toml-需要改的项)
-   - [11.5 硬件要求](#115-硬件要求)
-   - [11.6 运行步骤](#116-运行步骤)
-   - [11.7 常见错误](#117-常见错误)
+    - [11.1 必需的环境变量](#111-必需的环境变量)
+    - [11.2 必需的特殊环境变量](#112-必需的特殊环境变量)
+    - [11.3 分布式拓扑（单卡示例）](#113-分布式拓扑单卡示例)
+    - [11.4 TOML 需要改的项](#114-toml-需要改的项)
+    - [11.5 硬件要求](#115-硬件要求)
+    - [11.6 运行步骤](#116-运行步骤)
+    - [11.7 常见错误](#117-常见错误)
 12. [训练产物](#12-训练产物)
-   - [DCP → safetensors 导出](#dcp--safetensors-导出)
+    - [DCP → safetensors 导出](#dcp--safetensors-导出)
 
 ---
 
@@ -133,19 +132,19 @@ bash launch_sft_vision_edge_yundao.sh
 
 ### 3.1 结构划分
 
-| 行号 | 功能 | 说明 |
-|------|------|------|
-| 1-2 | Shebang + 安全选项 | `set -euo pipefail`：任一步失败立即退出 |
-| 5-6 | 运行环境 | `HF_HUB_OFFLINE=1` 禁用 HuggingFace 联网；`COSMOS_DEVICE=npu` 强制用 NPU |
-| 9-13 | 路径变量 | 数据、权重、processor、VAE、输出目录 |
-| 16-19 | HF 缓存 | 软链接 `/mi/.../huggingface` → `~/.cache/huggingface` |
-| 22-27 | 分布式拓扑 | 单机单卡：`NPROC_PER_NODE=1` |
-| 37-39 | conda 环境 | 激活 `cosmos-framework` |
-| 42-43 | 安装包 | `pip install -e .` 在 develop 模式安装框架 |
-| 48-53 | torchcodec | 视频编解码库的编译环境 |
+| 行号  | 功能               | 说明                                                                             |
+| ----- | ------------------ | -------------------------------------------------------------------------------- |
+| 1-2   | Shebang + 安全选项 | `set -euo pipefail`：任一步失败立即退出                                          |
+| 5-6   | 运行环境           | `HF_HUB_OFFLINE=1` 禁用 HuggingFace 联网；`COSMOS_DEVICE=npu` 强制用 NPU         |
+| 9-13  | 路径变量           | 数据、权重、processor、VAE、输出目录                                             |
+| 16-19 | HF 缓存            | 软链接 `/mi/.../huggingface` → `~/.cache/huggingface`                            |
+| 22-27 | 分布式拓扑         | 单机单卡：`NPROC_PER_NODE=1`                                                     |
+| 37-39 | conda 环境         | 激活 `cosmos-framework`                                                          |
+| 42-43 | 安装包             | `pip install -e .` 在 develop 模式安装框架                                       |
+| 48-53 | torchcodec         | 视频编解码库的编译环境                                                           |
 | 76-77 | TOML 路径 + 默认值 | `: "${VAR:=default}"` 语法：如果环境变量已经 export 了就用环境变量，否则用默认值 |
-| 80-85 | TAIL_OVERRIDES | 追加的 Hydra 覆盖参数（processor 本地路径） |
-| 87 | 启动 | source 共用脚本 |
+| 80-85 | TAIL_OVERRIDES     | 追加的 Hydra 覆盖参数（processor 本地路径）                                      |
+| 87    | 启动               | source 共用脚本                                                                  |
 
 ### 3.2 关键语法说明
 
@@ -154,6 +153,7 @@ bash launch_sft_vision_edge_yundao.sh
 ```
 
 这意味着：
+
 - 如果你已经 `export DATASET_PATH=/my/path`，脚本用你的路径
 - 如果没设，脚本用默认的相对路径
 
@@ -239,24 +239,24 @@ TOML 被 `sft_config.py` 的 pydantic 模型严格校验（`extra="forbid"`）�
 
 ### 5.2 关键配置解读
 
-| 配置路径 | 值 | 含义 |
-|----------|-----|------|
-| `[job].task` | `"vfm"` | Video Foundation Model（生成器）模式 |
-| `[job].experiment` | `"vision_sft_edge"` | 实验名，对应 `vision_sft_edge.py` |
-| `[model].precision` | `"bfloat16"` | BF16 混合精度训练 |
-| `[model].compile.enabled` | `false` | 关 torch.compile（NPU 不兼容） |
-| `[model].parallelism.data_parallel_shard_degree` | `-1` | FSDP 自动适配（单卡退化为 no-op） |
-| `[model].activation_checkpointing.mode` | `"full"` | 重计算换显存 |
-| `[model].ema` | `enabled=true` | 指数滑动平均（EMA），推理时用 EMA 权重 |
-| `[optimizer].fused` | `true` | 使用 FusedAdam（TE 版，NPU 兼容） |
-| `[optimizer].keys_to_select` | 5 个子串 | 只训练这 5 类参数，其余冻结 |
-| `[optimizer].lr` | `1e-4` | 学习率 |
-| `[scheduler].warm_up_steps` | `[50]` | 前 50 步线性 warmup |
-| `[trainer].max_iter` | `500` | 总训练步数 |
-| `[trainer].grad_accum_iter` | `2` | 梯度累积 2 步 |
-| `[checkpoint].save_iter` | `100` | 每 100 步存检查点 |
-| `[checkpoint].load_path` | `${oc.env:BASE_CHECKPOINT_PATH}` | 从环境变量读入 |
-| `[dataloader_train].max_sequence_length` | `45056` | 序列 token 上限 |
+| 配置路径                                         | 值                               | 含义                                   |
+| ------------------------------------------------ | -------------------------------- | -------------------------------------- |
+| `[job].task`                                     | `"vfm"`                          | Video Foundation Model（生成器）模式   |
+| `[job].experiment`                               | `"vision_sft_edge"`              | 实验名，对应 `vision_sft_edge.py`      |
+| `[model].precision`                              | `"bfloat16"`                     | BF16 混合精度训练                      |
+| `[model].compile.enabled`                        | `false`                          | 关 torch.compile（NPU 不兼容）         |
+| `[model].parallelism.data_parallel_shard_degree` | `-1`                             | FSDP 自动适配（单卡退化为 no-op）      |
+| `[model].activation_checkpointing.mode`          | `"full"`                         | 重计算换显存                           |
+| `[model].ema`                                    | `enabled=true`                   | 指数滑动平均（EMA），推理时用 EMA 权重 |
+| `[optimizer].fused`                              | `true`                           | 使用 FusedAdam（TE 版，NPU 兼容）      |
+| `[optimizer].keys_to_select`                     | 5 个子串                         | 只训练这 5 类参数，其余冻结            |
+| `[optimizer].lr`                                 | `1e-4`                           | 学习率                                 |
+| `[scheduler].warm_up_steps`                      | `[50]`                           | 前 50 步线性 warmup                    |
+| `[trainer].max_iter`                             | `500`                            | 总训练步数                             |
+| `[trainer].grad_accum_iter`                      | `2`                              | 梯度累积 2 步                          |
+| `[checkpoint].save_iter`                         | `100`                            | 每 100 步存检查点                      |
+| `[checkpoint].load_path`                         | `${oc.env:BASE_CHECKPOINT_PATH}` | 从环境变量读入                         |
+| `[dataloader_train].max_sequence_length`         | `45056`                          | 序列 token 上限                        |
 
 ### 5.3 TOML → Hydra Config 的转换链
 
@@ -365,11 +365,11 @@ dataloader_train=L(PackingDataLoader)(
 
 **文件**：`cosmos_framework/configs/base/experiment/sft/models/` 下的三个配置
 
-| 模型 | 文件 | 行数 | 语言骨干 |
-|------|------|------|---------|
-| Edge | `edge_model_config.py` | 176 | Nemotron-2B-Dense-VL |
-| Nano | `nano_model_config.py` | 147 | Qwen3-VL-8B |
-| Super | `super_model_config.py` | 164 | Qwen3-VL-32B |
+| 模型  | 文件                    | 行数 | 语言骨干             |
+| ----- | ----------------------- | ---- | -------------------- |
+| Edge  | `edge_model_config.py`  | 176  | Nemotron-2B-Dense-VL |
+| Nano  | `nano_model_config.py`  | 147  | Qwen3-VL-8B          |
+| Super | `super_model_config.py` | 164  | Qwen3-VL-32B         |
 
 三者都实例化同一个 `OmniMoTModel`（7.3 节）和 `Cosmos3VFMNetwork`（7.4 节），
 差异全部体现在各自 `*_MODEL_CONFIG` 字典里的字段值上。
@@ -380,18 +380,18 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.1 语言骨干（`vlm_config`）——最根本的差异
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
-| `model_instance` | `Nemotron3DenseVLTextForCausalLM` | `Qwen3VLTextForCausalLM` | `Qwen3VLTextForCausalLM` |
-| 配置类 | `Nemotron3DenseVLMoTConfig` | `Qwen3VLMoTConfig` | `Qwen3VLMoTConfig` |
-| 架构 JSON | `Nemotron-2B-Dense-VL.json` | `Qwen3-VL-8B-Instruct.json` | `Qwen3-VL-32B-Instruct.json` |
-| `model_name` | `nvidia/Cosmos3-Edge-Reasoner` | `Qwen/Qwen3-VL-8B-Instruct` | `Qwen/Qwen3-VL-32B-Instruct` |
-| 参数量 | 2B | 8B | 32B |
-| `layer_module`（顶层） | `None` | `"Qwen2MoTDecoderLayer"` | `"Qwen2MoTDecoderLayer"` |
-| `qk_norm_for_text` | `False` | `True` | `True` |
-| `use_und_k_norm_for_gen` | `True` | 未设（默认 False） | 未设（默认 False） |
-| `include_visual` | `None`（无视觉塔） | 默认（有视觉塔） | 默认（有视觉塔） |
-| tokenizer 构造 | `build_processor_lazy(repository="nvidia/Cosmos3-Edge")` | `create_qwen2_tokenizer_with_download(config_variant="hf", ...)` | 同 Nano（32B） |
+| 字段                     | Edge                                                     | Nano                                                             | Super                        |
+| ------------------------ | -------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------- |
+| `model_instance`         | `Nemotron3DenseVLTextForCausalLM`                        | `Qwen3VLTextForCausalLM`                                         | `Qwen3VLTextForCausalLM`     |
+| 配置类                   | `Nemotron3DenseVLMoTConfig`                              | `Qwen3VLMoTConfig`                                               | `Qwen3VLMoTConfig`           |
+| 架构 JSON                | `Nemotron-2B-Dense-VL.json`                              | `Qwen3-VL-8B-Instruct.json`                                      | `Qwen3-VL-32B-Instruct.json` |
+| `model_name`             | `nvidia/Cosmos3-Edge-Reasoner`                           | `Qwen/Qwen3-VL-8B-Instruct`                                      | `Qwen/Qwen3-VL-32B-Instruct` |
+| 参数量                   | 2B                                                       | 8B                                                               | 32B                          |
+| `layer_module`（顶层）   | `None`                                                   | `"Qwen2MoTDecoderLayer"`                                         | `"Qwen2MoTDecoderLayer"`     |
+| `qk_norm_for_text`       | `False`                                                  | `True`                                                           | `True`                       |
+| `use_und_k_norm_for_gen` | `True`                                                   | 未设（默认 False）                                               | 未设（默认 False）           |
+| `include_visual`         | `None`（无视觉塔）                                       | 默认（有视觉塔）                                                 | 默认（有视觉塔）             |
+| tokenizer 构造           | `build_processor_lazy(repository="nvidia/Cosmos3-Edge")` | `create_qwen2_tokenizer_with_download(config_variant="hf", ...)` | 同 Nano（32B）               |
 
 **两个值得注意的差异**：
 
@@ -407,12 +407,12 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.2 分辨率与 loss scale
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
-| `resolution` | `"480"` | `"720"` | `"720"` |
-| `loss_scale` | `10.0` | `1.0` | `1.0` |
-| `image_loss_scale` | `None` | `1.0` | `1.0` |
-| `sound_loss_scale` | `2.0`（Edge 独有键） | 无 | 无 |
+| 字段               | Edge                 | Nano    | Super   |
+| ------------------ | -------------------- | ------- | ------- |
+| `resolution`       | `"480"`              | `"720"` | `"720"` |
+| `loss_scale`       | `10.0`               | `1.0`   | `1.0`   |
+| `image_loss_scale` | `None`               | `1.0`   | `1.0`   |
+| `sound_loss_scale` | `2.0`（Edge 独有键） | 无      | 无      |
 
 - Edge 原生推理分辨率是 480p，所以 `resolution="480"`；Nano/Super 是 720p。
 - **`loss_scale=10.0`** 是 Edge 独有的「delta」（文件头注释明确标注 `1.0 -> 10.0`），
@@ -421,10 +421,10 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.3 动作生成（action）配置
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
-| `action_gen` | `True` | `True` | `False` |
-| `max_action_dim` | `64` | `64` | `32` |
+| 字段             | Edge   | Nano   | Super   |
+| ---------------- | ------ | ------ | ------- |
+| `action_gen`     | `True` | `True` | `False` |
+| `max_action_dim` | `64`   | `64`   | `32`    |
 
 - Edge/Nano 的 baseline 保持 `action_gen=True`（对应发布 checkpoint 里带动作头权重），
   但**视觉 SFT 实验**（`vision_sft_edge.py`/`vision_sft_nano.py`）会再覆盖为 `False`（不训动作数据）。
@@ -432,12 +432,12 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.4 微调方式：LoRA vs 全量
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
-| `lora_enabled` | 未设（False） | 未设（False） | `True` |
-| `lora_rank` | — | — | `16` |
-| `lora_alpha` | — | — | `32` |
-| `lora_target_modules` | — | — | `"q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen"` |
+| 字段                  | Edge          | Nano          | Super                                                           |
+| --------------------- | ------------- | ------------- | --------------------------------------------------------------- |
+| `lora_enabled`        | 未设（False） | 未设（False） | `True`                                                          |
+| `lora_rank`           | —             | —             | `16`                                                            |
+| `lora_alpha`          | —             | —             | `32`                                                            |
+| `lora_target_modules` | —             | —             | `"q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen"` |
 
 - **Edge / Nano：全量微调**（`keys_to_select` 那 5 类参数全部真实更新）。
 - **Super：LoRA 微调**，只对生成塔注意力的 4 个投影（`*_moe_gen`）加低秩适配器，
@@ -445,12 +445,12 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.5 并行拓扑与编译
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
-| `data_parallel_shard_degree` | `8` | `8` | `4` |
-| `context_parallel_shard_degree` | `1` | `1` | `2` |
-| `compile.enabled` | `True` | `True` | `False` |
-| `ema.enabled` | `True` | `True` | `False` |
+| 字段                            | Edge   | Nano   | Super   |
+| ------------------------------- | ------ | ------ | ------- |
+| `data_parallel_shard_degree`    | `8`    | `8`    | `4`     |
+| `context_parallel_shard_degree` | `1`    | `1`    | `2`     |
+| `compile.enabled`               | `True` | `True` | `False` |
+| `ema.enabled`                   | `True` | `True` | `False` |
 
 - **并行拓扑**：Edge/Nano 用纯数据并行（DP=8）；Super 用 DP=4 + CP=2（上下文并行），
   因为 32B 单卡放不下，需要切分序列长度。
@@ -459,8 +459,8 @@ dataloader_train=L(PackingDataLoader)(
 
 #### 7.2.6 VAE 路径
 
-| 字段 | Edge | Nano | Super |
-|------|------|------|-------|
+| 字段       | Edge                                                                | Nano                                                 | Super   |
+| ---------- | ------------------------------------------------------------------- | ---------------------------------------------------- | ------- |
 | `vae_path` | `/mi/data2T/Embodied-AI/ckpts/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth` | `pretrained/tokenizers/video/wan2pt2/Wan2.2_VAE.pth` | 同 Nano |
 
 Edge 用的是**本地绝对路径**（你的机器上）；Nano/Super 用相对路径（`pretrained/...`，部署环境里解析）。
@@ -468,19 +468,19 @@ Edge 用的是**本地绝对路径**（你的机器上）；Nano/Super 用相对
 
 #### 7.2.7 差异总表
 
-| 维度 | Edge (2B) | Nano (8B) | Super (32B) |
-|------|-----------|-----------|-------------|
-| 语言骨干 | Nemotron-2B-Dense-VL | Qwen3-VL-8B | Qwen3-VL-32B |
-| 分辨率 | 480p | 720p | 720p |
-| 视觉塔 | 无（`include_visual=None`） | 有 | 有 |
-| QK norm（文本塔） | False + und-K norm | True | True |
-| loss_scale | 10.0 | 1.0 | 1.0 |
-| 动作生成 | True（SFT 覆盖为 False） | True（SFT 覆盖为 False） | False |
-| max_action_dim | 64 | 64 | 32 |
-| 微调方式 | 全量 | 全量 | LoRA（rank=16） |
-| 并行拓扑 | DP=8 | DP=8 | DP=4 + CP=2 |
-| torch.compile | 开（NPU 关） | 开（NPU 关） | 关 |
-| EMA | 开 | 开 | 关 |
+| 维度              | Edge (2B)                   | Nano (8B)                | Super (32B)     |
+| ----------------- | --------------------------- | ------------------------ | --------------- |
+| 语言骨干          | Nemotron-2B-Dense-VL        | Qwen3-VL-8B              | Qwen3-VL-32B    |
+| 分辨率            | 480p                        | 720p                     | 720p            |
+| 视觉塔            | 无（`include_visual=None`） | 有                       | 有              |
+| QK norm（文本塔） | False + und-K norm          | True                     | True            |
+| loss_scale        | 10.0                        | 1.0                      | 1.0             |
+| 动作生成          | True（SFT 覆盖为 False）    | True（SFT 覆盖为 False） | False           |
+| max_action_dim    | 64                          | 64                       | 32              |
+| 微调方式          | 全量                        | 全量                     | LoRA（rank=16） |
+| 并行拓扑          | DP=8                        | DP=8                     | DP=4 + CP=2     |
+| torch.compile     | 开（NPU 关）                | 开（NPU 关）             | 关              |
+| EMA               | 开                          | 开                       | 关              |
 
 **一句话**：三类模型「骨架相同、骨干不同、规模不同、微调策略不同」——
 Edge 是 Nemotron 2B 全量微调（480p、loss×10），Nano 是 Qwen 8B 全量微调（720p），
@@ -506,6 +506,7 @@ class OmniMoTModel(ImaginaireModel):
 ```
 
 要点：
+
 - 继承 `ImaginaireModel`（框架基类，提供 `state_dict`/`load_state_dict`/EMA 等通用能力）。
 - 名字里的 **MoT = Mixture of Transformers**：语言理解塔 + 扩散生成塔由同一套 Transformer 骨干共享，
   其中生成塔是 MoE（Mixture-of-Experts，稀疏专家）结构。
@@ -528,14 +529,14 @@ def __init__(self, config: OmniMoTModelConfig):
 顺序很重要：**`set_up_parallelism()` 必须在 `set_up_model()` 之前**（源码注释明确强调），
 因为建网络时要根据并行拓扑决定 FSDP 分片方式。
 
-| 步骤 | 方法 | 做什么 |
-|------|------|--------|
-| 0 | `set_precision()` | `self.precision = getattr(torch, "bfloat16")`，准备 `tensor_kwargs`，关掉 TF32 |
-| 1 | `set_up_data_key()` | 记录 `input_video_key`/`input_image_key`/`input_caption_key` 字段名 |
-| 2 | `set_up_tokenizers()` | 实例化文本/视觉/声音三个 tokenizer |
-| 3 | `set_up_parallelism()` | 构建 `ParallelDims`（FSDP/CFG/CP 三维并行网格） |
-| 4 | `set_up_model()` | 调 `build_net()` 建网络 + 建 EMA 副本 |
-| 5 | `set_up_scheduler_and_sampler()` | 建 RectifiedFlow（训练用）+ UniPC/EDM 采样器（推理用） |
+| 步骤 | 方法                             | 做什么                                                                         |
+| ---- | -------------------------------- | ------------------------------------------------------------------------------ |
+| 0    | `set_precision()`                | `self.precision = getattr(torch, "bfloat16")`，准备 `tensor_kwargs`，关掉 TF32 |
+| 1    | `set_up_data_key()`              | 记录 `input_video_key`/`input_image_key`/`input_caption_key` 字段名            |
+| 2    | `set_up_tokenizers()`            | 实例化文本/视觉/声音三个 tokenizer                                             |
+| 3    | `set_up_parallelism()`           | 构建 `ParallelDims`（FSDP/CFG/CP 三维并行网格）                                |
+| 4    | `set_up_model()`                 | 调 `build_net()` 建网络 + 建 EMA 副本                                          |
+| 5    | `set_up_scheduler_and_sampler()` | 建 RectifiedFlow（训练用）+ UniPC/EDM 采样器（推理用）                         |
 
 #### 7.3.3 三个 tokenizer（`set_up_tokenizers`，第 128 行）
 
@@ -579,6 +580,7 @@ net.init_weights(buffer_device=DEVICE)            # 初始化权重
 ```
 
 要点：
+
 - **meta 设备**：先在 `torch.device("meta")` 上建结构（不分配显存），拿到完整网络后一次性 `to_empty` 搬到 NPU，
   避免大模型在显存里反复 copy。
 - `language_model` 就是 7.2 的 `Nemotron3DenseVLTextForCausalLM`（Edge）或 `Qwen3VLTextForCausalLM`（Nano/Super）。
@@ -734,6 +736,7 @@ for t in ["und", "gen"]:
 ```
 
 要点：
+
 - **主损失**是流匹配损失 `compute_flow_matching_loss`（在 `algorithm/loss/flow_matching.py`），
   度量网络预测速度 `v` 与目标 `vt` 的误差，并按时间权重加权。
 - **`loss_scale=10.0`**：Edge 把视觉损失放大 10 倍（对应 7.2 的 `diffusion loss scale = 10.0`）。
@@ -768,16 +771,16 @@ for t in ["und", "gen"]:
 
 #### 7.3.13 小结：`omni_mot_model.py` 的职责边界
 
-| 做什么 | 在这个文件 | 具体位置 |
-|--------|-----------|---------|
-| tokenizer 管理（文本/视觉/声音） | ✅ | `set_up_tokenizers` |
-| 网络搭建（MoT 骨架 + FSDP 切分） | ✅ | `build_net` / `parallelize_vfm_network` |
-| 流匹配噪声调度（采样 t、加噪、算 vt） | ✅ | `_get_train_noise_level_*` / `_add_noise_to_input` |
-| 训练 loss（流匹配 + 负载均衡） | ✅ | `_compute_losses` |
-| 推理采样循环 | ✅ | `generate_samples_from_batch` |
-| 网络前向（MoT 注意力、专家路由） | ❌ 在 `mot/cosmos3_vfm_network.py` | `denoise()` 只调用 `net(...)` |
-| 流匹配数学公式 | ❌ 在 `diffusion/rectified_flow.py` | `get_interpolation` |
-| 损失数学公式 | ❌ 在 `algorithm/loss/flow_matching.py` | `compute_flow_matching_loss` |
+| 做什么                                | 在这个文件                              | 具体位置                                           |
+| ------------------------------------- | --------------------------------------- | -------------------------------------------------- |
+| tokenizer 管理（文本/视觉/声音）      | ✅                                      | `set_up_tokenizers`                                |
+| 网络搭建（MoT 骨架 + FSDP 切分）      | ✅                                      | `build_net` / `parallelize_vfm_network`            |
+| 流匹配噪声调度（采样 t、加噪、算 vt） | ✅                                      | `_get_train_noise_level_*` / `_add_noise_to_input` |
+| 训练 loss（流匹配 + 负载均衡）        | ✅                                      | `_compute_losses`                                  |
+| 推理采样循环                          | ✅                                      | `generate_samples_from_batch`                      |
+| 网络前向（MoT 注意力、专家路由）      | ❌ 在 `mot/cosmos3_vfm_network.py`      | `denoise()` 只调用 `net(...)`                      |
+| 流匹配数学公式                        | ❌ 在 `diffusion/rectified_flow.py`     | `get_interpolation`                                |
+| 损失数学公式                          | ❌ 在 `algorithm/loss/flow_matching.py` | `compute_flow_matching_loss`                       |
 
 一句话：**`OmniMoTModel` 是「导演」**，负责把 tokenizer、网络、噪声调度、损失、采样器串成完整流程；
 真正干活的「演员」（MoT 网络前向、流匹配公式）在别的文件里。
@@ -802,10 +805,10 @@ OmniMoTModel.denoise()          （导演喊"开拍"）
 
 这个文件定义了两个类：
 
-| 类 | 作用 | 行号 |
-|----|------|------|
-| `Cosmos3VFMNetworkConfig` | 网络结构超参（通道数、patch 大小、模态开关） | 24 |
-| `Cosmos3VFMNetwork` | 真正的 MoT 网络（桥接层 + 语言骨干 + 前向） | 104 |
+| 类                        | 作用                                         | 行号 |
+| ------------------------- | -------------------------------------------- | ---- |
+| `Cosmos3VFMNetworkConfig` | 网络结构超参（通道数、patch 大小、模态开关） | 24   |
+| `Cosmos3VFMNetwork`       | 真正的 MoT 网络（桥接层 + 语言骨干 + 前向）  | 104  |
 
 #### 7.4.2 网络结构 `__init__()`（第 108 行）
 
@@ -916,6 +919,7 @@ def two_way_attention(...):
 ```
 
 即 **two-way = 两条注意力路径**：
+
 - **und 路径**：文本 token 因果自注意力（像普通 LLM）
 - **gen 路径**：latent token 对「全部 token」做全注意力（像扩散模型的 transformer，能双向看）
 
@@ -970,10 +974,10 @@ def forward(self, packed_seq, memory=None, ...):
 
 四个 `_encode_*` / `_decode_*` 是对称的：
 
-| 阶段 | 视觉 | 动作 | 声音 |
-|------|------|------|------|
+| 阶段 | 视觉                               | 动作                     | 声音                    |
+| ---- | ---------------------------------- | ------------------------ | ----------------------- |
 | 编码 | `patchify` → `vae2llm` → +时间嵌入 | `action2llm` → +模态嵌入 | `sound2llm` → +模态嵌入 |
-| 解码 | `llm2vae` → `unpatchify` | `llm2action` | `llm2sound` |
+| 解码 | `llm2vae` → `unpatchify`           | `llm2action`             | `llm2sound`             |
 
 #### 7.4.7 时间步怎么注入：`TimestepEmbedder`（`modeling_utils.py` 第 28 行）
 
@@ -1104,14 +1108,14 @@ def train(self, model, dataloader_train, dataloader_val):
 
 ### 9.2 关键回调（`vision_sft_edge.py` 中注册的）
 
-| 回调 | 功能 |
-|------|------|
-| `iter_speed` | 每步打印 loss + 耗时 |
-| `grad_clip` | 梯度裁剪（L2 norm ≤ 0.1） |
-| `norm_monitor` | 监控各层梯度/激活范数 |
-| `device_monitor` | 监控显存/功耗/温度 |
-| `wandb_2x` | wandb 日志 |
-| `skip_nan_step` | NaN loss 自动跳过 |
+| 回调             | 功能                      |
+| ---------------- | ------------------------- |
+| `iter_speed`     | 每步打印 loss + 耗时      |
+| `grad_clip`      | 梯度裁剪（L2 norm ≤ 0.1） |
+| `norm_monitor`   | 监控各层梯度/激活范数     |
+| `device_monitor` | 监控显存/功耗/温度        |
+| `wandb_2x`       | wandb 日志                |
+| `skip_nan_step`  | NaN loss 自动跳过         |
 
 ### 9.3 可训练参数
 
@@ -1132,12 +1136,12 @@ keys_to_select = [
 训练循环里 `model(data_batch)` 实际调用的是 `OmniMoTModel.training_step()`（见 7.3.7），
 其第 8 步 `_compute_losses()` 汇总所有损失。整个 loss 体系分三层：
 
-| 层次 | 文件 | 负责什么 |
-|------|------|---------|
-| 编排层 | `omni_mot_model.py` → `_compute_losses()` | 决定「算哪几个 loss、各乘多少系数、怎么加总」 |
-| 公式层 | `algorithm/loss/flow_matching.py` | 流匹配损失的数学公式 |
-| 公式层 | `algorithm/loss/load_balancing.py` | MoE 负载均衡损失的数学公式 |
-| 支撑层 | `diffusion/rectified_flow.py` | 采样噪声时间 t、算插值 xt 与速度目标 vt、时间加权 |
+| 层次   | 文件                                      | 负责什么                                          |
+| ------ | ----------------------------------------- | ------------------------------------------------- |
+| 编排层 | `omni_mot_model.py` → `_compute_losses()` | 决定「算哪几个 loss、各乘多少系数、怎么加总」     |
+| 公式层 | `algorithm/loss/flow_matching.py`         | 流匹配损失的数学公式                              |
+| 公式层 | `algorithm/loss/load_balancing.py`        | MoE 负载均衡损失的数学公式                        |
+| 支撑层 | `diffusion/rectified_flow.py`             | 采样噪声时间 t、算插值 xt 与速度目标 vt、时间加权 |
 
 Edge SFT 的最终 loss 组成（对应 7.3.10）：
 
@@ -1172,14 +1176,15 @@ def compute_flow_matching_loss(pred, target, condition_mask, timesteps, ...):
 
 逐步拆解：
 
-| 步骤 | 数学 | 说明 |
-|------|------|------|
-| ① 平方误差 | `(pred − target)²` | `pred` 是网络预测的速度 v，`target` 是真实速度 vt = ε − x0 |
-| ② 掩码 | `×(1 − condition_mask)` | 条件 token（I2V 第一帧等）mask=1，被置 0，不参与 loss |
-| ③ 时间加权 | `×w(σ_t)` | 按当前噪声强度 sigma 加权（见 9.7） |
-| ④ 平均 | `.mean()` | 先每个样本内平均，再跨样本平均 |
+| 步骤       | 数学                    | 说明                                                       |
+| ---------- | ----------------------- | ---------------------------------------------------------- |
+| ① 平方误差 | `(pred − target)²`      | `pred` 是网络预测的速度 v，`target` 是真实速度 vt = ε − x0 |
+| ② 掩码     | `×(1 − condition_mask)` | 条件 token（I2V 第一帧等）mask=1，被置 0，不参与 loss      |
+| ③ 时间加权 | `×w(σ_t)`               | 按当前噪声强度 sigma 加权（见 9.7）                        |
+| ④ 平均     | `.mean()`               | 先每个样本内平均，再跨样本平均                             |
 
 **两个返回值的区别**：
+
 - `per_instance_weighted_loss.mean()` → 加权后的**标量 loss**，用于反向传播
 - `per_instance_loss` → 每个样本**未加权的 loss**，用于日志记录（wandb 里看到的 `flow_matching_loss_vision_per_instance`）
 
@@ -1219,6 +1224,7 @@ if shifts is not None:
 ```
 
 **这就是 `shift` 参数的数学本质**：`sigma = shift·t / (1 + (shift−1)·t)`。
+
 - shift=1 时退化为恒等映射 `sigma=t`（均匀分布）
 - shift 越大，`sigma` 越向 1（高噪声端）压缩，模型把更多训练算力花在「大噪声难去噪」阶段
 - Edge 用 `shift={256:3, 480:5, 720:10}`，480p 训练时 shift=5
@@ -1279,6 +1285,7 @@ def compute_load_balancing_loss(lbl_metadata, coeff, method, device_mesh):
 ```
 
 直觉理解：
+
 - 如果路由「均衡」，每个专家的实际占比 `f_i` 都接近 `1/num_experts`，且 `p_i` 均匀，loss 小
 - 如果路由「失衡」，某些专家 `f_i` 很大而 `p_i` 也集中在少数专家，`∑ f_i·p_i` 偏离均衡值，loss 大
 - `method="global"` 时先跨 rank 汇总（DTensor 的 `full_tensor()`），`"local"` 只看本 rank
@@ -1333,20 +1340,20 @@ export ASCEND_RT_VISIBLE_DEVICES="8"  # 选哪颗芯片
 
 ### 11.1 必需的环境变量
 
-| 变量 | 含义 | 示例值 |
-|------|------|--------|
-| `DATASET_PATH` | JSONL 数据集路径 | `/mi/.../sft_dataset_bridge` |
-| `BASE_CHECKPOINT_PATH` | DCP 权重路径 | `/mi/.../Cosmos3-Edge-DCP` |
-| `COSMOS3_EDGE_PROCESSOR_PATH` | HF processor 路径（本地，用于离线加载） | `/mi/.../Cosmos3-Edge` |
-| `WAN_VAE_PATH` | Wan2.2 VAE 权重文件 | `/mi/.../Wan2.2_VAE.pth` |
-| `OUTPUT_ROOT` | 训练产物输出根目录 | `/mi/.../cosmos_trainging_logs` |
+| 变量                          | 含义                                    | 示例值                          |
+| ----------------------------- | --------------------------------------- | ------------------------------- |
+| `DATASET_PATH`                | JSONL 数据集路径                        | `/mi/.../sft_dataset_bridge`    |
+| `BASE_CHECKPOINT_PATH`        | DCP 权重路径                            | `/mi/.../Cosmos3-Edge-DCP`      |
+| `COSMOS3_EDGE_PROCESSOR_PATH` | HF processor 路径（本地，用于离线加载） | `/mi/.../Cosmos3-Edge`          |
+| `WAN_VAE_PATH`                | Wan2.2 VAE 权重文件                     | `/mi/.../Wan2.2_VAE.pth`        |
+| `OUTPUT_ROOT`                 | 训练产物输出根目录                      | `/mi/.../cosmos_trainging_logs` |
 
 ### 11.2 必需的特殊环境变量
 
-| 变量 | 含义 |
-|------|------|
-| `HF_HUB_OFFLINE=1` | 禁止 HuggingFace 联网 |
-| `COSMOS_DEVICE=npu` | 强制使用 NPU |
+| 变量                            | 含义                                              |
+| ------------------------------- | ------------------------------------------------- |
+| `HF_HUB_OFFLINE=1`              | 禁止 HuggingFace 联网                             |
+| `COSMOS_DEVICE=npu`             | 强制使用 NPU                                      |
 | `ASCEND_RT_VISIBLE_DEVICES="8"` | 指定 NPU 芯片（逻辑编号，对应物理 NPU 4, Chip 0） |
 
 ### 11.3 分布式拓扑（单卡示例）
@@ -1361,22 +1368,22 @@ MASTER_PORT=50012         # 通信端口
 
 ### 11.4 TOML 需要改的项
 
-| 配置路径 | 原始默认值 | NPU 应改为 | 原因 |
-|----------|-----------|-----------|------|
-| `[model].compile.enabled` | `true` | `false` | NPU 不支持 torch.compile |
-| `[optimizer].fused` | `true` | `true`（不动） | Ascend 版 FusedAdam 支持，不需要改 |
-| `[trainer].grad_accum_iter` | `2` | `2`（不动） | 单卡时按需可调大（如 4）补偿 batch size |
-| `[job].wandb_mode` | `"disabled"` | `"offline"` | 存本地日志方便回顾 |
+| 配置路径                    | 原始默认值   | NPU 应改为     | 原因                                    |
+| --------------------------- | ------------ | -------------- | --------------------------------------- |
+| `[model].compile.enabled`   | `true`       | `false`        | NPU 不支持 torch.compile                |
+| `[optimizer].fused`         | `true`       | `true`（不动） | Ascend 版 FusedAdam 支持，不需要改      |
+| `[trainer].grad_accum_iter` | `2`          | `2`（不动）    | 单卡时按需可调大（如 4）补偿 batch size |
+| `[job].wandb_mode`          | `"disabled"` | `"offline"`    | 存本地日志方便回顾                      |
 
 ### 11.5 硬件要求
 
-| 项 | 要求 |
-|----|------|
-| GPU/NPU | 1 × Ascend 910，显存 ≥ 50 GB |
-| Edge 模型 SFT 单卡显存 | ~48 GB |
-| 数据集 | BridgeData2-Subset-Synthetic-Captions（~5 GB） |
-| DCP 权重 | Cosmos3-Edge 导出的 DCP（~20 GB） |
-| VAE | Wan2.2_VAE.pth（~1 GB） |
+| 项                     | 要求                                           |
+| ---------------------- | ---------------------------------------------- |
+| GPU/NPU                | 1 × Ascend 910，显存 ≥ 50 GB                   |
+| Edge 模型 SFT 单卡显存 | ~48 GB                                         |
+| 数据集                 | BridgeData2-Subset-Synthetic-Captions（~5 GB） |
+| DCP 权重               | Cosmos3-Edge 导出的 DCP（~20 GB）              |
+| VAE                    | Wan2.2_VAE.pth（~1 GB）                        |
 
 ### 11.6 运行步骤
 
@@ -1397,13 +1404,13 @@ bash /mi/data2T/liujin/code/cosmos_ascend/cosmos-framework/examples/launch_sft_v
 
 ### 11.7 常见错误
 
-| 错误 | 原因 | 解决 |
-|------|------|------|
-| `ValueError: Optimizers with fused=False are not supported` | `fused` 设成了 `false` | 改回 `true` |
-| `ModuleNotFoundError: No module named 'loguru'` | conda 环境没激活 | `conda activate cosmos-framework` |
-| `Checkpoint directory does not exist` | DCP 路径不对 | 确认 `BASE_CHECKPOINT_PATH` |
-| `missing video_dataset_file.jsonl` | 数据集路径不对 | 确认 `DATASET_PATH` |
-| `HCCL connect timeout` | 单卡 torchrun 的 hccl init 问题 | 确认 `NPROC_PER_NODE=1` |
+| 错误                                                        | 原因                            | 解决                              |
+| ----------------------------------------------------------- | ------------------------------- | --------------------------------- |
+| `ValueError: Optimizers with fused=False are not supported` | `fused` 设成了 `false`          | 改回 `true`                       |
+| `ModuleNotFoundError: No module named 'loguru'`             | conda 环境没激活                | `conda activate cosmos-framework` |
+| `Checkpoint directory does not exist`                       | DCP 路径不对                    | 确认 `BASE_CHECKPOINT_PATH`       |
+| `missing video_dataset_file.jsonl`                          | 数据集路径不对                  | 确认 `DATASET_PATH`               |
+| `HCCL connect timeout`                                      | 单卡 torchrun 的 hccl init 问题 | 确认 `NPROC_PER_NODE=1`           |
 
 ---
 
@@ -1442,6 +1449,7 @@ cosmos_trainging_logs/cosmos3/sft/vision_sft_edge/
 ### DCP → safetensors 导出
 
 首先设定指定的conda环境，建议跟训练时的保持一致
+
 ```bash
 CONDA_HOME="/mi/sfs_turbo/lilin_v1/anaconda3"
 source "$CONDA_HOME/etc/profile.d/conda.sh"
@@ -1464,20 +1472,20 @@ python -m cosmos_framework.scripts.export_model \
 
 ## 附录：关键文件索引
 
-| 文件 | 作用 |
-|------|------|
-| `examples/launch_sft_vision_edge_yundao.sh` | 用户启动脚本（路径 + 环境变量） |
-| `examples/_sft_launcher_common.sh` | 共用 torchrun 启动逻辑 |
-| `examples/toml/sft_config/vision_sft_edge.toml` | 所有训练超参 |
-| `cosmos_framework/scripts/train.py` | Python 训练入口 |
-| `cosmos_framework/configs/toml_config/sft_config.py` | TOML → Hydra 转换 + pydantic 校验 |
-| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | Edge 实验定义（模型/数据加载器/回调） |
-| `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py` | Nemotron-2B-Dense-VL 模型骨干 |
-| `cosmos_framework/model/generator/omni_mot_model.py` | OmniMoT 模型实现 |
-| `cosmos_framework/trainer/__init__.py` | 训练循环 |
-| `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | JSONL 数据加载 |
-| `cosmos_framework/utils/device_backend.py` | NPU/CUDA/CPU 自动检测 |
-| `cosmos_framework/utils/generator/fused_adam.py` | FusedAdam 优化器 |
-| `cosmos_framework/utils/generator/optimizer.py` | 优化器构建 |
-| `cosmos_framework/scripts/export_model.py` | DCP → safetensors 导出 |
-| `cosmos_framework/scripts/inference.py` | 推理入口 |
+| 文件                                                                       | 作用                                  |
+| -------------------------------------------------------------------------- | ------------------------------------- |
+| `examples/launch_sft_vision_edge_yundao.sh`                                | 用户启动脚本（路径 + 环境变量）       |
+| `examples/_sft_launcher_common.sh`                                         | 共用 torchrun 启动逻辑                |
+| `examples/toml/sft_config/vision_sft_edge.toml`                            | 所有训练超参                          |
+| `cosmos_framework/scripts/train.py`                                        | Python 训练入口                       |
+| `cosmos_framework/configs/toml_config/sft_config.py`                       | TOML → Hydra 转换 + pydantic 校验     |
+| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py`          | Edge 实验定义（模型/数据加载器/回调） |
+| `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py` | Nemotron-2B-Dense-VL 模型骨干         |
+| `cosmos_framework/model/generator/omni_mot_model.py`                       | OmniMoT 模型实现                      |
+| `cosmos_framework/trainer/__init__.py`                                     | 训练循环                              |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset.py`            | JSONL 数据加载                        |
+| `cosmos_framework/utils/device_backend.py`                                 | NPU/CUDA/CPU 自动检测                 |
+| `cosmos_framework/utils/generator/fused_adam.py`                           | FusedAdam 优化器                      |
+| `cosmos_framework/utils/generator/optimizer.py`                            | 优化器构建                            |
+| `cosmos_framework/scripts/export_model.py`                                 | DCP → safetensors 导出                |
+| `cosmos_framework/scripts/inference.py`                                    | 推理入口                              |
