@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
 set -euo pipefail
 
 # 当前机器的运行环境
@@ -22,7 +25,7 @@ if [ ! -e ~/.cache/huggingface ]; then
 fi
 
 # torchrun 单机单卡设置
-export ASCEND_RT_VISIBLE_DEVICES="10"  
+export ASCEND_RT_VISIBLE_DEVICES="10"
 export NPROC_PER_NODE=1
 export NNODES=1
 export NODE_RANK=0
