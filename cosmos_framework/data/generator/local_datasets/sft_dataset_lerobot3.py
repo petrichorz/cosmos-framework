@@ -264,9 +264,13 @@ def _load_lerobot_metadata_from_manifest(
 ) -> list[dict]:
     """读 manifest 文件（JSONL，每行一个 dict），加载所有数据集并合并。
 
-    manifest 每行形如：``{"path": "/data/dataset_a", "name": "...", "description": "..."}``。
-    只取 ``"path"``（其余 key 忽略），对每个 path 调用 ``_load_lerobot_metadata``
-    （已支持单数据集根 or 父目录递归），合并所有 metadata。
+    manifest 每行支持的 key（其余 key 静默忽略）：
+    - ``path``（必需）：数据集路径（单数据集根 or 父目录）
+    - ``video_feature_key``（可选）：显式指定 feature 名
+    - ``video_feature_keywords``（可选）：关键字 list
+    - ``caption_key``（可选）：caption 列名
+
+    三个参数可**逐行覆盖**；某行没写时回退到函数参数（config 传入的全局值）。
     """
     metadata_list: list[dict] = []
     with open(manifest_path, "r") as f:
@@ -279,14 +283,18 @@ def _load_lerobot_metadata_from_manifest(
             if not path:
                 log.warning(f"manifest 第 {line_no} 行缺少 'path' key，跳过")
                 continue
+            # 三个参数逐行覆盖，缺省回退 config 全局值
+            row_feature_key = entry.get("video_feature_key", video_feature_key)                    # 显式 feature 名
+            row_feature_keywords = entry.get("video_feature_keywords", video_feature_keywords)      # 关键字 list
+            row_caption_key = entry.get("caption_key", caption_key)                                 # caption 列名
             metadata_list.extend(
                 _load_lerobot_metadata(
                     path,
                     min_frames=min_frames,
                     min_short_edge=min_short_edge,
-                    video_feature_key=video_feature_key,
-                    caption_key=caption_key,
-                    video_feature_keywords=video_feature_keywords,
+                    video_feature_key=row_feature_key,
+                    caption_key=row_caption_key,
+                    video_feature_keywords=row_feature_keywords,
                 )
             )
     return metadata_list
