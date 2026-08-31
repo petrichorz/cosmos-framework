@@ -442,6 +442,18 @@ class LeRobotSFTDataset(SFTDataset):
                 raise ValueError(f"Unknown temporal_interval_mode: {self.temporal_interval_mode}")
 
             num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
+
+            # 【防御】抽帧跨度超过窗口时，end_frame 会越界（读到相邻 episode 的帧）。
+            # force_one/max_30fps（或将来加的 max_15fps）在 interval>1 时可能触发；
+            # entire_chunk 因 interval 由 frames_in_window//N 推导，几乎不会触发，此检查对其无害。
+            # 注意：JSONL 版 sft_dataset.py 的 process_one_sample 目前【未加】此防御，仍可能有同样问题。
+            if num_frames_before_downsample > frames_in_window:
+                log.warning(
+                    f"Window too short for interval={temporal_interval}: {metadata['uuid']}, "
+                    f"frames_in_window={frames_in_window}, required span={num_frames_before_downsample}"
+                )
+                return None
+
             if self.frame_selection_mode == "first":
                 start_frame = window_start
             elif self.frame_selection_mode == "center":

@@ -472,6 +472,7 @@ def _decode_video_frames(self, video_path, start_frame, end_frame, temporal_inte
 | 4 | seek_mode 选哪个 | **`exact`**（精确帧定位），不是 action 侧的 `approximate` |
 | 5 | `exact` 扫描代价 | 每个 mp4 建 decoder 扫描一次，靠「共享 decoder + LRU」摊薄 |
 | 6 | 不能全量 decode 缓存 | 一个 mp4 解压后 ~22GB（toy），会 OOM，必须按帧区间 seek |
+| 7 | 抽帧跨度越界 | `num_frames_before_downsample=(N-1)×interval+1`，interval>1 时可能超过窗口，`end_frame` 越界读到相邻 episode。**已在 LeRobot 版加防御检查**（JSONL 版未改，见 6.6） |
 
 ### 6.5 尚未验证、版本迭代时需重点关注
 
@@ -479,6 +480,48 @@ def _decode_video_frames(self, video_path, start_frame, end_frame, temporal_inte
 |---|--------|------|
 | 1 | 多文件场景的 `from_timestamp` 语义 | toy 是单 mp4，无法验证；真实多文件数据需确认是全局时间还是文件内相对时间 |
 | 2 | 抽帧语义 | `get_frames_in_range(step=interval)` 的全局步进 vs 原版「相对 start 取余」的差异（当前用 `data[0::interval]` 规避） |
+
+### 6.6 帧 index 越界与防御（已落地）
+
+#### 越界根因
+
+抽帧时 `end_frame` 的计算：
+
+```python
+num_frames_before_downsample = (num_video_frames - 1) * temporal_interval + 1
+end_frame = start_frame + num_frames_before_downsample - 1
+```
+
+代码只检查了 `frames_in_window >= num_video_frames`，**漏了** `frames_in_window >= num_frames_before_downsample`。当 `interval > 1` 时，后者大于前者，`end_frame` 就冲出窗口。
+
+#### 触发条件
+
+- `interval > 1`：`max_30fps` 遇到 >30fps 视频、或自定义 `max_15fps` 遇到 30fps 视频（`int(30/15)=2`）
+- 且 episode 帧数落在 `[num_video_frames, (num_video_frames-1)×interval]` 区间（短 episode）
+- 正常 30fps + `max_30fps` 时 `interval=1`，跨度==帧数，**永不越界**
+
+#### 三种 frame_selection_mode 的越界表现
+
+| mode | start_frame | end_frame | 后果 |
+|------|-------------|-----------|------|
+| `first` | 正常 | 超窗口末尾 | 读到下一个 episode 的帧 |
+| `center` | `(frames-span)//2` 成负数 → 超窗口开头 | 也可能超末尾 | 读到上一个 episode 的帧 |
+| `random` | `max(0, max_offset)` 已 clamp | 仍超末尾 | 读到下一个 episode 的帧 |
+
+#### 已加防御（LeRobot 版）
+
+`sft_dataset_lerobot3.py` 的 `process_one_sample` 里，在 `num_frames_before_downsample` 计算后、`frame_selection_mode` 分支前加检查：
+
+```python
+if num_frames_before_downsample > frames_in_window:
+    log.warning(
+        f"Window too short for interval={temporal_interval}: {metadata['uuid']}, "
+        f"frames_in_window={frames_in_window}, required span={num_frames_before_downsample}"
+    )
+    return None
+```
+
+> **注意**：JSONL 版 `sft_dataset.py` 的 `process_one_sample` **目前未加此防御**，仍可能有同样问题，后续如有需要需同步。
 
 ---
 
