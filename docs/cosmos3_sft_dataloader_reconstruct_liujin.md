@@ -31,14 +31,15 @@
 
 ### 已拍板的决策
 
-| #   | 决策         | 说明                                                                                            |
-| --- | ------------ | ----------------------------------------------------------------------------------------------- |
-| 1   | 路线         | 路线 B：动态加载，不转 JSONL                                                                    |
-| 2   | 相机         | 关键字匹配选视角（key 名含 `top`/`head` 等关键字即选中；匹配不到回退第一个 video）              |
-| 3   | caption 粒度 | episode 级（一个任务一个描述）                                                                  |
-| 4   | 字段语义     | `t2w_windows` 存**帧编号**（非 timestamp），对齐原版                                            |
-| 5   | 代码组织     | **原文件一行不改**；新建 `sft_dataset_lerobot3.py` + `vision_sft_edge_lerobot3.py` 承载新增逻辑 |
-| 6   | 效率         | 共享 decoder + LRU 缓存，同一 mp4 只打开一次                                                    |
+| #   | 决策         | 说明                                                                                                    |
+| --- | ------------ | ------------------------------------------------------------------------------------------------------- |
+| 1   | 路线         | 路线 B：动态加载，不转 JSONL                                                                            |
+| 2   | 相机         | 关键字匹配选视角（key 名含 `top`/`head` 等关键字即选中；匹配不到回退第一个 video）                      |
+| 3   | caption 粒度 | episode 级（一个任务一个描述）                                                                          |
+| 4   | 字段语义     | `t2w_windows` 存**帧编号**（非 timestamp），对齐原版                                                    |
+| 5   | 代码组织     | **原文件一行不改**；新建 `sft_dataset_lerobot3.py` + `vision_sft_edge_lerobot3.py` 承载新增逻辑         |
+| 6   | 效率         | 共享 decoder + LRU 缓存，同一 mp4 只打开一次                                                            |
+| 7   | **数据入口** | 统一 `DATASET_PATH`：`.jsonl` 文件 → manifest 模式（每行一个数据集 path）；目录 → 单数据集根/父目录递归 |
 
 ---
 
@@ -49,7 +50,7 @@
 ```
 cosmos_framework/data/generator/local_datasets/
   ├── sft_dataset.py            # 原文件（JSONL/S3 流程），一行未改
-  └── sft_dataset_lerobot3.py   # ★ 新增：LeRobot 动态加载（612 行）
+  └── sft_dataset_lerobot3.py   # ★ 新增：LeRobot 动态加载（668 行）
 
 cosmos_framework/configs/base/experiment/sft/
   ├── vision_sft_edge.py        # 原文件（JSONL 流程），一行未改
@@ -57,21 +58,23 @@ cosmos_framework/configs/base/experiment/sft/
 
 cosmos_framework/configs/base/config.py     # 加 1 行 import（注册新 experiment）
 examples/toml/sft_config/vision_sft_edge.toml  # experiment 字段指向新名字
-examples/launch_sft_vision_edge_yundao_lerobot.sh  # 启动脚本（DATASET_PATH 指向 LeRobot）
+examples/launch_sft_vision_edge_yundao_lerobot.sh  # 启动脚本（DATASET_PATH 统一入口）
+examples/_sft_launcher_common.sh            # 公共启动脚本，**未改动**（已回滚）
 ```
 
 ### 2.1 `sft_dataset_lerobot3.py` 内容
 
-| 符号                              | 行号 | 作用                                                    |
-| --------------------------------- | ---- | ------------------------------------------------------- |
-| `_select_lerobot_video_key`       | 47   | 选定 video 字段（显式指定 → 关键字匹配 → 第一个 video） |
-| `_get_lerobot_video_width_height` | 77   | 从 video 字段 shape 抓 (width, height)                  |
-| `_discover_lerobot_roots`         | 93   | 单数据集根 or 父目录多数据集发现                        |
-| `_load_single_lerobot_metadata`   | 118  | 读单个数据集 → metadata list                            |
-| `_load_lerobot_metadata`          | 221  | 统一入口：发现多个数据集 → 逐个加载 → 合并              |
-| `_LeRobotVideoDecoderCache`       | 260  | torchcodec decoder LRU 缓存（`seek_mode="exact"`）      |
-| `LeRobotSFTDataset(SFTDataset)`   | 295  | 子类，override `process_one_sample`                     |
-| `get_sft_dataset_from_lerobot`    | 524  | LeRobot 版入口，构造 `LeRobotSFTDataset`                |
+| 符号                                   | 行号   | 作用                                                                 |
+| -------------------------------------- | ------ | -------------------------------------------------------------------- |
+| `_select_lerobot_video_key`            | 47     | 选定 video 字段（显式指定 → 关键字匹配 → 第一个 video）              |
+| `_get_lerobot_video_width_height`      | 77     | 从 video 字段 shape 抓 (width, height)                               |
+| `_discover_lerobot_roots`              | 93     | 单数据集根 or 父目录多数据集发现                                     |
+| `_load_single_lerobot_metadata`        | 118    | 读单个数据集 → metadata list                                         |
+| `_load_lerobot_metadata`               | 223    | 目录入口：发现多个数据集 → 逐个加载 → 合并                           |
+| `_load_lerobot_metadata_from_manifest` | 257    | **manifest 入口**：读 JSONL，每行一个 path，逐个加载合并             |
+| `_LeRobotVideoDecoderCache`            | 300    | torchcodec decoder LRU 缓存（`seek_mode="exact"`）                   |
+| `LeRobotSFTDataset(SFTDataset)`        | 335    | 子类，override `process_one_sample`                                  |
+| `get_sft_dataset_from_lerobot`         | 564    | LeRobot 版入口，按 `dataset_path` 后缀分流，构造 `LeRobotSFTDataset` |
 
 ### 2.2 复用父模块符号（不重复实现）
 
@@ -129,16 +132,20 @@ from cosmos_framework.data.generator.local_datasets.sft_dataset import (
 
 ### 4.1 uuid
 
-**格式**：`{dataset_name}_chunk_{chunk_index}_file_{file_index}_episode_{episode_index}`
+**格式**：`{dataset_name}_{root_hash}_chunk_{chunk_index}_file_{file_index}_episode_{episode_index}`
 
 ```python
-uuid = f"{root.name}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
+# uuid 前缀用「目录名 + 完整路径短 hash」，保证不同父目录下的同名数据集不冲突
+root_hash = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8]
+uuid = f"{root.name}_{root_hash}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
 ```
 
-- 来源：数据集目录名（`root.name`）+ episodes 表的三列
+- 来源：数据集目录名（`root.name`）+ **完整路径的 sha256 前 8 位** + episodes 表的三列
 - 目的：跨**数据集**、跨 chunk、跨 file、跨 episode 唯一
 
-> episode_index 单数据集内唯一，但**多数据集合并时**不同数据集可能有相同编号，所以 uuid 前加数据集目录名保证唯一。
+> episode_index 单数据集内唯一，但**多数据集合并时**：
+> 1. 不同数据集可能有相同编号 → 加数据集目录名。
+> 2. **不同父目录下可能有同名数据集目录**（如 `toy_lerobot3/00ri/so100_battery` 和 `toy_lerobot3_with_caption/00ri/so100_battery`，目录名都是 `so100_battery`）→ 光有目录名不够，所以再加**完整路径的短 hash** 保证唯一。
 
 ### 4.2 vision_path
 
@@ -196,10 +203,10 @@ end_frame   = round(to_timestamp * fps) - 1   # to 是开区间，-1 变闭区�
 
 验证（toy 数据）：
 
-| episode | from      | to        | start | end  | length | 吻合 |
-| ------- | --------- | --------- | ----- | ---- | ------ | ---- |
-| 0       | 0.0       | 18.466667 | 0     | 553  | 554    | ✅   |
-| 1       | 18.466667 | 36.133333 | 554   | 1083 | 530    | ✅   |
+| episode   | from      | to        | start   | end   | length   | 吻合   |
+| --------- | --------- | --------- | ------- | ----- | -------- | ------ |
+| 0         | 0.0       | 18.466667 | 0       | 553   | 554      | ✅     |
+| 1         | 18.466667 | 36.133333 | 554     | 1083  | 530      | ✅     |
 
 > `to_timestamp` 是**开区间**，该时刻的帧属于下一个 episode，所以 `end_frame = round(to×fps) - 1`。
 
@@ -225,6 +232,51 @@ if caption:                      # 为空时不写 caption key
 ```
 
 > 关键边界行为：缺 caption 列（或值为空）时，`window` 里**没有** `caption` key，下游 `_select_caption` 找不到已知 key → `return None` → `process_one_sample` 跳过该样本。**不写 `caption: None`**，否则下游 `raw.strip()` 会 `AttributeError` 崩溃。
+
+### 4.7 统一数据入口（`dataset_path` 分流）
+
+`get_sft_dataset_from_lerobot` 的入口参数统一为 `dataset_path`，按后缀自动分流：
+
+```python
+if dataset_path.endswith(".jsonl"):
+    metadata_list = _load_lerobot_metadata_from_manifest(dataset_path, ...)  # manifest 模式
+else:
+    metadata_list = _load_lerobot_metadata(dataset_path, ...)                # 目录模式
+```
+
+| 传入值                            | 类型   | 走哪条逻辑                             | 行为                               |
+| --------------------------------- | ------ | -------------------------------------- | ---------------------------------- |
+| `xxx.jsonl`                       | 文件   | `_load_lerobot_metadata_from_manifest` | 逐行读 path，加载所有数据集        |
+| 单数据集根（含 `meta/info.json`） | 目录   | `_discover_lerobot_roots` 第 1 分支    | 返回 `[root]`                      |
+| 父目录（含多个数据集）            | 目录   | `_discover_lerobot_roots` 第 2 分支    | `rglob("meta/info.json")` 递归发现 |
+
+### 4.8 manifest 文件格式（JSONL）
+
+manifest 是 JSONL 文件，**每行一个 dict**，只有 `"path"` 是必需 key（其余 key 忽略）：
+
+```jsonl
+{"path": "/data/parent_dir_a", "name": "xxx", "description": "yyy"}
+{"path": "/data/single_dataset_b"}
+```
+
+`_load_lerobot_metadata_from_manifest` 逻辑：
+
+```python
+with open(manifest_path, "r") as f:
+    for line_no, line in enumerate(f, 1):
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        path = entry.get("path")
+        if not path:
+            log.warning(f"manifest 第 {line_no} 行缺少 'path' key，跳过")
+            continue
+        metadata_list.extend(_load_lerobot_metadata(path, ...))
+```
+
+- 每个 `path` 又可以是单数据集根 or 父目录（复用目录模式的能力）。
+- 缺 `path` 的行会 warning 并跳过，不会中断整个加载。
 
 ---
 
@@ -396,15 +448,16 @@ def _decode_video_frames(self, video_path, start_frame, end_frame, temporal_inte
 
 ## 7. 关键结论速查
 
-| 问题               | 结论                                                                                                |
-| ------------------ | --------------------------------------------------------------------------------------------------- |
-| uuid 格式          | `{dataset_name}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}`（含数据集目录名，跨数据集唯一） |
-| 多数据集加载       | `lerobot_root` 支持单数据集根 or 父目录；父目录自动 `rglob("meta/info.json")` 递归发现              |
-| 选哪路视频         | `_select_lerobot_video_key`：显式 key > 关键字匹配（`video_feature_keywords`）> 第一个 video 字段   |
-| width/height 来源  | 选定 video 字段的 shape 前两位，`width=shape[1]`, `height=shape[0]`                                 |
-| t2w_windows 存什么 | **帧编号**（非 timestamp）：`start=round(from×fps)`, `end=round(to×fps)-1`                          |
-| 视频只读一次怎么做 | 共享 decoder + LRU 缓存 + `get_frames_in_range` 区间 seek（非全量缓存）                             |
-| 加 caption 到哪    | episodes 表加列（安全）；**禁止加到 data 表**                                                       |
+| 问题               | 结论                                                                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| uuid 格式          | `{dataset_name}_{root_hash}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}`（目录名 + 完整路径短 hash，跨数据集/同名目录唯一） |
+| 统一数据入口       | `dataset_path`：`.jsonl` → manifest 模式；目录 → 单数据集根/父目录递归                                                             |
+| 多数据集加载       | 目录支持单数据集根 or 父目录，父目录自动 `rglob("meta/info.json")` 递归；manifest 每行一个 path，逐个加载合并                      |
+| 选哪路视频         | `_select_lerobot_video_key`：显式 key > 关键字匹配（`video_feature_keywords`）> 第一个 video 字段                                  |
+| width/height 来源  | 选定 video 字段的 shape 前两位，`width=shape[1]`, `height=shape[0]`                                                                |
+| t2w_windows 存什么 | **帧编号**（非 timestamp）：`start=round(from×fps)`, `end=round(to×fps)-1`                                                         |
+| 视频只读一次怎么做 | 共享 decoder + LRU 缓存 + `get_frames_in_range` 区间 seek（非全量缓存）                                                            |
+| 加 caption 到哪    | episodes 表加列（安全）；**禁止加到 data 表**                                                                                      |
 
 ---
 
@@ -414,18 +467,18 @@ def _decode_video_frames(self, video_path, start_frame, end_frame, temporal_inte
 
 完整复制原 `vision_sft_edge.py`（297 行），只改 3 处：
 
-| 位置                 | 改动                                                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| import（32 行）      | `from ...sft_dataset_lerobot3 import get_sft_dataset_from_lerobot`                                                             |
-| `dataset=`（220 行） | `L(get_sft_dataset_from_lerobot)(...)`，参数换 `lerobot_root` + `video_feature_key` + `video_feature_keywords` + `caption_key` |
-| `job.name`（70 行）  | `"vision_sft_edge_lerobot3"`                                                                                                   |
+| 位置                 | 改动                                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| import（32 行）      | `from ...sft_dataset_lerobot3 import get_sft_dataset_from_lerobot`                                                                     |
+| `dataset=`（220 行） | `L(get_sft_dataset_from_lerobot)(...)`，参数用统一入口 `dataset_path` + `video_feature_key` + `video_feature_keywords` + `caption_key` |
+| `job.name`（70 行）  | `"vision_sft_edge_lerobot3"`                                                                                                           |
 
 关键参数（第 220-234 行）：
 
 ```python
 dataset=L(get_sft_dataset_from_lerobot)(
     ...
-    lerobot_root="${oc.env:DATASET_PATH}",      # LeRobot 数据集根目录（含 meta/info.json）
+    dataset_path="${oc.env:DATASET_PATH}",       # 统一入口：.jsonl→manifest；目录→单数据集根/父目录
     video_feature_key=None,                      # 显式指定 feature 名（精确匹配）；None 则不显式指定
     video_feature_keywords=["top", "head"],      # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
     caption_key="caption",                       # episodes 表里的 caption 列名
@@ -457,10 +510,26 @@ experiment   = "vision_sft_edge_lerobot3"   # ← 从 vision_sft_edge 改来
 
 `examples/launch_sft_vision_edge_yundao_lerobot.sh`：
 
-| 位置                              | 改动                                                   |
-| --------------------------------- | ------------------------------------------------------ |
-| `DATASET_PATH`（第 10 行）        | LeRobot 数据集根目录 `toy_lerobot3_multi_with_caption` |
-| `EXTRA_DATASET_CHECK`（第 66 行） | 校验 `$DATASET_PATH` 下任意深度存在 `meta/info.json`   |
+| 位置                              | 改动                                 |
+| --------------------------------- | ------------------------------------ |
+| `DATASET_PATH`（第 10 行）        | 统一入口，`.jsonl` 文件 or 目录均可  |
+| 绕过 `-d` 检查（第 66-71 行）     | 保存原值 → 若是文件则临时指向父目录  |
+| `EXTRA_DATASET_CHECK`（第 74 行） | 校验原路径存在 + 恢复 `DATASET_PATH` |
+
+**绕过 common 脚本 `-d` 硬检查的技巧**：`_sft_launcher_common.sh` 对 `DATASET_PATH` 做 `-d`（仅目录）检查，`.jsonl` 文件过不了。启动脚本用「临时指向父目录 + EXTRA 恢复」绕过，**不改 common 脚本**：
+
+```bash
+_DATASET_ORIGINAL="$DATASET_PATH"
+if [[ -f "$DATASET_PATH" && ! -d "$DATASET_PATH" ]]; then
+    DATASET_PATH="$(dirname "$DATASET_PATH")"   # jsonl → 父目录，通过 -d 检查
+fi
+
+# EXTRA 里：校验原始路径存在 + 恢复 DATASET_PATH（双引号提前展开，路径固化进字符串）
+EXTRA_DATASET_CHECK="[[ -e \"$_DATASET_ORIGINAL\" ]] || { echo \"ERROR: dataset not found: $_DATASET_ORIGINAL\" >&2; exit 1; }; export DATASET_PATH=\"$_DATASET_ORIGINAL\";"
+```
+
+- 目录模式：`-f` 判断不命中，`DATASET_PATH` 保持目录，`EXTRA` 里 `export` 回去无变化。
+- jsonl 模式：临时指向父目录通过 `-d`，`EXTRA` 里恢复成原始 jsonl 路径，config 读 `${oc.env:DATASET_PATH}` 拿到 jsonl → manifest 模式。
 
 ### 8.5 启动调用链
 
@@ -494,21 +563,20 @@ Hydra compose 按 "experiment=..." 查 ConfigStore → 命中 vision_sft_edge_le
 
 ### 9.2 `_load_lerobot_metadata` 字段验证
 
-| 字段         | 验证值                                             | 结果 |
-| ------------ | -------------------------------------------------- | ---- |
-| uuid         | `chunk_0_file_0_episode_0`                         | ✅   |
-| width/height | 640×480（shape `[480,640,3]` 正确取位）            | ✅   |
-| aspect_ratio | `4,3`                                              | ✅   |
-| 帧编号       | `[0,553]`、`[554,1083]`（to 开区间 -1 生效）       | ✅   |
-| vision_path  | 指向 `observation.images.top`（关键字 `top` 命中） | ✅   |
-| caption 读取 | 正确读到 caption 列                                | ✅   |
+| 字段         | 验证值                                             | 结果   |
+| ------------ | -------------------------------------------------- | ------ |
+| uuid         | `chunk_0_file_0_episode_0`                         | ✅     |
+| width/height | 640×480（shape `[480,640,3]` 正确取位）            | ✅     |
+| aspect_ratio | `4,3`                                              | ✅     |
+| 帧编号       | `[0,553]`、`[554,1083]`（to 开区间 -1 生效）       | ✅     |
+| vision_path  | 指向 `observation.images.top`（关键字 `top` 命中） | ✅     |
+| caption 读取 | 正确读到 caption 列                                | ✅     |
 
 ### 9.3 训练全链路测试结果
 
 **结果**：✅ **全链路跑通**（metadata → caption → 视频解码 → 训练前向 loss 计算成功）。
 
 日志关键证据：
-
 ```
 Total number of parameters: 1414924992（模型加载成功）
 PackedSequence(sample_lens=[11184, 10464, 11184, 10544], ...)（4 个 sample 打包）
@@ -539,11 +607,12 @@ loss = 2.0362（前向成功）
 | 文件                                                                        | 作用                                                                                                                            |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `cosmos_framework/data/generator/local_datasets/sft_dataset.py`             | 原 vision SFT 数据加载（JSONL/S3 流程），**未改动**，提供 `SFTDataset`/`_select_caption`/`_flatten_metadata_by_window` 等供复用 |
-| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py`    | ★ 新增：LeRobot 动态加载（metadata 构造 + `LeRobotSFTDataset` + `get_sft_dataset_from_lerobot`）                                |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py`    | ★ 新增：LeRobot 动态加载（metadata 构造 + manifest 加载 + `LeRobotSFTDataset` + `get_sft_dataset_from_lerobot`）                |
 | `cosmos_framework/data/generator/local_datasets/helper.py`                  | `ffmpeg_decode_video`、`get_aspect_ratio`、`get_video_metadata`、`download_from_s3`（未改动）                                   |
 | `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴）                                                                      |
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py`           | 原 vision SFT 实验配置（JSONL 流程），**未改动**                                                                                |
-| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py`  | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` 接入）                                                               |
+| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py`  | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` + 统一 `dataset_path` 接入）                                         |
 | `cosmos_framework/configs/base/config.py`                                   | 加 1 行 import 注册新 experiment                                                                                                |
 | `examples/toml/sft_config/vision_sft_edge.toml`                             | `experiment` 字段指向 `vision_sft_edge_lerobot3`                                                                                |
-| `examples/launch_sft_vision_edge_yundao_lerobot.sh`                         | 启动脚本（`DATASET_PATH` 指向 LeRobot）                                                                                         |
+| `examples/launch_sft_vision_edge_yundao_lerobot.sh`                         | 启动脚本（`DATASET_PATH` 统一入口 + 绕过 `-d` 检查技巧）                                                                        |
+| `examples/_sft_launcher_common.sh`                                          | 公共启动脚本，**未改动**（已回滚）                                                                                              |

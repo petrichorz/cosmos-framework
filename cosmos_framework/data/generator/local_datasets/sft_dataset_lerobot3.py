@@ -179,7 +179,9 @@ def _load_single_lerobot_metadata(
         if frames_in_window < min_frames:
             continue
 
-        uuid = f"{root.name}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
+        # uuid 前缀用「目录名 + 完整路径短 hash」，保证不同父目录下的同名数据集（如两个 so100_battery）不冲突
+        root_hash = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8]
+        uuid = f"{root.name}_{root_hash}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
 
         # 用 info.json 的 video_path 模板拼本地 mp4 路径
         vision_path = str(
@@ -249,6 +251,44 @@ def _load_lerobot_metadata(
                 video_feature_keywords=video_feature_keywords,
             )
         )
+    return metadata_list
+
+
+def _load_lerobot_metadata_from_manifest(
+    manifest_path: str,
+    min_frames: int = 61,
+    min_short_edge: int = 0,
+    video_feature_key: str | None = None,
+    caption_key: str = "caption",
+    video_feature_keywords: list[str] | None = None,
+) -> list[dict]:
+    """读 manifest 文件（JSONL，每行一个 dict），加载所有数据集并合并。
+
+    manifest 每行形如：``{"path": "/data/dataset_a", "name": "...", "description": "..."}``。
+    只取 ``"path"``（其余 key 忽略），对每个 path 调用 ``_load_lerobot_metadata``
+    （已支持单数据集根 or 父目录递归），合并所有 metadata。
+    """
+    metadata_list: list[dict] = []
+    with open(manifest_path, "r") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            path = entry.get("path")
+            if not path:
+                log.warning(f"manifest 第 {line_no} 行缺少 'path' key，跳过")
+                continue
+            metadata_list.extend(
+                _load_lerobot_metadata(
+                    path,
+                    min_frames=min_frames,
+                    min_short_edge=min_short_edge,
+                    video_feature_key=video_feature_key,
+                    caption_key=caption_key,
+                    video_feature_keywords=video_feature_keywords,
+                )
+            )
     return metadata_list
 
 
@@ -522,7 +562,7 @@ class LeRobotSFTDataset(SFTDataset):
 
 
 def get_sft_dataset_from_lerobot(
-    lerobot_root: str,
+    dataset_path: str,
     resolution: str = "720",
     num_video_frames: int = -1,  # LeRobot 场景默认 -1（native chunk mode，直接用 t2w_windows 里的帧区间）
     temporal_interval_mode: str = "entire_chunk",
@@ -549,9 +589,13 @@ def get_sft_dataset_from_lerobot(
 ) -> LeRobotSFTDataset:
     """LeRobot 版 get_sft_dataset，动态加载 LeRobot 数据集。
 
+    ``dataset_path`` 是统一入口，按类型自动分流：
+    - ``.jsonl`` 文件 → manifest 模式（每行一个 ``{"path": ...}``，加载所有 path 的数据）
+    - 目录 → 单数据集根 / 父目录（递归发现其下所有 meta/info.json）
+
     与 ``sft_dataset.get_sft_dataset`` 的差异仅 3 处：
-    1. 签名：``lerobot_root`` + ``video_feature_key``/``video_feature_keywords`` 替代 ``jsonl_paths``
-    2. metadata 来源：``_load_lerobot_metadata`` 替代 ``_load_sft_metadata_from_s3``
+    1. 签名：``dataset_path`` + ``video_feature_key``/``video_feature_keywords`` 替代 ``jsonl_paths``
+    2. metadata 来源：``_load_lerobot_metadata(_from_manifest)`` 替代 ``_load_sft_metadata_from_s3``
     3. 构造类：``LeRobotSFTDataset`` 替代 ``SFTDataset``（后者 override 视频加载为按帧编号 seek）
 
     其余参数、flatten/shuffle、构造参数列表均与 ``get_sft_dataset`` 一致。
@@ -566,18 +610,30 @@ def get_sft_dataset_from_lerobot(
     else:
         credentials = {}
 
-    metadata_list = _load_lerobot_metadata(
-        lerobot_root,
-        min_frames=61,
-        min_short_edge=min_short_edge,
-        video_feature_key=video_feature_key,
-        caption_key=caption_key,
-        video_feature_keywords=video_feature_keywords,
-    )
+    if dataset_path.endswith(".jsonl"):
+        metadata_list = _load_lerobot_metadata_from_manifest(
+            dataset_path,
+            min_frames=61,
+            min_short_edge=min_short_edge,
+            video_feature_key=video_feature_key,
+            caption_key=caption_key,
+            video_feature_keywords=video_feature_keywords,
+        )
+        source = f"manifest {dataset_path}"
+    else:
+        metadata_list = _load_lerobot_metadata(
+            dataset_path,
+            min_frames=61,
+            min_short_edge=min_short_edge,
+            video_feature_key=video_feature_key,
+            caption_key=caption_key,
+            video_feature_keywords=video_feature_keywords,
+        )
+        source = dataset_path
 
     total_windows = sum(len(m["t2w_windows"]) for m in metadata_list)
     log.info(
-        f"Finished loading LeRobot metadata from {lerobot_root}. "
+        f"Finished loading LeRobot metadata from {source}. "
         f"Total episodes: {len(metadata_list)}, total windows: {total_windows}"
     )
 
