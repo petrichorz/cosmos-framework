@@ -50,7 +50,7 @@
 ```
 cosmos_framework/data/generator/local_datasets/
   ├── sft_dataset.py            # 原文件（JSONL/S3 流程），一行未改
-  └── sft_dataset_lerobot3.py   # ★ 新增：LeRobot 动态加载（668 行）
+  └── sft_dataset_lerobot3.py   # ★ 新增：LeRobot 动态加载（751 行）
 
 cosmos_framework/configs/base/experiment/sft/
   ├── vision_sft_edge.py        # 原文件（JSONL 流程），一行未改
@@ -72,9 +72,9 @@ examples/_sft_launcher_common.sh            # 公共启动脚本，**未改动**
 | `_load_single_lerobot_metadata` | 118 | 读单个数据集 → metadata list |
 | `_load_lerobot_metadata` | 223 | 目录入口：发现多个数据集 → 逐个加载 → 合并 |
 | `_load_lerobot_metadata_from_manifest` | 257 | **manifest 入口**：读 JSONL，每行一个 path，逐个加载合并 |
-| `_LeRobotVideoDecoderCache` | 300 | torchcodec decoder LRU 缓存（`seek_mode="exact"`） |
-| `LeRobotSFTDataset(SFTDataset)` | 335 | 子类，override `process_one_sample` |
-| `get_sft_dataset_from_lerobot` | 564 | LeRobot 版入口，按 `dataset_path` 后缀分流，构造 `LeRobotSFTDataset` |
+| `_LeRobotVideoDecoderCache` | 337 | torchcodec decoder LRU 缓存（`seek_mode="exact"`，含命中率统计） |
+| `LeRobotSFTDataset(SFTDataset)` | 390 | 子类，override `process_one_sample` |
+| `get_sft_dataset_from_lerobot` | 647 | LeRobot 版入口，按 `dataset_path` 后缀分流，构造 `LeRobotSFTDataset` |
 
 ### 2.2 复用父模块符号（不重复实现）
 
@@ -303,13 +303,43 @@ with open(manifest_path, "r") as f:
 - 缺 `path` 的行会 warning 并跳过，不会中断整个加载。
 - 不认识的其他 key（如 `name`/`description`）静默忽略。
 
+#### 并行加载（已落地）
+
+manifest 多个数据集的加载用 `ThreadPoolExecutor` 并行（新增 `manifest_max_workers` 参数，默认 `min(len(tasks), 8)`）：
+
+```python
+# 第 1 步：解析 manifest → 任务列表（纯 json 解析，串行很快）
+tasks = [(path, fk, fkw, ck), ...]
+
+# 第 2 步：并行加载每个 path
+with ThreadPoolExecutor(max_workers=manifest_max_workers) as ex:
+    for result in ex.map(_load_one, tasks):   # ex.map 保持顺序返回
+        metadata_list.extend(result)
+```
+
+**为什么选多线程而非多进程**：
+
+| 环节 | 性质 | 多线程能否并行 |
+|------|------|--------------|
+| `pd.read_parquet`（I/O + C++ 解压） | 会释放 GIL | ✅ 能并行 |
+| 字段映射（Python 纯代码） | 受 GIL 限制 | ❌ 不能 |
+
+因为耗时大头是 `pd.read_parquet`（I/O 密集、释放 GIL），`ThreadPoolExecutor` 就能吃到大部分收益，且免去多进程的 pickle 开销、冷启动和日志乱序。
+
+**关键设计**：
+- `ex.map` 保持输入顺序，结果顺序与 manifest 行顺序一致
+- `workers<=1` 或只有 1 个数据集时，走原串行路径（零并发开销）
+- 只进入并行分支时打一条 `[manifest] 并行加载 N 个数据集` 日志
+
+> 若未来实测「线程加速不明显」（说明瓶颈在字段映射的 Python 代码），再升级为 `ProcessPoolExecutor`。
+
 ### 4.9 三个参数的默认值来源（两层）
 
 `video_feature_key` / `video_feature_keywords` / `caption_key` 有**两层默认值**：
 
 | 层 | 位置 | 值 |
 |----|------|-----|
-| 函数签名默认值 | `sft_dataset_lerobot3.py:592-594` | `None` / `None` / `"caption"` |
+| 函数签名默认值 | `sft_dataset_lerobot3.py:667-669` | `None` / `None` / `"caption"` |
 | **config 显式传入**（实际生效） | `vision_sft_edge_lerobot3.py:232-234` | `None` / `["top","head"]` / `"caption"` |
 
 config 显式传了这三个参数，所以**真正生效的是 config 的值**（其中 `video_feature_keywords` 用 config 的 `["top","head"]` 覆盖了签名默认 `None`）。这三个 config 值就是 manifest 逐行缺省时的回退值。
@@ -403,6 +433,46 @@ class _LeRobotVideoDecoderCache:
 3. **`max_size=64`**：限制同时打开的 decoder 数量，避免耗尽文件描述符/内存。
 
 > 相比 action 侧 `_LRUVideoDecoderCache`，这里把 `seek_mode` 从 `approximate` 改成 `exact`；且**本地定义**（不从 `cosmos3_action_lerobot` import，避免连带触发 lerobot 库 import），torchcodec/fsspec 惰性 import。
+
+#### 命中率统计（已落地）
+
+`_LeRobotVideoDecoderCache` 加了 `_hits` / `_misses` / `_evictions` 三个计数器，用于**观测缓存是否真的生效**：
+
+```python
+def __init__(self, max_size: int = 64):
+    ...
+    self._hits = 0        # 命中：同一 mp4 的 decoder 被复用（免 exact 扫描）
+    self._misses = 0      # 未命中：该 mp4 的 decoder 第一次建（exact 扫描整个文件）
+    self._evictions = 0   # 淘汰：缓存满时弹出最久未用的 decoder
+
+def stats(self) -> dict:
+    total = self._hits + self._misses
+    return {
+        "hits": self._hits,
+        "misses": self._misses,
+        "evictions": self._evictions,
+        "hit_rate": self._hits / total if total else 0.0,
+        "cache_size": len(self._cache),
+        "max_size": self._max_size,
+    }
+```
+
+呈现方式（两种）：
+
+1. **周期日志**：`LeRobotSFTDataset._decode_video_frames` 里每 200 次解码打一次：
+   ```
+   [DecoderCache] hits=9800 misses=200 evictions=10 hit_rate=98.0% cache_size=64/64
+   ```
+2. **暴露属性**：`dataset.decoder_cache_stats` 返回 dict，外部随时可查。
+
+**命中率怎么解读**：
+
+| hit_rate | 含义 | 建议 |
+|----------|------|------|
+| >90% | mp4 总数 ≤ 缓存容量，shuffle 不影响 | 无需处理 |
+| <30% | mp4 总数 >> 缓存容量，shuffle 打散局部性，缓存频繁换入换出 | 调大 `decoder_cache_max_size`，或启用「按 vision_path 排序」分支（父类 `sft_dataset.py` 里有被 `if True` 短路的保缓存分支） |
+
+> 关键：命中率反映的是「同一 mp4 被多个 episode 共享的复用效率」，不是「是否 shuffle」。只有当 **mp4 总数 > 缓存容量(64)** 时，shuffle 才会真正拉低命中率（≈ `64 / mp4总数`）。
 
 ### 5.7 子类解码实现
 

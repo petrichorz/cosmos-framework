@@ -261,8 +261,9 @@ def _load_lerobot_metadata_from_manifest(
     video_feature_key: str | None = None,
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
+    manifest_max_workers: int | None = None,
 ) -> list[dict]:
-    """读 manifest 文件（JSONL，每行一个 dict），加载所有数据集并合并。
+    """读 manifest 文件（JSONL，每行一个 dict），并行加载所有数据集并合并。
 
     manifest 每行支持的 key（其余 key 静默忽略）：
     - ``path``（必需）：数据集路径（单数据集根 or 父目录）
@@ -271,8 +272,13 @@ def _load_lerobot_metadata_from_manifest(
     - ``caption_key``（可选）：caption 列名
 
     三个参数可**逐行覆盖**；某行没写时回退到函数参数（config 传入的全局值）。
+
+    并行策略：每个 path 的加载用 ``ThreadPoolExecutor`` 并行（``pd.read_parquet``
+    是 I/O + C++ 密集、会释放 GIL，多线程即可并行，无需多进程的 pickle 开销）。
+    ``manifest_max_workers`` 默认 ``min(len(tasks), 8)``。
     """
-    metadata_list: list[dict] = []
+    # 第 1 步：解析 manifest → 任务列表（纯 json 解析，串行很快）
+    tasks: list[tuple[str, str | None, list[str] | None, str]] = []
     with open(manifest_path, "r") as f:
         for line_no, line in enumerate(f, 1):
             line = line.strip()
@@ -287,16 +293,39 @@ def _load_lerobot_metadata_from_manifest(
             row_feature_key = entry.get("video_feature_key", video_feature_key)                    # 显式 feature 名
             row_feature_keywords = entry.get("video_feature_keywords", video_feature_keywords)      # 关键字 list
             row_caption_key = entry.get("caption_key", caption_key)                                 # caption 列名
-            metadata_list.extend(
-                _load_lerobot_metadata(
-                    path,
-                    min_frames=min_frames,
-                    min_short_edge=min_short_edge,
-                    video_feature_key=row_feature_key,
-                    caption_key=row_caption_key,
-                    video_feature_keywords=row_feature_keywords,
-                )
-            )
+            tasks.append((path, row_feature_key, row_feature_keywords, row_caption_key))
+
+    if not tasks:
+        return []
+
+    def _load_one(task):
+        path, fk, fkw, ck = task
+        return _load_lerobot_metadata(
+            path,
+            min_frames=min_frames,
+            min_short_edge=min_short_edge,
+            video_feature_key=fk,
+            caption_key=ck,
+            video_feature_keywords=fkw,
+        )
+
+    if manifest_max_workers is None:
+        manifest_max_workers = min(len(tasks), 8)
+
+    metadata_list: list[dict] = []
+    if manifest_max_workers <= 1 or len(tasks) == 1:
+        # 单线程：保持原有顺序，无并发开销
+        for task in tasks:
+            metadata_list.extend(_load_one(task))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        log.info(f"[manifest] 并行加载 {len(tasks)} 个数据集，max_workers={manifest_max_workers}")
+        with ThreadPoolExecutor(max_workers=manifest_max_workers) as ex:
+            # ex.map 保持输入顺序返回，结果顺序与 manifest 行顺序一致
+            for result in ex.map(_load_one, tasks):
+                metadata_list.extend(result)
+
     return metadata_list
 
 
@@ -318,6 +347,9 @@ class _LeRobotVideoDecoderCache:
 
         self._max_size = max_size
         self._cache: "OrderedDict[str, tuple]" = OrderedDict()
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
 
     def get_decoder(self, video_path: str):
         from torchcodec.decoders import VideoDecoder
@@ -325,8 +357,10 @@ class _LeRobotVideoDecoderCache:
 
         if video_path in self._cache:
             self._cache.move_to_end(video_path)
+            self._hits += 1
             return self._cache[video_path][0]
 
+        self._misses += 1
         file_handle = fsspec.open(video_path).__enter__()
         decoder = VideoDecoder(file_handle, seek_mode="exact")
         self._cache[video_path] = (decoder, file_handle)
@@ -337,7 +371,20 @@ class _LeRobotVideoDecoderCache:
                 old_fh.close()
             except Exception:
                 pass
+            self._evictions += 1
         return decoder
+
+    def stats(self) -> dict:
+        """返回命中率统计，不打印，由调用方决定呈现方式。"""
+        total = self._hits + self._misses
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "evictions": self._evictions,
+            "hit_rate": self._hits / total if total else 0.0,
+            "cache_size": len(self._cache),
+            "max_size": self._max_size,
+        }
 
 
 class LeRobotSFTDataset(SFTDataset):
@@ -349,6 +396,12 @@ class LeRobotSFTDataset(SFTDataset):
     def __init__(self, *args, decoder_cache_max_size: int = 64, **kwargs):
         super().__init__(*args, **kwargs)
         self._decoder_cache = _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
+        self._decode_count = 0
+        self._cache_log_interval = 200
+
+    @property
+    def decoder_cache_stats(self) -> dict:
+        return self._decoder_cache.stats()
 
     def _decode_video_frames(
         self,
@@ -366,6 +419,16 @@ class LeRobotSFTDataset(SFTDataset):
         import torch.nn.functional as F
 
         decoder = self._decoder_cache.get_decoder(video_path)
+
+        # 每 _cache_log_interval 次解码，打一次命中率统计（观测缓存是否真生效）
+        self._decode_count += 1
+        if self._decode_count % self._cache_log_interval == 0:
+            s = self._decoder_cache.stats()
+            log.info(
+                f"[DecoderCache] hits={s['hits']} misses={s['misses']} "
+                f"evictions={s['evictions']} hit_rate={s['hit_rate']*100:.1f}% "
+                f"cache_size={s['cache_size']}/{s['max_size']}"
+            )
 
         # torchcodec：开区间 [start, stop)，所以 stop = end_frame + 1
         frame_batch = decoder.get_frames_in_range(start=start_frame, stop=end_frame + 1)
