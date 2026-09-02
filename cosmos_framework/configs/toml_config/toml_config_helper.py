@@ -56,6 +56,27 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_caption_tokens"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_caption_tokens",
         ),
+        ("dataloader_train", "lerobot_metadata_load_workers"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "metadata_load_workers",
+        ),
+        ("dataloader_train", "lerobot_video_view"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "video_view",
+        ),
+        ("dataloader_train", "lerobot_video_view_aliases"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "video_view_aliases",
+        ),
+        ("dataloader_train", "lerobot_max_video_fps"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_video_fps",
+        ),
+        ("dataloader_train", "lerobot_caption_key"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "caption_key",
+        ),
+        ("dataloader_train", "lerobot_resolution"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "resolution",
+        ),
+        ("dataloader_train", "lerobot_num_ffmpeg_threads"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "num_ffmpeg_threads",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,
@@ -99,6 +120,13 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_samples_per_batch"): ("dataloader_train", "batcher", "max_batch_size"),
         ("dataloader_train", "max_sequence_length"): ("dataloader_train", "batcher", "max_tokens"),
         ("dataloader_train", "max_caption_tokens"): None,                       # VFM-only knob — VLM packer caps via max_sequence_length
+        ("dataloader_train", "lerobot_metadata_load_workers"): None,
+        ("dataloader_train", "lerobot_video_view"): None,
+        ("dataloader_train", "lerobot_video_view_aliases"): None,
+        ("dataloader_train", "lerobot_max_video_fps"): None,
+        ("dataloader_train", "lerobot_caption_key"): None,
+        ("dataloader_train", "lerobot_resolution"): None,
+        ("dataloader_train", "lerobot_num_ffmpeg_threads"): None,
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
     },

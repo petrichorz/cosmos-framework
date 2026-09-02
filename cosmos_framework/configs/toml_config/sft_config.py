@@ -735,6 +735,34 @@ class DataloaderTrainConfig(BaseModel):
             "no seed ctor kwarg there)."
         ),
     )
+    lerobot_metadata_load_workers: Optional[int] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Number of parallel metadata-loading threads.",
+    )
+    lerobot_video_view: Optional[str] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Video field or camera-view name; defaults to head.",
+    )
+    lerobot_video_view_aliases: Optional[list[str]] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Ordered aliases used to resolve the video field.",
+    )
+    lerobot_max_video_fps: Optional[float] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Maximum output FPS, enforced with an integer stride.",
+    )
+    lerobot_caption_key: Optional[str] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Optional episode metadata field overriding standard tasks.",
+    )
+    lerobot_resolution: Optional[str] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. Cosmos VIDEO_RES_SIZE_INFO bucket family.",
+    )
+    lerobot_num_ffmpeg_threads: Optional[int] = Field(
+        default=None,
+        description="VFM LeRobot recipe only. FFmpeg decode threads used by each TorchCodec decoder.",
+    )
 
 
 # ---------------------------------------------------------------- top

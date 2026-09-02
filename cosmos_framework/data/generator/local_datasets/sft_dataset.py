@@ -176,6 +176,102 @@ class SFTDataset(torch.utils.data.IterableDataset):
         text_ids = text_ids[: self.max_caption_tokens]
         return text_ids, caption
 
+    def _build_processed_sample(
+        self,
+        *,
+        metadata: dict,
+        t2w_window: dict,
+        win_idx: int,
+        video: torch.Tensor,
+        original_fps: float,
+        total_frames: int,
+        start_frame: int,
+        end_frame: int,
+        temporal_interval: int,
+        target_h: int,
+        target_w: int,
+    ) -> dict | None:
+        """Build the common vision-SFT output after a backend decodes video.
+
+        ``video`` must already be a cropped uint8 ``[C, T, H, W]`` tensor.
+        Keeping caption processing and ``SequencePlan`` construction here lets
+        local video backends reuse the canonical SFT semantics without copying
+        the entire ``process_one_sample`` implementation.
+        """
+        padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
+        image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
+
+        selected = _select_caption(t2w_window)
+        if selected is None:
+            log.warning(
+                f"No known caption key found in t2w_window for sample {metadata['uuid']}. "
+                f"Keys: {list(t2w_window)}. Skipping sample."
+            )
+            return None
+        caption_key, caption, used_structured_json = selected
+
+        num_decoded_frames = video.shape[1]
+        effective_fps = original_fps / temporal_interval
+        cond_fps = effective_fps if self.conditioning_fps < 0 else self.conditioning_fps
+        if self.conditioning_fps_noise_std > 0:
+            noise_factor = np.exp(np.random.randn() * self.conditioning_fps_noise_std)
+            cond_fps = cond_fps * noise_factor
+
+        if self.caption_suffix and not used_structured_json:
+            caption = (caption + " " + self.caption_suffix).strip()
+
+        if self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
+            if random.random() < self.cfg_dropout_rate:
+                caption = ""
+
+        if self.append_duration_fps_timestamps and not used_structured_json:
+            duration = num_decoded_frames / cond_fps
+            suffix = _DURATION_TEMPLATE.format(duration=duration, fps=cond_fps)
+            caption = caption + " " + suffix
+        if self.append_resolution_info and not used_structured_json:
+            suffix = _RESOLUTION_TEMPLATE.format(height=target_h, width=target_w)
+            caption = caption + " " + suffix
+        caption = caption.strip()
+
+        if not self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
+            if random.random() < self.cfg_dropout_rate:
+                caption = ""
+        text_ids, caption = self._tokenize_caption(caption)
+
+        ret = dict(
+            __key__=f"{metadata['uuid']}_w{win_idx}",
+            __url__=metadata["vision_path"],
+            fps=original_fps,
+            n_orig_video_frames=total_frames,
+            chunk_index=win_idx,
+            frame_start=start_frame,
+            frame_end=end_frame,
+            num_frames=video.shape[1],
+            video=video,
+            num_multiplier=temporal_interval,
+            conditioning_fps=cond_fps,
+            padding_mask=padding_mask,
+            image_size=image_size,
+            ai_caption=caption,
+            sampled_caption_style=caption_key,
+            text_token_ids=torch.tensor(text_ids),
+        )
+
+        if self.conditioning_config is not None:
+            num_frames_pixel = video.shape[1]
+            t_latent = 1 + (num_frames_pixel - 1) // self.temporal_compression_factor
+            frames_options = list(self.conditioning_config.keys())
+            weights = list(self.conditioning_config.values())
+            num_cond = random.choices(frames_options, weights=weights, k=1)[0]
+            num_cond = min(num_cond, t_latent - 1)
+            ret["sequence_plan"] = SequencePlan(
+                has_text=True,
+                has_vision=True,
+                condition_frame_indexes_vision=list(range(num_cond)),
+            )
+
+        return ret
+
     def process_one_sample(self, metadata: dict) -> dict | None:
         """Process a single SFT sample: download, decode, and prepare for training.
 
@@ -248,8 +344,6 @@ class SFTDataset(torch.utils.data.IterableDataset):
                     raise ValueError(f"Unknown frame_selection_mode: {self.frame_selection_mode}")
                 end_frame = start_frame + num_frames_before_downsample - 1
 
-            fps = original_fps / temporal_interval
-
             video_chunk = []
             for idx, frame in enumerate(
                 ffmpeg_decode_video(input_video_path, scale_hw=(resize_h, resize_w), num_threads=2)
@@ -280,95 +374,33 @@ class SFTDataset(torch.utils.data.IterableDataset):
         # THWC -> CTHW
         video_chunk = np.transpose(video_chunk, (3, 0, 1, 2))  # [3,T,H,W]
         video = torch.from_numpy(np.ascontiguousarray(video_chunk)).to(torch.uint8)  # [3,T,H,W]
-        padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
-        # image_size: [target_h, target_w, orig_h, orig_w] in pixel space, for the model to crop the video
-        image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
-
-        selected = _select_caption(t2w_window)
-        if selected is None:
-            log.warning(
-                f"No known caption key found in t2w_window for sample {metadata['uuid']}. "
-                f"Keys: {list(t2w_window)}. Skipping sample."
-            )
-            return None
-        caption_key, caption, used_structured_json = selected
-
-        num_decoded_frames = video.shape[1]
-        cond_fps = fps if self.conditioning_fps < 0 else self.conditioning_fps
-        if self.conditioning_fps_noise_std > 0:
-            noise_factor = np.exp(np.random.randn() * self.conditioning_fps_noise_std)
-            cond_fps = cond_fps * noise_factor
-
-        if self.caption_suffix and not used_structured_json:
-            caption = (caption + " " + self.caption_suffix).strip()
-
-        # CFG dropout: when cfg_dropout_keep_metadata is True, dropout fires
-        # before appending resolution/duration/FPS so that metadata text is
-        # preserved even under unconditional guidance.
-        if self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
-            if random.random() < self.cfg_dropout_rate:
-                caption = ""
-
-        # Structured-JSON captions already carry duration/fps/resolution inside the
-        # JSON, so skip the natural-language metadata suffixes for them. This also
-        # makes the training prompt byte-match the inference prompt.
-        if self.append_duration_fps_timestamps and not used_structured_json:
-            duration = num_decoded_frames / cond_fps
-            suffix = _DURATION_TEMPLATE.format(duration=duration, fps=cond_fps)
-            caption = caption + " " + suffix
-        if self.append_resolution_info and not used_structured_json:
-            suffix = _RESOLUTION_TEMPLATE.format(height=target_h, width=target_w)
-            caption = caption + " " + suffix
-        caption = caption.strip()
-
-        if not self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
-            if random.random() < self.cfg_dropout_rate:
-                caption = ""
-        text_ids, caption = self._tokenize_caption(caption)
-
-        ret = dict(
-            __key__=f"{metadata['uuid']}_w{win_idx}",
-            __url__=metadata["vision_path"],
-            fps=original_fps,
-            n_orig_video_frames=total_frames,
-            chunk_index=win_idx,
-            frame_start=start_frame,
-            frame_end=end_frame,
-            num_frames=video.shape[1],
+        return self._build_processed_sample(
+            metadata=metadata,
+            t2w_window=t2w_window,
+            win_idx=win_idx,
             video=video,
-            num_multiplier=temporal_interval,
-            conditioning_fps=cond_fps,
-            padding_mask=padding_mask,
-            image_size=image_size,
-            ai_caption=caption,
-            sampled_caption_style=caption_key,
-            text_token_ids=torch.tensor(text_ids),
+            original_fps=original_fps,
+            total_frames=total_frames,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            temporal_interval=temporal_interval,
+            target_h=target_h,
+            target_w=target_w,
         )
 
-        if self.conditioning_config is not None:
-            num_frames_pixel = video.shape[1]
-            t_latent = 1 + (num_frames_pixel - 1) // self.temporal_compression_factor
-            frames_options = list(self.conditioning_config.keys())
-            weights = list(self.conditioning_config.values())
-            num_cond = random.choices(frames_options, weights=weights, k=1)[0]
-            num_cond = min(num_cond, t_latent - 1)
-            ret["sequence_plan"] = SequencePlan(
-                has_text=True,
-                has_vision=True,
-                condition_frame_indexes_vision=list(range(num_cond)),
-            )
-
-        return ret
-
-    def __iter__(self):
-        assert not self.is_initialized, "Dataset can only be initialized once."
-        assert len(self.metadata) > 0, "Did not find any data."
-
+    def _initialize_worker_resources(self) -> None:
+        """Initialize resources used by ``process_one_sample`` in this worker."""
         self.s3_client = boto3.client(
             "s3",
             **self.s3_credentials,
             config=client_config,
         )
+
+    def __iter__(self):
+        assert not self.is_initialized, "Dataset can only be initialized once."
+        assert len(self.metadata) > 0, "Did not find any data."
+
+        self._initialize_worker_resources()
         # Ranks of the same pp/tp/cp group will have the same dp rank and thus share the same group id.
         # zhao: Cosmos3 does not support TP/SP/CP
         if self.shard_world_size is not None:
