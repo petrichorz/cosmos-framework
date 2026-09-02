@@ -672,6 +672,22 @@ class DataloaderTrainConfig(BaseModel):
             "no seed ctor kwarg there)."
         ),
     )
+    use_multi_resolution: bool = Field(
+        default=False,
+        description=(
+            "VFM only. 多分辨率训练开关：True 时在 256/480/720 档位随机选一个 "
+            "（只选 <= 视频短边的档位，不上采样）。remapped 到 SFT dataset 的 "
+            "'use_multi_resolution'。"
+        ),
+    )
+    use_multi_fps: bool = Field(
+        default=False,
+        description=(
+            "VFM only. 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机 "
+            "（保留 1/2、1/3、1/4）。仅 num_video_frames=-1（native chunk）时生效。"
+            "remapped 到 SFT dataset 的 'use_multi_fps'。"
+        ),
+    )
 
 
 # ---------------------------------------------------------------- top

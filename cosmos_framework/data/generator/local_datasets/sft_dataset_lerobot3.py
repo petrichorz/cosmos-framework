@@ -38,6 +38,11 @@ from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.utils import log
 from cosmos_framework.utils.flags import INTERNAL
 
+# 多分辨率训练：候选档位（短边像素），只选 <= 视频短边的档位（不上采样）。
+_MULTI_RESOLUTION_TIERS = ("256", "480", "720")
+# 多 fps 训练：候选 temporal_interval（保留 1/2、1/3、1/4）。
+_MULTI_FPS_INTERVALS = (2, 3, 4)
+
 
 # ============================================================================
 # 1. video 字段选择 + metadata 加载
@@ -393,8 +398,17 @@ class LeRobotSFTDataset(SFTDataset):
     与父类的唯一差异：``process_one_sample`` 里视频加载那一段。
     """
 
-    def __init__(self, *args, decoder_cache_max_size: int = 64, **kwargs):
+    def __init__(
+        self,
+        *args,
+        use_multi_resolution: bool = False,
+        use_multi_fps: bool = False,
+        decoder_cache_max_size: int = 64,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
+        self.use_multi_resolution = use_multi_resolution
+        self.use_multi_fps = use_multi_fps
         self._decoder_cache = _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
         self._decode_count = 0
         self._cache_log_interval = 200
@@ -465,7 +479,17 @@ class LeRobotSFTDataset(SFTDataset):
 
         # Compute output resolution
         input_w, input_h = metadata["width"], metadata["height"]
-        target_w, target_h = self.output_sizes[metadata["aspect_ratio"]]
+        if self.use_multi_resolution:
+            # 多分辨率：候选档位 = 所有 <= 视频短边 的档位（不上采样），随机选一个。
+            # 视频太小时 fallback 到最小档 "256"。
+            video_min_edge = min(input_w, input_h)
+            candidates = [r for r in _MULTI_RESOLUTION_TIERS if int(r) <= video_min_edge]
+            if not candidates:
+                candidates = ["256"]
+            output_sizes = VIDEO_RES_SIZE_INFO[random.choice(candidates)]
+        else:
+            output_sizes = self.output_sizes
+        target_w, target_h = output_sizes[metadata["aspect_ratio"]]
         resize_ratio = max(target_w / input_w, target_h / input_h)
         resize_h, resize_w = (round(input_h * resize_ratio), round(input_w * resize_ratio))
         crop_y, crop_x = (round((resize_h - target_h) / 2), round((resize_w - target_w) / 2))
@@ -482,7 +506,11 @@ class LeRobotSFTDataset(SFTDataset):
 
         if self.num_video_frames == -1:
             # Native chunk mode: use start/end/interval directly from the window
-            temporal_interval = t2w_window["temporal_interval"]
+            if self.use_multi_fps:
+                # 多 fps：temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
+                temporal_interval = random.choice(_MULTI_FPS_INTERVALS)
+            else:
+                temporal_interval = t2w_window["temporal_interval"]
             start_frame = window_start
             end_frame = actual_end
         else:
@@ -647,7 +675,9 @@ class LeRobotSFTDataset(SFTDataset):
 def get_sft_dataset_from_lerobot(
     dataset_path: str,
     resolution: str = "720",
+    use_multi_resolution: bool = False,  # 多分辨率训练开关：True 时在 256/480/720 随机（不上采样）
     num_video_frames: int = -1,  # LeRobot 场景默认 -1（native chunk mode，直接用 t2w_windows 里的帧区间）
+    use_multi_fps: bool = False,  # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机
     temporal_interval_mode: str = "entire_chunk",
     frame_selection_mode: str = "center",
     tokenizer_config: Optional[Any] = None,
@@ -731,6 +761,8 @@ def get_sft_dataset_from_lerobot(
         metadata=metadata_list,
         num_video_frames=num_video_frames,
         resolution=resolution,
+        use_multi_resolution=use_multi_resolution,
+        use_multi_fps=use_multi_fps,
         s3_credentials=credentials,
         temporal_interval_mode=temporal_interval_mode,
         frame_selection_mode=frame_selection_mode,
