@@ -9,12 +9,13 @@
 # 与父模块的关系：
 #   - 复用 SFTDataset（继承）、_select_caption / _flatten_metadata_by_window /
 #     _DURATION_TEMPLATE / _RESOLUTION_TEMPLATE / _MAX_CAPTION_TOKENS（import）
-#   - LeRobotSFTDataset override process_one_sample，只替换「中段视频加载」：
-#     父类 = download 到临时文件 + 全量 ffmpeg decode + 过滤
-#     本类 = 本地 mp4 直接 get_video_metadata + torchcodec 按帧编号区间 seek
+#   - LeRobotSFTDataset override process_one_sample，视频加载与父类 sft_dataset.py 完全一致：
+#     read_bytes 一次性读进内存 → 写临时文件 → ffmpeg 全量解码 + 按帧区间过滤。
+#     唯一差异是 metadata 来源（LeRobot episodes 表）以及多分辨率/多 fps 的扩展。
 import hashlib
 import json
 import random
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +23,8 @@ import numpy as np
 import torch
 
 from cosmos_framework.data.generator.local_datasets.helper import (
+    download_from_s3,
+    ffmpeg_decode_video,
     get_aspect_ratio,
     get_video_metadata,
 )
@@ -39,7 +42,8 @@ from cosmos_framework.utils import log
 from cosmos_framework.utils.flags import INTERNAL
 
 # 多分辨率训练：候选档位（短边像素），只选 <= 视频短边的档位（不上采样）。
-_MULTI_RESOLUTION_TIERS = ("256", "480", "720")
+# _MULTI_RESOLUTION_TIERS = ("256", "480", "720")
+_MULTI_RESOLUTION_TIERS = ("256", "480")
 # 多 fps 训练：候选 temporal_interval（保留 1/2、1/3、1/4）。
 _MULTI_FPS_INTERVALS = (2, 3, 4)
 
@@ -335,61 +339,8 @@ def _load_lerobot_metadata_from_manifest(
 
 
 # ============================================================================
-# 2. torchcodec decoder LRU 缓存 + LeRobotSFTDataset 子类
+# 2. LeRobotSFTDataset 子类
 # ============================================================================
-
-
-class _LeRobotVideoDecoderCache:
-    """按视频路径缓存 torchcodec VideoDecoder 的 LRU 缓存。
-
-    仿照 action 侧 ``cosmos3_action_lerobot._LRUVideoDecoderCache``，但：
-    - ``seek_mode="exact"``（精确帧定位，vision SFT 需切准 episode 帧边界）
-    - torchcodec/fsspec 惰性 import，不污染主模块 import 路径
-    """
-
-    def __init__(self, max_size: int = 64):
-        from collections import OrderedDict
-
-        self._max_size = max_size
-        self._cache: "OrderedDict[str, tuple]" = OrderedDict()
-        self._hits = 0
-        self._misses = 0
-        self._evictions = 0
-
-    def get_decoder(self, video_path: str):
-        from torchcodec.decoders import VideoDecoder
-        import fsspec
-
-        if video_path in self._cache:
-            self._cache.move_to_end(video_path)
-            self._hits += 1
-            return self._cache[video_path][0]
-
-        self._misses += 1
-        file_handle = fsspec.open(video_path).__enter__()
-        decoder = VideoDecoder(file_handle, seek_mode="exact")
-        self._cache[video_path] = (decoder, file_handle)
-
-        while len(self._cache) > self._max_size:
-            _, (_, old_fh) = self._cache.popitem(last=False)
-            try:
-                old_fh.close()
-            except Exception:
-                pass
-            self._evictions += 1
-        return decoder
-
-    def stats(self) -> dict:
-        """返回命中率统计，不打印，由调用方决定呈现方式。"""
-        total = self._hits + self._misses
-        return {
-            "hits": self._hits,
-            "misses": self._misses,
-            "evictions": self._evictions,
-            "hit_rate": self._hits / total if total else 0.0,
-            "cache_size": len(self._cache),
-            "max_size": self._max_size,
-        }
 
 
 class LeRobotSFTDataset(SFTDataset):
@@ -403,73 +354,18 @@ class LeRobotSFTDataset(SFTDataset):
         *args,
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
-        decoder_cache_max_size: int = 64,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.use_multi_resolution = use_multi_resolution
         self.use_multi_fps = use_multi_fps
-        self._decoder_cache = _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
-        self._decode_count = 0
-        self._cache_log_interval = 200
-
-    @property
-    def decoder_cache_stats(self) -> dict:
-        return self._decoder_cache.stats()
-
-    def _decode_video_frames(
-        self,
-        video_path: str,
-        start_frame: int,
-        end_frame: int,
-        temporal_interval: int,
-        resize_h: int,
-        resize_w: int,
-    ) -> list[np.ndarray]:
-        """按帧编号区间 seek，只解码目标 episode 的帧。
-
-        与父类对齐的返回格式：list[np.ndarray]（每帧 HWC uint8），供下游 np.stack。
-        """
-        import torch.nn.functional as F
-
-        decoder = self._decoder_cache.get_decoder(video_path)
-
-        # 每 _cache_log_interval 次解码，打一次命中率统计（观测缓存是否真生效）
-        self._decode_count += 1
-        if self._decode_count % self._cache_log_interval == 0:
-            s = self._decoder_cache.stats()
-            log.info(
-                f"[DecoderCache] hits={s['hits']} misses={s['misses']} "
-                f"evictions={s['evictions']} hit_rate={s['hit_rate']*100:.1f}% "
-                f"cache_size={s['cache_size']}/{s['max_size']}"
-            )
-
-        # torchcodec：开区间 [start, stop)，所以 stop = end_frame + 1
-        # step 下沉：把抽帧间隔交给解码层（get_frames_in_range 的 step），解码器直接跳帧、
-        # 只解需要的帧，比「全解后切片」省约 20%（h264/av1 帧间依赖导致省不到 50%）。
-        frame_batch = decoder.get_frames_in_range(
-            start=start_frame, stop=end_frame + 1, step=temporal_interval
-        )
-        # frame_batch.data: [N, C, H, W] uint8（dimension_order="NCHW" 默认）
-
-        data = frame_batch.data  # [N, C, H, W] uint8
-
-        # resize：原版 ffmpeg 用 -vf scale + bicubic 在解码时 resize 到 (resize_h, resize_w)。
-        # 这里用 torch interpolate(bicubic) 对齐，保证后续 center crop 尺寸正确。
-        data = data.float()
-        data = F.interpolate(data, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
-        data = data.round().clamp(0, 255).to(torch.uint8)
-
-        # [N, C, H, W] (uint8) -> list of [H, W, C] (uint8)，对齐父类返回格式
-        data_nhwc = data.permute(0, 2, 3, 1).cpu().numpy()  # [N, H, W, C] uint8
-        return [data_nhwc[i] for i in range(data_nhwc.shape[0])]
 
     def process_one_sample(self, metadata: dict) -> dict | None:
         """Process a single LeRobot SFT sample.
 
-        ⚠️ 与 sft_dataset.py:SFTDataset.process_one_sample 保持同步，唯一差异是中段视频加载：
-        父类 = download 到临时文件 + 全量 ffmpeg decode + 过滤；
-        本类 = 本地 mp4 直接 get_video_metadata + torchcodec 按帧编号区间 seek。
+        ⚠️ 与 sft_dataset.py:SFTDataset.process_one_sample 保持同步。视频加载与父类完全一致
+        （read_bytes → 临时文件 → ffmpeg 全量解码 + 按帧区间过滤）；仅在此基础上扩展了
+        多分辨率（use_multi_resolution）与多 fps（use_multi_fps）。
         """
         windows = metadata["t2w_windows"]
         win_idx = random.randrange(len(windows))
@@ -494,79 +390,91 @@ class LeRobotSFTDataset(SFTDataset):
         resize_h, resize_w = (round(input_h * resize_ratio), round(input_w * resize_ratio))
         crop_y, crop_x = (round((resize_h - target_h) / 2), round((resize_w - target_w) / 2))
 
-        # 【LeRobot 差异】本地 mp4 直接读 metadata，跳过 download + 临时文件
-        input_video_path = metadata["vision_path"]
-        video_info = get_video_metadata(input_video_path)
-        original_fps = video_info["fps"]
-        total_frames = video_info["total_frames"]
+        # 【对齐原版 sft_dataset.py】整个 mp4 一次性读进内存（本地路径），写临时文件后
+        # 用 ffmpeg 全量解码 + 按帧区间过滤（替代之前的 fsspec + torchcodec 区间 seek）。
+        video_bytes = download_from_s3(self.s3_client, metadata["vision_path"])
+        if video_bytes is None:
+            log.warning(f"Failed to read video: {metadata['vision_path']}")
+            return None
 
-        # Constrain to the t2w window
-        actual_end = min(window_end, total_frames - 1)
-        frames_in_window = actual_end - window_start + 1
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_input:
+            tmp_input.write(video_bytes)
+            tmp_input.flush()
+            input_video_path = tmp_input.name
+            video_info = get_video_metadata(input_video_path)
+            original_fps = video_info["fps"]
+            total_frames = video_info["total_frames"]
 
-        if self.num_video_frames == -1:
-            # Native chunk mode: use start/end/interval directly from the window
-            if self.use_multi_fps:
-                # 多 fps：temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
-                temporal_interval = random.choice(_MULTI_FPS_INTERVALS)
-            else:
-                temporal_interval = t2w_window["temporal_interval"]
-            start_frame = window_start
-            end_frame = actual_end
-        else:
-            if frames_in_window < self.num_video_frames:
-                log.warning(
-                    f"Not enough frames in window: {metadata['uuid']}, "
-                    f"frames_in_window: {frames_in_window}, required: {self.num_video_frames}"
-                )
-                return None
+            # Constrain to the t2w window
+            actual_end = min(window_end, total_frames - 1)
+            frames_in_window = actual_end - window_start + 1
 
-            # Compute temporal interval
-            if self.temporal_interval_mode == "force_one":
-                temporal_interval = 1
-            elif self.temporal_interval_mode == "max_30fps":
-                temporal_interval = max(1, int(original_fps / 30.0))
-            elif self.temporal_interval_mode == "entire_chunk":
-                temporal_interval = frames_in_window // self.num_video_frames
-                temporal_interval = max(1, temporal_interval)
-            else:
-                raise ValueError(f"Unknown temporal_interval_mode: {self.temporal_interval_mode}")
-
-            num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
-
-            # 【防御】抽帧跨度超过窗口时，end_frame 会越界（读到相邻 episode 的帧）。
-            # force_one/max_30fps（或将来加的 max_15fps）在 interval>1 时可能触发；
-            # entire_chunk 因 interval 由 frames_in_window//N 推导，几乎不会触发，此检查对其无害。
-            # 注意：JSONL 版 sft_dataset.py 的 process_one_sample 目前【未加】此防御，仍可能有同样问题。
-            if num_frames_before_downsample > frames_in_window:
-                log.warning(
-                    f"Window too short for interval={temporal_interval}: {metadata['uuid']}, "
-                    f"frames_in_window={frames_in_window}, required span={num_frames_before_downsample}"
-                )
-                return None
-
-            if self.frame_selection_mode == "first":
+            if self.num_video_frames == -1:
+                # Native chunk mode: use start/end/interval directly from the window
+                if self.use_multi_fps:
+                    # 多 fps：temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
+                    temporal_interval = random.choice(_MULTI_FPS_INTERVALS)
+                else:
+                    temporal_interval = t2w_window["temporal_interval"]
                 start_frame = window_start
-            elif self.frame_selection_mode == "center":
-                start_frame = window_start + (frames_in_window - num_frames_before_downsample) // 2
-            elif self.frame_selection_mode == "random":
-                max_offset = frames_in_window - num_frames_before_downsample
-                start_frame = window_start + random.randint(0, max(0, max_offset))
+                end_frame = actual_end
             else:
-                raise ValueError(f"Unknown frame_selection_mode: {self.frame_selection_mode}")
-            end_frame = start_frame + num_frames_before_downsample - 1
+                if frames_in_window < self.num_video_frames:
+                    log.warning(
+                        f"Not enough frames in window: {metadata['uuid']}, "
+                        f"frames_in_window: {frames_in_window}, required: {self.num_video_frames}"
+                    )
+                    return None
 
-        fps = original_fps / temporal_interval
+                # Compute temporal interval
+                if self.temporal_interval_mode == "force_one":
+                    temporal_interval = 1
+                elif self.temporal_interval_mode == "max_30fps":
+                    temporal_interval = max(1, int(original_fps / 30.0))
+                elif self.temporal_interval_mode == "entire_chunk":
+                    temporal_interval = frames_in_window // self.num_video_frames
+                    temporal_interval = max(1, temporal_interval)
+                else:
+                    raise ValueError(f"Unknown temporal_interval_mode: {self.temporal_interval_mode}")
 
-        # 【LeRobot 差异】torchcodec 区间 seek 替代父类全量 ffmpeg decode
-        video_chunk = self._decode_video_frames(
-            video_path=input_video_path,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            temporal_interval=temporal_interval,
-            resize_h=resize_h,
-            resize_w=resize_w,
-        )
+                num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
+
+                # 【防御】抽帧跨度超过窗口时，end_frame 会越界（读到相邻 episode 的帧）。
+                # force_one/max_30fps（或将来加的 max_15fps）在 interval>1 时可能触发；
+                # entire_chunk 因 interval 由 frames_in_window//N 推导，几乎不会触发，此检查对其无害。
+                # 注意：JSONL 版 sft_dataset.py 的 process_one_sample 目前【未加】此防御，仍可能有同样问题。
+                if num_frames_before_downsample > frames_in_window:
+                    log.warning(
+                        f"Window too short for interval={temporal_interval}: {metadata['uuid']}, "
+                        f"frames_in_window={frames_in_window}, required span={num_frames_before_downsample}"
+                    )
+                    return None
+
+                if self.frame_selection_mode == "first":
+                    start_frame = window_start
+                elif self.frame_selection_mode == "center":
+                    start_frame = window_start + (frames_in_window - num_frames_before_downsample) // 2
+                elif self.frame_selection_mode == "random":
+                    max_offset = frames_in_window - num_frames_before_downsample
+                    start_frame = window_start + random.randint(0, max(0, max_offset))
+                else:
+                    raise ValueError(f"Unknown frame_selection_mode: {self.frame_selection_mode}")
+                end_frame = start_frame + num_frames_before_downsample - 1
+
+            fps = original_fps / temporal_interval
+
+            # 【对齐原版】ffmpeg 全量解码 + 按帧区间过滤（替代 torchcodec 区间 seek）
+            video_chunk = []
+            for idx, frame in enumerate(
+                ffmpeg_decode_video(input_video_path, scale_hw=(resize_h, resize_w), num_threads=2)
+            ):
+                if idx < start_frame:
+                    continue
+                elif idx <= end_frame:
+                    if (idx - start_frame) % temporal_interval == 0:
+                        video_chunk.append(frame)
+                else:
+                    break
 
         if not video_chunk:
             log.warning(
@@ -697,7 +605,6 @@ def get_sft_dataset_from_lerobot(
     video_feature_key: str | None = None,
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
-    decoder_cache_max_size: int = 64,
     **kwargs,
 ) -> LeRobotSFTDataset:
     """LeRobot 版 get_sft_dataset，动态加载 LeRobot 数据集。
@@ -778,6 +685,5 @@ def get_sft_dataset_from_lerobot(
         conditioning_fps_noise_std=conditioning_fps_noise_std,
         conditioning_config=conditioning_config,
         temporal_compression_factor=temporal_compression_factor,
-        decoder_cache_max_size=decoder_cache_max_size,
     )
     return dataset
