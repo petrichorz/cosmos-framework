@@ -430,7 +430,7 @@ class LeRobotEpisodeSFTDataset(SFTDataset):
 
 def get_lerobot_episode_sft_dataset(
     roots: str | os.PathLike[str] | list[str | os.PathLike[str]],
-    resolution: str = "480",
+    resolution: str | int = "480",
     tokenizer_config: Optional[Any] = None,
     metadata_load_workers: int = 8,
     video_view: str = "head",
@@ -453,6 +453,9 @@ def get_lerobot_episode_sft_dataset(
     **kwargs,
 ) -> LeRobotEpisodeSFTDataset:
     """Create a standard causal vision-SFT dataset from local LeRobot v3 roots."""
+    # Hydra parses numeric-looking TOML strings such as ``"256"`` as integers
+    # when emitting dotted overrides. VIDEO_RES_SIZE_INFO uses string keys.
+    resolution = str(resolution)
     if kwargs:
         log.info(f"Unknown kwargs for get_lerobot_episode_sft_dataset: {kwargs}")
     if resolution not in VIDEO_RES_SIZE_INFO:
