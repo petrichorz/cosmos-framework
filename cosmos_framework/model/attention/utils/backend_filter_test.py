@@ -247,6 +247,9 @@ class TestBackendListOrdering(unittest.TestCase):
         # Below minimum supported arch -> empty.
         assert get_backend_list(74) == []
 
+        # Non-CUDA devices try the packed Ascend backend, then portable SDPA.
+        assert get_backend_list(0) == ["npu_fusion_attention", "sdpa"]
+
         # 75 <= arch < 80 -> NATTEN only.
         assert get_backend_list(75) == ["natten"]
         assert get_backend_list(79) == ["natten"]
