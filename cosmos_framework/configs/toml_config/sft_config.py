@@ -374,7 +374,17 @@ class ModelConfig(BaseModel):
     )
     teacher_forcing_block_shape: tuple[int, int] = Field(
         default=(128, 128),
-        description="Q/KV tile shape for the opt-in block-attention backend.",
+        description=(
+            "Preferred maximum Q/KV tile shape for the opt-in block-attention backend. Runtime "
+            "selection may reduce Q to 64/32 and KV to 64 to match the actual token shape."
+        ),
+    )
+    teacher_forcing_block_shape_mode: Literal["auto", "fixed"] = Field(
+        default="auto",
+        description=(
+            "BSA tile selection mode. auto reduces teacher_forcing_block_shape to match the current "
+            "batch token shape; fixed uses the configured shape exactly."
+        ),
     )
     teacher_forcing_block_strict: bool = Field(
         default=False,

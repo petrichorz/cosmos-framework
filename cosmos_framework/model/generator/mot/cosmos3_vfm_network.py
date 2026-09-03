@@ -28,6 +28,9 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
 )
 from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAwareLinear
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
+from cosmos_framework.model.generator.mot.teacher_forcing_block_attention import (
+    validate_teacher_forcing_block_shape,
+)
 from cosmos_framework.model.generator.utils.memory import MemoryState
 from cosmos_framework.utils import log
 
@@ -64,6 +67,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         teacher_forcing_dense_mode: str = "global",
         teacher_forcing_attention_backend: str = "masked_sdpa",
         teacher_forcing_block_shape: tuple[int, int] = (128, 128),
+        teacher_forcing_block_shape_mode: str = "auto",
         teacher_forcing_block_strict: bool = False,
         teacher_forcing_visualize_sdpa_mask: bool = False,
         # Sound generation parameters
@@ -110,10 +114,15 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
                 "teacher_forcing_attention_backend must be 'masked_sdpa' or 'block_attention', "
                 f"got {teacher_forcing_attention_backend!r}"
             )
-        if tuple(teacher_forcing_block_shape) != (128, 128):
-            raise ValueError(f"teacher_forcing_block_shape must be (128, 128), got {teacher_forcing_block_shape}")
+        teacher_forcing_block_shape = validate_teacher_forcing_block_shape(tuple(teacher_forcing_block_shape))
+        if teacher_forcing_block_shape_mode not in {"auto", "fixed"}:
+            raise ValueError(
+                "teacher_forcing_block_shape_mode must be 'auto' or 'fixed', "
+                f"got {teacher_forcing_block_shape_mode!r}"
+            )
         self.teacher_forcing_attention_backend = teacher_forcing_attention_backend
-        self.teacher_forcing_block_shape = tuple(teacher_forcing_block_shape)
+        self.teacher_forcing_block_shape = teacher_forcing_block_shape
+        self.teacher_forcing_block_shape_mode = teacher_forcing_block_shape_mode
         self.teacher_forcing_block_strict = teacher_forcing_block_strict
         self.teacher_forcing_visualize_sdpa_mask = teacher_forcing_visualize_sdpa_mask
         self.enable_input_bias = enable_input_bias
@@ -1097,6 +1106,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
             teacher_forcing_attention_backend=self.config.teacher_forcing_attention_backend,
             teacher_forcing_block_shape=self.config.teacher_forcing_block_shape,
+            teacher_forcing_block_shape_mode=self.config.teacher_forcing_block_shape_mode,
             teacher_forcing_block_strict=self.config.teacher_forcing_block_strict,
         )
         if (

@@ -225,6 +225,7 @@ class OmniMoTModel(ImaginaireModel):
                 teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
                 teacher_forcing_attention_backend=self.config.teacher_forcing_attention_backend,
                 teacher_forcing_block_shape=self.config.teacher_forcing_block_shape,
+                teacher_forcing_block_shape_mode=self.config.teacher_forcing_block_shape_mode,
                 teacher_forcing_block_strict=self.config.teacher_forcing_block_strict,
                 teacher_forcing_visualize_sdpa_mask=self.config.teacher_forcing_visualize_sdpa_mask,
                 # Sound generation parameters

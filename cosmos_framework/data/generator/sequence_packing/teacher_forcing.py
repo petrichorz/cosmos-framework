@@ -31,6 +31,7 @@ class TeacherForcingLayout:
 
     block_size: int
     history_blocks: int
+    spatial_token_counts: tuple[int, ...]
     original_sample_lens: tuple[int, ...]
     sample_lens: tuple[int, ...]
     split_lens: tuple[int, ...]
@@ -123,6 +124,7 @@ def build_teacher_forcing_layout(
         raise ValueError(f"history_blocks must be >= 1, got {history_blocks}")
 
     original_sample_lens: list[int] = []
+    spatial_token_counts: list[int] = []
     sample_lens: list[int] = []
     split_lens: list[int] = []
     attn_modes: list[str] = []
@@ -146,6 +148,7 @@ def build_teacher_forcing_layout(
             raise ValueError(f"vision_token_shapes[{sample_id}] must be positive, got {vision_shape}")
 
         spatial_tokens = height * width
+        spatial_token_counts.append(spatial_tokens)
         vision_count = num_frames * spatial_tokens
         original_sample_len = und_count + vision_count
         new_sample_len = und_count + 2 * vision_count
@@ -181,6 +184,7 @@ def build_teacher_forcing_layout(
     return TeacherForcingLayout(
         block_size=block_size,
         history_blocks=history_blocks,
+        spatial_token_counts=tuple(spatial_token_counts),
         original_sample_lens=tuple(original_sample_lens),
         sample_lens=tuple(sample_lens),
         split_lens=tuple(split_lens),

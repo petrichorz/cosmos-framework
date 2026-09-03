@@ -93,6 +93,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "teacher_forcing_dense_mode"): None,
         ("model", "teacher_forcing_attention_backend"): None,
         ("model", "teacher_forcing_block_shape"): None,
+        ("model", "teacher_forcing_block_shape_mode"): None,
         ("model", "teacher_forcing_block_strict"): None,
         ("model", "teacher_forcing_visualize_sdpa_mask"): None,
         ("model", "lora_enabled"): None,

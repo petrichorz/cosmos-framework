@@ -12,6 +12,9 @@ from cosmos_framework.data.generator.sequence_packing import (
     expand_packed_sequence_for_teacher_forcing,
     sample_teacher_forcing_parameters,
 )
+from cosmos_framework.model.generator.mot.teacher_forcing_block_attention import (
+    validate_teacher_forcing_block_shape,
+)
 
 
 class _ParallelismConfig(Protocol):
@@ -32,6 +35,7 @@ class TeacherForcingConfig(Protocol):
     teacher_forcing_dense_mode: str
     teacher_forcing_attention_backend: str
     teacher_forcing_block_shape: tuple[int, int]
+    teacher_forcing_block_shape_mode: str
     teacher_forcing_block_strict: bool
     parallelism: _ParallelismConfig
 
@@ -81,10 +85,11 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
             "teacher_forcing_attention_backend must be 'masked_sdpa' or 'block_attention', "
             f"got {config.teacher_forcing_attention_backend!r}"
         )
-    if tuple(config.teacher_forcing_block_shape) != (128, 128):
+    validate_teacher_forcing_block_shape(tuple(config.teacher_forcing_block_shape))
+    if config.teacher_forcing_block_shape_mode not in {"auto", "fixed"}:
         raise ValueError(
-            "teacher_forcing_block_shape must be (128, 128) for the first block-attention implementation, "
-            f"got {config.teacher_forcing_block_shape}"
+            "teacher_forcing_block_shape_mode must be 'auto' or 'fixed', "
+            f"got {config.teacher_forcing_block_shape_mode!r}"
         )
 
 

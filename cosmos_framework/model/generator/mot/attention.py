@@ -25,6 +25,8 @@ from cosmos_framework.model.generator.mot.teacher_forcing_block_attention import
     build_teacher_forcing_block_metadata,
     build_teacher_forcing_block_sparse_mask,
     build_teacher_forcing_kv_permutation,
+    select_teacher_forcing_block_shape,
+    validate_teacher_forcing_block_shape,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
@@ -724,6 +726,7 @@ def build_packed_sequence(
     teacher_forcing_dense_mode: str = "global",
     teacher_forcing_attention_backend: str = "masked_sdpa",
     teacher_forcing_block_shape: tuple[int, int] = (128, 128),
+    teacher_forcing_block_shape_mode: str = "auto",
     teacher_forcing_block_strict: bool = False,
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
@@ -753,6 +756,11 @@ def build_packed_sequence(
             )
         if teacher_forcing_attention_backend not in {"masked_sdpa", "block_attention"}:
             raise ValueError(f"Unsupported teacher-forcing attention backend: {teacher_forcing_attention_backend!r}")
+        if teacher_forcing_block_shape_mode not in {"auto", "fixed"}:
+            raise ValueError(
+                "teacher_forcing_block_shape_mode must be 'auto' or 'fixed', "
+                f"got {teacher_forcing_block_shape_mode!r}"
+            )
 
         selected_backend = teacher_forcing_attention_backend
         fallback_reason: str | None = None
@@ -769,16 +777,25 @@ def build_packed_sequence(
                 eligibility_failures.append(f"training head_dim must be 128, got {head_dim}")
             if cp_world_size != 1:
                 eligibility_failures.append(f"context parallel world size must be 1, got {cp_world_size}")
-            if tuple(teacher_forcing_block_shape) != (128, 128):
-                eligibility_failures.append(f"block shape must be (128, 128), got {teacher_forcing_block_shape}")
+            try:
+                validate_teacher_forcing_block_shape(tuple(teacher_forcing_block_shape))
+            except ValueError as error:
+                eligibility_failures.append(str(error))
             if not eligibility_failures:
                 block_layout = teacher_forcing_layout.to(device)
                 try:
                     block_permutation = build_teacher_forcing_kv_permutation(block_layout)
+                    selected_block_shape = tuple(teacher_forcing_block_shape)
+                    if teacher_forcing_block_shape_mode == "auto":
+                        selected_block_shape = select_teacher_forcing_block_shape(
+                            block_layout,
+                            block_permutation,
+                            preferred_block_shape=selected_block_shape,
+                        )
                     block_metadata = build_teacher_forcing_block_metadata(
                         block_layout,
                         block_permutation,
-                        block_shape=tuple(teacher_forcing_block_shape),
+                        block_shape=selected_block_shape,
                     )
                     block_sparse_mask = build_teacher_forcing_block_sparse_mask(
                         block_metadata,

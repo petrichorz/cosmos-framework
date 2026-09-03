@@ -55,6 +55,100 @@ class TeacherForcingBlockMetadata:
     kv_tile_block_ids: tuple[torch.LongTensor, ...]
 
 
+def validate_teacher_forcing_block_shape(block_shape: tuple[int, int]) -> tuple[int, int]:
+    """Validate a teacher-forcing Q/KV tile shape supported by Block Attention."""
+
+    shape = tuple(block_shape)
+    if len(shape) != 2 or any(not isinstance(size, int) or size <= 0 for size in shape):
+        raise ValueError(f"teacher_forcing_block_shape must contain two positive integers, got {block_shape}")
+    if shape[0] % 16 != 0:
+        raise ValueError(
+            "teacher_forcing_block_shape Q tile size must be a multiple of 16, "
+            f"got {shape[0]}"
+        )
+    if shape[1] % 64 != 0:
+        raise ValueError(
+            "teacher_forcing_block_shape KV tile size must be a multiple of 64, "
+            f"got {shape[1]}"
+        )
+    return shape
+
+
+def _homogeneous_run_lengths(stream_ids: torch.Tensor, block_ids: torch.Tensor) -> tuple[int, ...]:
+    """Return lengths of contiguous regions sharing stream and logical-block IDs."""
+
+    if stream_ids.numel() == 0 or block_ids.numel() != stream_ids.numel():
+        raise ValueError("teacher-forcing stream/block metadata must be non-empty and have equal lengths")
+    changes = torch.nonzero(
+        (stream_ids[1:] != stream_ids[:-1]) | (block_ids[1:] != block_ids[:-1]),
+        as_tuple=True,
+    )[0]
+    boundaries = [0, *(int(index) + 1 for index in changes.tolist()), stream_ids.numel()]
+    return tuple(boundaries[index + 1] - boundaries[index] for index in range(len(boundaries) - 1))
+
+
+def select_teacher_forcing_block_shape(
+    layout: TeacherForcingLayout,
+    permutation: TeacherForcingKVPermutation,
+    *,
+    preferred_block_shape: tuple[int, int] = (128, 128),
+) -> tuple[int, int]:
+    """Select the largest exact BSA tiles supported by the current batch geometry.
+
+    The configured shape is an upper bound. Q tiles may shrink to 64 or 32 and
+    KV tiles may shrink to 64 so a tile never spans two semantic regions. The
+    final reordered UND tail may be partial because BSA accepts a KV tail tile.
+    """
+
+    preferred_q, preferred_kv = validate_teacher_forcing_block_shape(preferred_block_shape)
+    if permutation.sample_lens != layout.sample_lens:
+        raise ValueError("teacher-forcing permutation and layout sample lengths must match")
+    if len(layout.spatial_token_counts) != len(layout.sample_lens):
+        raise ValueError("teacher-forcing spatial token metadata must contain one entry per sample")
+
+    min_spatial_tokens = min(layout.spatial_token_counts)
+    preferred_q = min(preferred_q, min_spatial_tokens)
+    preferred_kv = min(preferred_kv, max(64, min_spatial_tokens))
+
+    q_stream_ids = layout.stream_ids.index_select(0, layout.gen_query_indexes)
+    q_block_ids = layout.block_ids.index_select(0, layout.gen_query_indexes)
+    kv_stream_ids = layout.stream_ids.index_select(0, permutation.forward_indices)
+    kv_block_ids = layout.block_ids.index_select(0, permutation.forward_indices)
+
+    q_required_lengths: list[int] = []
+    kv_required_lengths: list[int] = []
+    q_offset = 0
+    kv_offset = 0
+    for q_len, kv_len in zip(layout.split_lens[1::2], layout.sample_lens, strict=True):
+        q_runs = _homogeneous_run_lengths(
+            q_stream_ids[q_offset : q_offset + q_len],
+            q_block_ids[q_offset : q_offset + q_len],
+        )
+        kv_runs = _homogeneous_run_lengths(
+            kv_stream_ids[kv_offset : kv_offset + kv_len],
+            kv_block_ids[kv_offset : kv_offset + kv_len],
+        )
+        q_required_lengths.extend(q_runs)
+        # Only the final UND region is allowed to form a partial KV tail tile.
+        kv_required_lengths.extend(kv_runs[:-1])
+        q_offset += q_len
+        kv_offset += kv_len
+
+    q_candidates = tuple(size for size in (128, 64, 32) if size <= preferred_q)
+    kv_candidates = tuple(size for size in (128, 64) if size <= preferred_kv)
+    selected_q = next((size for size in q_candidates if all(length % size == 0 for length in q_required_lengths)), None)
+    selected_kv = next(
+        (size for size in kv_candidates if all(length % size == 0 for length in kv_required_lengths)),
+        None,
+    )
+    if selected_q is None or selected_kv is None:
+        raise ValueError(
+            "teacher-forcing token shape cannot be represented by supported BSA block sizes "
+            f"Q={q_candidates}, KV={kv_candidates}"
+        )
+    return selected_q, selected_kv
+
+
 def build_teacher_forcing_kv_permutation(layout: TeacherForcingLayout) -> TeacherForcingKVPermutation:
     """Build a sample-local ``UND,clean,noisy -> clean,noisy,UND`` permutation."""
 
@@ -203,8 +297,7 @@ def build_teacher_forcing_block_metadata(
 ) -> TeacherForcingBlockMetadata:
     """Build exact tile metadata without constructing an O(Q*KV) dense mask."""
 
-    if block_shape != (128, 128):
-        raise ValueError(f"teacher-forcing Phase 2 requires block_shape=(128, 128), got {block_shape}")
+    block_shape = validate_teacher_forcing_block_shape(block_shape)
     if permutation.sample_lens != layout.sample_lens:
         raise ValueError("teacher-forcing permutation and layout sample lengths must match")
 

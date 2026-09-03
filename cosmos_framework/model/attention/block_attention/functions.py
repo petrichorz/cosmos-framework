@@ -22,9 +22,12 @@ def _as_list_of_positive_ints(value: object, name: str) -> list[int]:
 
 
 def _validate_block_shape(block_shape: list[int]) -> None:
+    block_size_x = block_shape[0]
     block_size_y = block_shape[1]
-    if block_size_y % 128 != 0:
-        raise ValueError(f"block_attention requires block_shape[1] to be a multiple of 128, got {block_size_y}")
+    if block_size_x % 16 != 0:
+        raise ValueError(f"block_attention requires block_shape[0] to be a multiple of 16, got {block_size_x}")
+    if block_size_y % 64 != 0:
+        raise ValueError(f"block_attention requires block_shape[1] to be a multiple of 64, got {block_size_y}")
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:
@@ -99,8 +102,8 @@ def block_attention(
 
     Required ``backend_kwargs``:
         block_sparse_mask: uint8 tensor ``[batch, heads, ceil_q, ceil_kv]``.
-        block_shape: ``[block_shape_x, block_shape_y]``. ``block_shape_y`` must be
-            a multiple of 128.
+        block_shape: ``[block_shape_x, block_shape_y]``. The Q/KV sizes must be
+            multiples of 16 and 64 respectively.
 
     Optional ``backend_kwargs``:
         inner_precise: 0 (float32 softmax) or 1 (float16 softmax).

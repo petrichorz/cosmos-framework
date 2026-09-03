@@ -256,6 +256,10 @@ class OmniMoTModelConfig:
         validator=attrs.validators.in_({"masked_sdpa", "block_attention"}),
     )
     teacher_forcing_block_shape: tuple[int, int] = (128, 128)
+    teacher_forcing_block_shape_mode: str = attrs.field(
+        default="auto",
+        validator=attrs.validators.in_({"auto", "fixed"}),
+    )
     teacher_forcing_block_strict: bool = False
     # Rank 0 saves one compact block-level visualization of the complete
     # attention pattern: causal UND plus the bool mask used by GEN SDPA.
