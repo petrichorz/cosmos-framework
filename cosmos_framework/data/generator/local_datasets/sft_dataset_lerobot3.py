@@ -164,8 +164,16 @@ def _load_single_lerobot_metadata(
         video_chunk = int(row.get(f"videos/{video_key}/chunk_index", 0))
         video_file = int(row.get(f"videos/{video_key}/file_index", 0))
 
-        # caption：只读 episodes 表新增的 caption 列（列名由 caption_key 指定），取不到为 None。
+        # Prefer the configured caption column.  Official LeRobot v3 datasets
+        # (including nvidia/LIBERO_LeRobot_v3) store the natural-language task
+        # as a one-element ``tasks`` array instead of a scalar ``caption``.
+        # Accept that representation so the stock dataset does not silently
+        # skip every episode.
         caption = row.get(caption_key)
+        if caption is None and caption_key == "caption":
+            caption = row.get("tasks")
+        if isinstance(caption, (list, tuple, np.ndarray)):
+            caption = next((str(item).strip() for item in caption if str(item).strip()), None)
 
         length = int(row.get("length", end_frame - start_frame + 1))
         duration = to_ts - from_ts
