@@ -24,9 +24,9 @@ try:
 except ImportError:
     USE_MEGATRON = False
 
+from cosmos_framework.utils import distributed
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
-from cosmos_framework.utils import distributed
 from cosmos_framework.utils.misc import Color
 
 T = TypeVar("T")
@@ -385,24 +385,30 @@ class StragglerDetectionConfig:
 @make_freezable
 @attrs.define(slots=False)
 class Profiling:
-    # Torch profiler: set this True to dump chrome traces.
+    # NPU-only profiler: set this True to dump Ascend traces.
     enable_profiling: bool = False
     # Nsight Systems: set this True AND launch under `nsys profile --capture-range=cudaProfilerApi`.
     enable_nsys: bool = False
     # CUDA memory snapshot: set this True to dump allocator snapshots.
     enable_memory_snapshot: bool = False
     save_s3: bool = False
+    # Frequency used by the legacy CUDA memory snapshot and Nsight integrations.
     profile_freq: int = 1
-    # Number of warmup iterations before the active profile iteration.
-    profile_warmup: int = 3
-    # Target ranks for profiling, each entry must be >=0 and < world_size.
-    target_ranks: list[int] = list(range(8))
-    # The options below apply only to the torch profiler (enable_profiling).
+    # torch_npu profiler schedule. One cycle is wait + warmup + active steps.
+    profile_wait: int = 1
+    profile_warmup: int = 2
+    profile_active: int = 3
+    profile_repeat: int = 1
+    profile_skip_first: int = 0
+    # Only listed ranks collect traces. Ranks absent from the current world are ignored.
+    target_ranks: list[int] = attrs.field(factory=lambda: [0])
+    # The options below apply only to the torch_npu profiler (enable_profiling).
     # Set `record_shape` and `profile_memory` to False to reduce profile size.
     record_shape: bool = False
     profile_memory: bool = False
-    with_stack: bool = True
-    with_modules: bool = True
+    with_stack: bool = False
+    with_modules: bool = False
+    with_flops: bool = False
 
 
 @make_freezable

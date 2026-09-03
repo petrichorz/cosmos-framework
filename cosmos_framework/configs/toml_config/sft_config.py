@@ -640,6 +640,25 @@ class TrainerCallbacksConfig(BaseModel):
     grad_clip: GradClipCallback = Field(default_factory=GradClipCallback)
 
 
+class NPUProfilingConfig(BaseModel):
+    """Ascend profiler controls exposed by the structured SFT TOML."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    enable_profiling: bool = False
+    profile_wait: int = Field(default=1, ge=0)
+    profile_warmup: int = Field(default=2, ge=0)
+    profile_active: int = Field(default=3, ge=1)
+    profile_repeat: int = Field(default=1, ge=1)
+    profile_skip_first: int = Field(default=0, ge=0)
+    target_ranks: list[int] = Field(default_factory=lambda: [0], min_length=1)
+    record_shape: bool = False
+    profile_memory: bool = False
+    with_stack: bool = False
+    with_modules: bool = False
+    with_flops: bool = False
+
+
 class TrainerConfig(BaseModel):
     """Trainer-level knobs that the TOML drives directly."""
 
@@ -668,6 +687,7 @@ class TrainerConfig(BaseModel):
         default=500,
         description="Total number of optimizer steps the run will execute.",
     )
+    profiling: NPUProfilingConfig = Field(default_factory=NPUProfilingConfig)
     callbacks: TrainerCallbacksConfig = Field(default_factory=TrainerCallbacksConfig)
 
 

@@ -11,9 +11,13 @@ import torch
 import torch.distributed as dist
 import torch.utils.data
 
-from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.context_managers import distributed_init
-from cosmos_framework.utils.profiling import maybe_enable_memory_snapshot, maybe_enable_nsys_profiling, maybe_enable_profiling
+from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_npu_profiling,
+    maybe_enable_nsys_profiling,
+)
 
 try:
     from megatron.core import parallel_state
@@ -23,12 +27,11 @@ except ImportError:
     USE_MEGATRON = False
 
 
-from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import callback, distributed, ema, log, misc
 from cosmos_framework.utils.checkpointer import Checkpointer
+from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.utils.misc import StragglerDetectorV2
-
 
 
 class ImaginaireTrainer:
@@ -247,7 +250,7 @@ class ImaginaireTrainer:
             # regardless of how much RNG state init consumed.
             misc.set_random_seed(seed=self.config.trainer.seed, by_rank=True)
         with (
-            maybe_enable_profiling(self.config, global_step=iteration) as torch_profiler,
+            maybe_enable_npu_profiling(self.config, global_step=iteration) as profiler,
             maybe_enable_memory_snapshot(self.config, global_step=iteration) as memory_profiler,
             maybe_enable_nsys_profiling(self.config, global_step=iteration) as nsys_profiler,
         ):
@@ -315,8 +318,8 @@ class ImaginaireTrainer:
                     # This iteration is successful; reset the timeout signal.
                     signal.alarm(self.config.trainer.timeout_period)
                     self.straggler_detector.generate_report(iteration)
-                    if torch_profiler:
-                        torch_profiler.step()
+                    if profiler:
+                        profiler.step()
                     if memory_profiler:
                         memory_profiler.step()
                     if nsys_profiler:
@@ -364,7 +367,7 @@ class ImaginaireTrainer:
         # Only let DDP sync gradient at the last iteration of the gradient accumulation window
         with distributed.ddp_sync_grad(model_ddp, grad_accum_iter == self.config.trainer.grad_accum_iter - 1):
             self.callbacks.on_before_forward(iteration=iteration)
-            with self.training_timer("forward"):
+            with self.training_timer("forward"), torch.autograd.profiler.record_function("cosmos::forward"):
                 with self.straggler_detector.profile_section(
                     "fwd", self.config.trainer.straggler_detection.analyze_forward
                 ):
@@ -372,7 +375,7 @@ class ImaginaireTrainer:
             self.callbacks.on_after_forward(iteration=iteration)
             model = model_ddp.module if self.config.trainer.distributed_parallelism == "ddp" else model_ddp
             self.callbacks.on_before_backward(model, loss, iteration=iteration)
-            with self.training_timer("backward"):
+            with self.training_timer("backward"), torch.autograd.profiler.record_function("cosmos::backward"):
                 with self.straggler_detector.profile_section(
                     "bwd", self.config.trainer.straggler_detection.analyze_backward
                 ):
@@ -382,7 +385,7 @@ class ImaginaireTrainer:
             self.callbacks.on_after_backward(model, iteration=iteration)
         grad_accum_iter += 1
         if grad_accum_iter == self.config.trainer.grad_accum_iter:
-            with self.training_timer("optimizer_step"):
+            with self.training_timer("optimizer_step"), torch.autograd.profiler.record_function("cosmos::optimizer"):
                 with self.straggler_detector.profile_section(
                     "opt", self.config.trainer.straggler_detection.analyze_optimizer
                 ):

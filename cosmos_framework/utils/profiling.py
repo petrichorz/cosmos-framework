@@ -18,56 +18,99 @@ MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 
 @contextlib.contextmanager
-def maybe_enable_profiling(config, *, global_step: int = 0):
-    # get user defined profiler settings
-    enable_profiling = config.trainer.profiling.enable_profiling
-    profile_freq = config.trainer.profiling.profile_freq
+def maybe_enable_npu_profiling(config, *, global_step: int = 0):
+    """Collect an Ascend trace on selected ranks when NPU profiling is enabled."""
 
-    if enable_profiling:
-        trace_dir = os.path.join(config.job.path_local, "torch_trace")
-        if distributed.get_rank() == 0:
-            os.makedirs(trace_dir, exist_ok=True)
-
-        rank = distributed.get_rank()
-
-        def trace_handler(prof):
-            curr_trace_dir_name = "iteration_" + str(prof.step_num)
-            curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
-            if not os.path.exists(curr_trace_dir):
-                os.makedirs(curr_trace_dir, exist_ok=True)
-
-            log.info(f"Dumping traces at step {prof.step_num}")
-            begin = time.monotonic()
-            if rank in config.trainer.profiling.target_ranks:
-                prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json.gz")
-            log.info(f"Finished dumping traces in {time.monotonic() - begin:.2f} seconds")
-
-        log.info(f"Profiling active. Traces will be saved at {trace_dir}")
-
-        if not os.path.exists(trace_dir):
-            os.makedirs(trace_dir, exist_ok=True)
-
-        warmup, active = config.trainer.profiling.profile_warmup, 1
-        wait = profile_freq - (active + warmup)
-        assert wait >= 0, "profile_freq must be greater than or equal to warmup + active"
-
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
-            on_trace_ready=trace_handler,
-            record_shapes=config.trainer.profiling.record_shape,
-            profile_memory=config.trainer.profiling.profile_memory,
-            with_stack=config.trainer.profiling.with_stack,
-            with_modules=config.trainer.profiling.with_modules,
-        ) as torch_profiler:
-            torch_profiler.step_num = global_step
-            yield torch_profiler
-    else:
-        torch_profiler = contextlib.nullcontext()
+    profiling = config.trainer.profiling
+    if not profiling.enable_profiling:
         yield None
+        return
+
+    _validate_npu_profiling_config(profiling)
+    rank = distributed.get_rank()
+    if rank not in profiling.target_ranks:
+        yield None
+        return
+
+    try:
+        import torch_npu
+    except ImportError as error:
+        raise RuntimeError("NPU profiling requires torch_npu to be installed") from error
+    if not torch_npu.npu.is_available():
+        raise RuntimeError("NPU profiling is enabled, but no Ascend NPU is available")
+
+    trace_dir = os.path.join(config.job.path_local, "npu_trace")
+    rank_trace_dir = os.path.join(trace_dir, f"rank{rank}")
+    os.makedirs(rank_trace_dir, exist_ok=True)
+    trace_handler = torch_npu.profiler.tensorboard_trace_handler(
+        rank_trace_dir,
+        worker_name=f"rank{rank}",
+        analyse_flag=False,
+    )
+
+    def on_trace_ready(prof):
+        absolute_step = global_step + prof.step_num
+        log.info(f"Dumping NPU profiler trace for rank {rank} at step {absolute_step}")
+        begin = time.monotonic()
+        trace_handler(prof)
+        log.info(f"Finished dumping NPU profiler trace in {time.monotonic() - begin:.2f} seconds")
+
+    log.info(f"NPU profiling active on rank {rank}. Traces will be saved at {rank_trace_dir}")
+
+    npu_profiler = torch_npu.profiler.profile(
+        activities=[
+            torch_npu.profiler.ProfilerActivity.CPU,
+            torch_npu.profiler.ProfilerActivity.NPU,
+        ],
+        schedule=torch_npu.profiler.schedule(
+            wait=profiling.profile_wait,
+            warmup=profiling.profile_warmup,
+            active=profiling.profile_active,
+            repeat=profiling.profile_repeat,
+            skip_first=profiling.profile_skip_first,
+        ),
+        on_trace_ready=on_trace_ready,
+        record_shapes=profiling.record_shape,
+        profile_memory=profiling.profile_memory,
+        with_stack=profiling.with_stack,
+        with_modules=profiling.with_modules,
+        with_flops=profiling.with_flops,
+        experimental_config=torch_npu.profiler._ExperimentalConfig(
+            profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+        ),
+    )
+    # Keep the schedule relative to this invocation while labeling trace steps
+    # with the resumed training iteration.
+    npu_profiler._step_num_offset = global_step
+    with npu_profiler:
+        yield npu_profiler
+
+
+def _validate_npu_profiling_config(profiling) -> None:
+    """Validate schedule and rank settings before constructing torch_npu profiler."""
+
+    non_negative = {
+        "profile_wait": profiling.profile_wait,
+        "profile_warmup": profiling.profile_warmup,
+        "profile_skip_first": profiling.profile_skip_first,
+    }
+    for name, value in non_negative.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"trainer.profiling.{name} must be a non-negative integer, got {value!r}")
+    positive = {
+        "profile_active": profiling.profile_active,
+        "profile_repeat": profiling.profile_repeat,
+    }
+    for name, value in positive.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"trainer.profiling.{name} must be a positive integer, got {value!r}")
+    target_ranks = profiling.target_ranks
+    if not isinstance(target_ranks, list) or not target_ranks:
+        raise ValueError("trainer.profiling.target_ranks must be a non-empty list")
+    if any(not isinstance(rank, int) or isinstance(rank, bool) or rank < 0 for rank in target_ranks):
+        raise ValueError(f"trainer.profiling.target_ranks must contain non-negative integers, got {target_ranks!r}")
+    if len(set(target_ranks)) != len(target_ranks):
+        raise ValueError(f"trainer.profiling.target_ranks must not contain duplicates, got {target_ranks!r}")
 
 
 @contextlib.contextmanager
