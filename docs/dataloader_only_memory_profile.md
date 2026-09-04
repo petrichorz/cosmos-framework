@@ -2,7 +2,7 @@
 
 `profile_dataloader` 用于复现训练路径中的数据读取行为，同时排除网络计算对内存的影响。它加载与训练命令相同的 SFT TOML，只实例化 `dataloader_train` 并持续获取、统计、释放 batch。
 
-脚本不会实例化 Trainer、模型、优化器、学习率调度器或 checkpoint，也不会执行设备拷贝、forward、loss、backward 和参数更新。因此，它适合判断持续增长发生在视频解码、worker 预取、pin memory、packing 或 Python/原生内存分配的哪一侧。
+脚本不会实例化 Trainer、模型、优化器、学习率调度器或 checkpoint，也不会执行 batch 设备拷贝、forward、loss、backward 和参数更新。它会与训练入口一样初始化加速器进程组，并在配置校验时短暂创建一个很小的设备张量；这些是原训练进入 dataloader 前已有的行为。因此，它适合判断持续增长发生在视频解码、worker 预取、pin memory、packing 或 Python/原生内存分配的哪一侧。
 
 ## 准备环境
 
@@ -39,9 +39,17 @@ python -m cosmos_framework.scripts.profile_dataloader \
   +model.config.vlm_config.tokenizer.tokenizer_type="$COSMOS3_EDGE_PROCESSOR_PATH"
 ```
 
-基线配置使用 `batch_size=1`、`num_workers=4`、`persistent_workers=true`、`pin_memory=true`、`prefetch_factor=4`，每个 worker 的 LeRobot 视频 decoder cache 上限为 64。数据仍会读取完整 episode，并经过训练使用的 `PackingDataLoader`；batch 的逻辑张量大小达到数百 MiB 是可能的。
+`--iterations` 的单位与训练日志中的 iteration 相同，即 optimizer iteration，不是 batch 数。脚本按照 `trainer.grad_accum_iter` 模拟控制流；当前配置为 2，所以 `--iterations 500` 会读取 1000 个有效 microbatch，并与真实训练一致，在达到终点后再 fetch 一个 batch、检查终止条件并释放它。如果省略 `--iterations`，脚本会运行到 TOML 中的 `trainer.max_iter`。
 
-NPU 或 CUDA 训练机上不要添加 `--disable-accelerator-autoload`，否则 `pin_memory` 行为可能与训练不一致。只有在无加速器的 CPU 冒烟测试中才使用该选项。
+模拟 checkpoint 恢复时，使用 `--start-iteration N`。脚本会像 Trainer 一样执行：
+
+```text
+dataloader.set_start_iteration(N * trainer.grad_accum_iter)
+```
+
+此时 `--iterations` 表示从 N 开始继续模拟多少个 optimizer iteration。
+
+基线配置使用 `batch_size=1`、`num_workers=4`、`persistent_workers=true`、`pin_memory=true`、`prefetch_factor=4`，每个 worker 的 LeRobot 视频 decoder cache 上限为 64。数据仍会读取完整 episode，并经过训练使用的 `PackingDataLoader`；batch 的逻辑张量大小达到数百 MiB 是可能的。
 
 ### 切换视频读取后端
 
@@ -88,7 +96,6 @@ TorchCodec 路径继续使用精确 frame range seek 和每个 worker 独立的 
 torchrun --nnodes=1 --node-rank=0 --nproc-per-node=8 \
   --master-addr=127.0.0.1 --master-port=29501 \
   -m cosmos_framework.scripts.profile_dataloader \
-  --gloo-interface lo \
   --sft-toml examples/toml/sft_config/vision_sft_edge.toml \
   --iterations 500 \
   --log-every 1 \
@@ -100,14 +107,9 @@ torchrun --nnodes=1 --node-rank=0 --nproc-per-node=8 \
   +model.config.vlm_config.tokenizer.tokenizer_type="$COSMOS3_EDGE_PROCESSOR_PATH"
 ```
 
-脚本使用 Gloo 完成 dataloader 所需的 rank 初始化，不会建立模型通信。单机运行会自动设置 `GLOO_SOCKET_IFNAME=lo`；命令中仍显式写出 `--gloo-interface lo`，便于确认实际绑定的网卡。`num_workers=4` 是每个 rank 的 worker 数；8 rank 会产生约 32 个读取 worker，运行前需确认主机内存足够。
+脚本复用训练入口的 `distributed.init()`：NPU 使用 HCCL、CUDA 使用 NCCL，只有纯 CPU 运行才使用 Gloo。随后按训练顺序执行配置校验、冻结、按 rank 设置随机种子，并在 `data_loader_init()` 上下文中实例化 dataloader。`num_workers=4` 是每个 rank 的 worker 数；8 rank 会产生约 32 个读取 worker，运行前需确认主机内存足够。
 
-如果出现 `IPv6 network addresses ... cannot be retrieved`，说明 rendezvous 地址或 Gloo 网卡仍在使用无法解析的主机名：
-
-- 单机多卡必须把 `--master-addr` 设置为 `127.0.0.1`，并使用 `--gloo-interface lo`。
-- 多机多卡必须把 `--master-addr` 设置为 rank 0 节点可达的 IPv4 地址，不能使用当前 DNS 无法解析的 hostname。
-- 多机时每个节点传入相同类型的数据网卡，例如 `--gloo-interface enp189s0f0`；可通过 `ls /sys/class/net` 查看网卡名，不能使用 `lo`。
-- `--master-addr` 由 `torchrun` 在 Python 脚本启动前使用，只有 `GLOO_SOCKET_IFNAME` 或 `--gloo-interface` 不能修复错误的 rendezvous 地址。
+这里不再创建额外的 Gloo 进程组。单机多卡仍建议把 `--master-addr` 显式设为 `127.0.0.1`；多机多卡则应使用 rank 0 节点可达的 IPv4 地址，并保持与原训练命令完全一致的 HCCL/NCCL 网络环境。
 
 ## 快照阶段与字段
 
@@ -121,6 +123,8 @@ torchrun --nnodes=1 --node-rank=0 --nproc-per-node=8 \
 | `before_next`            | 调用 `next()` 前                                           |
 | `after_next`             | batch 已返回；包含读取耗时与 batch 张量逻辑大小            |
 | `after_release`          | 删除主进程中的 batch 引用后                                |
+| `after_release_terminal` | 达到目标 iteration 后额外 fetch 的 batch 已释放            |
+| `iterator_exhausted`     | 捕获 `StopIteration`；随后按训练逻辑重新创建 iterator      |
 | `run_end`                | 完成指定迭代次数                                           |
 | `workers_shutdown`       | 释放 dataloader/迭代器并执行 GC 后；正常情况下 worker 为 0 |
 
@@ -139,6 +143,9 @@ torchrun --nnodes=1 --node-rank=0 --nproc-per-node=8 \
 | `system_shm_used_bytes`                   | `/dev/shm` 已用空间                                        |
 | `system_memory_available_bytes`           | 主机可用内存                                               |
 | `fetch_seconds`                           | 当前 `next()` 或初始化耗时                                 |
+| `iteration`                               | 与训练一致的虚拟 optimizer iteration                       |
+| `batch_index`                             | 从本次 profiler 启动开始累计的成功 fetch 次数              |
+| `grad_accum_index`                        | 当前 optimizer iteration 内的 microbatch 下标              |
 | `batch_tensors.by_device.*.logical_bytes` | batch 中张量的逻辑字节数，不等同于进程实际新增内存         |
 
 Linux RSS 会把共享页计入多个进程，因此不能把多个 worker 的 RSS 简单相加后当成物理占用。跨实验优先比较 PSS；定位不能共享的泄漏时优先看 USS。`--full-info-every` 的采集开销较高，长跑建议设为 10 或更大。
@@ -168,7 +175,7 @@ PY
 
 ## 如何判断持续增长
 
-先运行至少 500 个 batch；如果数据集 episode 较长或 decoder cache 尚未填满，建议增加到 1000 个。重点比较相同 phase 的点，不要把 `before_next` 和 `after_next` 直接连成增长趋势。
+先覆盖至少 500 个 batch；当前 `grad_accum_iter=2` 时可使用 `--iterations 250`。如果数据集 episode 较长或 decoder cache 尚未填满，建议增加到 `--iterations 500`，即 1000 个有效 batch。重点比较相同 phase 的点，不要把 `before_next` 和 `after_next` 直接连成增长趋势。
 
 - 如果前几十个 batch 阶梯式增加，之后 PSS/USS 稳定，通常是 worker 预取队列、decoder cache 或 allocator 高水位的预热。
 - 如果 `after_next` 上升而 `after_release` 回落，内存主要由当前 batch 持有。
@@ -232,22 +239,3 @@ dataloader_train.dataloader.datasets.video.dataset.decoder_cache_max_size=1
 ```
 
 这两个选项会改变运行时行为，不应作为最终性能数据；它们只用于判断 Python GC 或 glibc allocator 是否解释了观察到的 RSS。若 `after_release_trimmed` 明显下降而 USS 中没有等量活跃内存，通常意味着 allocator 保留。
-
-## CPU 冒烟测试
-
-只验证配置、数据路径和输出文件时，可减少 worker 与预取并禁用加速器插件自动加载：
-
-```bash
-python -m cosmos_framework.scripts.profile_dataloader \
-  --sft-toml examples/toml/sft_config/vision_sft_edge.toml \
-  --iterations 2 --log-every 1 --full-info-every 1 \
-  --output-dir /tmp/libero_dataloader_smoke \
-  --disable-accelerator-autoload -- \
-  dataloader_train.dataloader.num_workers=2 \
-  dataloader_train.dataloader.prefetch_factor=1 \
-  model.config.vlm_config.tokenizer.repository=null \
-  model.config.vlm_config.tokenizer.revision=null \
-  +model.config.vlm_config.tokenizer.tokenizer_type="$COSMOS3_EDGE_PROCESSOR_PATH"
-```
-
-CPU 冒烟测试不能替代 NPU/CUDA 基线，尤其不能用于评价 pin memory 的真实占用。

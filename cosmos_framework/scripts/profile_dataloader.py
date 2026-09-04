@@ -18,7 +18,6 @@ import ctypes
 import gc
 import json
 import os
-import random
 import time
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,18 @@ from typing import Any
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sft-toml", required=True, help="与训练命令相同的 structured SFT TOML")
-    parser.add_argument("--iterations", type=int, default=500, help="读取 batch 数（默认：500）")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="模拟的 optimizer iteration 数；默认从 --start-iteration 跑到 trainer.max_iter",
+    )
+    parser.add_argument(
+        "--start-iteration",
+        type=int,
+        default=0,
+        help="模拟 checkpoint 恢复后的起始 optimizer iteration（默认：0）",
+    )
     parser.add_argument("--log-every", type=int, default=1, help="每隔多少个 batch 写一次内存快照")
     parser.add_argument(
         "--full-info-every",
@@ -36,11 +46,6 @@ def _parse_args() -> argparse.Namespace:
         help="每隔多少个 batch 读取一次较慢的 USS/PSS；0 表示关闭",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="默认写到当前 job 目录下")
-    parser.add_argument(
-        "--gloo-interface",
-        default=None,
-        help="Gloo 使用的网卡名；单机 torchrun 默认自动使用 lo，多机需指定各节点共有的数据网卡",
-    )
     parser.add_argument("--gc-every", type=int, default=0, help="诊断选项：定期 gc.collect()；0 表示关闭")
     parser.add_argument(
         "--malloc-trim-every",
@@ -49,61 +54,20 @@ def _parse_args() -> argparse.Namespace:
         help="诊断选项：定期 malloc_trim(0)；0 表示关闭",
     )
     parser.add_argument(
-        "--disable-accelerator-autoload",
-        action="store_true",
-        help="纯 CPU 环境使用；NPU/CUDA 训练机上不要设置，否则 pin_memory 行为可能不同",
-    )
-    parser.add_argument(
         "opts",
         nargs=argparse.REMAINDER,
         help="可选 Hydra overrides；建议在选项前使用 -- 分隔",
     )
     args = parser.parse_args()
-    if args.iterations < 1:
+    if args.iterations is not None and args.iterations < 1:
         parser.error("--iterations 必须大于 0")
+    if args.start_iteration < 0:
+        parser.error("--start-iteration 不能小于 0")
     if args.log_every < 1:
         parser.error("--log-every 必须大于 0")
     if args.full_info_every < 0 or args.gc_every < 0 or args.malloc_trim_every < 0:
         parser.error("--full-info-every/--gc-every/--malloc-trim-every 不能小于 0")
     return args
-
-
-def _configure_gloo_interface(requested_interface: str | None) -> str | None:
-    """Choose an explicit Gloo interface without resolving the host name."""
-    if requested_interface:
-        interface = requested_interface
-    elif os.environ.get("GLOO_SOCKET_IFNAME"):
-        return os.environ["GLOO_SOCKET_IFNAME"]
-    else:
-        world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
-        is_single_node = world_size == 1 or (local_world_size is not None and int(local_world_size) == world_size)
-        if not is_single_node:
-            return None
-        interface = "lo"
-
-    network_interfaces = Path("/sys/class/net")
-    if network_interfaces.is_dir() and not (network_interfaces / interface).exists():
-        available = sorted(path.name for path in network_interfaces.iterdir())
-        raise ValueError(f"Gloo interface {interface!r} does not exist; available interfaces: {available}")
-    os.environ["GLOO_SOCKET_IFNAME"] = interface
-    return interface
-
-
-def _ensure_distributed_initialized(gloo_interface: str | None = None) -> bool:
-    """Initialize a CPU process group required by RankPartitionedDataLoader."""
-    import torch.distributed as dist
-
-    if dist.is_initialized():
-        return False
-    os.environ.setdefault("RANK", "0")
-    os.environ.setdefault("WORLD_SIZE", "1")
-    os.environ.setdefault("LOCAL_RANK", "0")
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    _configure_gloo_interface(gloo_interface)
-    dist.init_process_group(backend="gloo", init_method="env://")
-    return True
 
 
 def _tensor_summary(value: Any) -> dict[str, Any]:
@@ -205,6 +169,8 @@ class _MemoryRecorder:
         batch: Any = None,
         include_full_info: bool = False,
         fetch_seconds: float | None = None,
+        batch_index: int | None = None,
+        grad_accum_index: int | None = None,
     ) -> dict[str, Any]:
         import psutil
 
@@ -243,6 +209,10 @@ class _MemoryRecorder:
             pass
         if fetch_seconds is not None:
             record["fetch_seconds"] = fetch_seconds
+        if batch_index is not None:
+            record["batch_index"] = batch_index
+        if grad_accum_index is not None:
+            record["grad_accum_index"] = grad_accum_index
         if batch is not None:
             record["batch_tensors"] = _tensor_summary(batch)
 
@@ -276,21 +246,60 @@ def _trim_allocator() -> None:
         pass
 
 
+def _advance_training_position(iteration: int, grad_accum_index: int, grad_accum_steps: int) -> tuple[int, int]:
+    """Mirror the counter update performed after ``training_step``."""
+    grad_accum_index += 1
+    if grad_accum_index == grad_accum_steps:
+        return iteration + 1, 0
+    return iteration, grad_accum_index
+
+
 def _run(args: argparse.Namespace) -> Path:
-    import numpy as np
-    import torch
+    # Match the NPU compatibility bootstrap in cosmos_framework.scripts.train
+    # before importing the backend selector used by distributed.init().
+    try:
+        import torch_npu  # noqa: F401
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+    except (ImportError, OSError):
+        pass
+
     import torch.distributed as dist
 
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
+    from cosmos_framework.utils import distributed, misc
+    from cosmos_framework.utils.context_managers import data_loader_init, distributed_init
     from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 
-    initialized_here = _ensure_distributed_initialized(args.gloo_interface)
-    rank = dist.get_rank()
     config = load_experiment_from_toml(args.sft_toml, extra_overrides=args.opts)
-    seed = int(config.trainer.seed) + rank
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+
+    # Match cosmos_framework.scripts.train.launch: initialize the accelerator
+    # process group before config validation. DIST_BACKEND resolves to HCCL on
+    # NPU, NCCL on CUDA, and Gloo only for a genuine CPU run.
+    initialized_here = not dist.is_initialized()
+    with distributed_init():
+        distributed.init()
+    config.validate()
+    config.freeze()
+
+    rank = dist.get_rank()
+    # ImaginaireTrainer normally applies this immediately before model and
+    # dataloader construction. The model is intentionally skipped here.
+    misc.set_random_seed(seed=config.trainer.seed, by_rank=True)
+    context_parallel_degree = int(config.model.config.parallelism.context_parallel_shard_degree)
+    if context_parallel_degree != 1:
+        raise ValueError(
+            "Dataloader-only profiling cannot faithfully reproduce context-parallel data broadcast without a model; "
+            f"got context_parallel_shard_degree={context_parallel_degree}. Use a recipe with degree 1."
+        )
+    grad_accum_steps = int(config.trainer.grad_accum_iter)
+    if grad_accum_steps < 1:
+        raise ValueError(f"trainer.grad_accum_iter must be at least 1, got {grad_accum_steps}")
+    start_iteration = args.start_iteration
+    max_iteration = start_iteration + args.iterations if args.iterations is not None else int(config.trainer.max_iter)
+    if max_iteration < start_iteration:
+        raise ValueError(
+            f"trainer.max_iter ({max_iteration}) must not be smaller than --start-iteration ({start_iteration})"
+        )
     output_dir = args.output_dir or Path(config.job.path_local) / "dataloader_memory_trace"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"rank_{rank:03d}.jsonl"
@@ -300,63 +309,143 @@ def _run(args: argparse.Namespace) -> Path:
 
     dataloader = None
     data_iterator = None
+    iteration = start_iteration
+    grad_accum_index = 0
+    batch_index = 0
     try:
         recorder.record("dataloader_init_before", -1, include_full_info=True)
         init_started = time.perf_counter()
-        dataloader = instantiate(config.dataloader_train)
+        with data_loader_init():
+            dataloader = instantiate(config.dataloader_train)
         init_seconds = time.perf_counter() - init_started
         recorder.record("dataloader_init_after", -1, include_full_info=True, fetch_seconds=init_seconds)
-        data_iterator = iter(dataloader)
-        recorder.record("iterator_ready", -1, include_full_info=True)
+        if hasattr(dataloader, "set_start_iteration"):
+            dataloader.set_start_iteration(start_iteration * grad_accum_steps)
 
-        for iteration in range(args.iterations):
-            should_log = iteration % args.log_every == 0
-            include_full = args.full_info_every > 0 and iteration % args.full_info_every == 0
-            if should_log:
-                recorder.record("before_next", iteration, include_full_info=include_full)
-            fetch_started = time.perf_counter()
-            batch = next(data_iterator)
-            fetch_seconds = time.perf_counter() - fetch_started
-            if should_log:
-                snapshot = recorder.record(
-                    "after_next",
-                    iteration,
-                    batch=batch,
-                    include_full_info=include_full,
-                    fetch_seconds=fetch_seconds,
-                )
-                if rank == 0:
-                    parent_mib = snapshot["parent"]["rss_bytes"] / 2**20
-                    children_mib = snapshot["children_rss_bytes"] / 2**20
-                    batch_mib = (
-                        sum(item["logical_bytes"] for item in snapshot["batch_tensors"]["by_device"].values()) / 2**20
+        # Mirror ImaginaireTrainer.train's two nested loops. ``iteration`` is
+        # an optimizer-step index and advances only after grad_accum_steps
+        # successful fetches. StopIteration rebuilds the iterator. As in the
+        # real loop, the max-iteration check happens after the next batch has
+        # already been fetched.
+        end_profiling = False
+        while True:
+            data_iterator = iter(dataloader)
+            recorder.record(
+                "iterator_ready",
+                iteration,
+                include_full_info=True,
+                batch_index=batch_index,
+                grad_accum_index=grad_accum_index,
+            )
+            while True:
+                should_log = batch_index % args.log_every == 0
+                include_full = args.full_info_every > 0 and batch_index % args.full_info_every == 0
+                if should_log:
+                    recorder.record(
+                        "before_next",
+                        iteration,
+                        include_full_info=include_full,
+                        batch_index=batch_index,
+                        grad_accum_index=grad_accum_index,
                     )
-                    print(
-                        f"iteration={iteration:06d} fetch={fetch_seconds:.3f}s "
-                        f"batch={batch_mib:.1f}MiB parent_rss={parent_mib:.1f}MiB "
-                        f"children_rss={children_mib:.1f}MiB",
-                        flush=True,
+                fetch_started = time.perf_counter()
+                try:
+                    batch = next(data_iterator)
+                except StopIteration:
+                    if should_log:
+                        recorder.record(
+                            "iterator_exhausted",
+                            iteration,
+                            include_full_info=include_full,
+                            batch_index=batch_index,
+                            grad_accum_index=grad_accum_index,
+                        )
+                    break
+                fetch_seconds = time.perf_counter() - fetch_started
+                if should_log:
+                    snapshot = recorder.record(
+                        "after_next",
+                        iteration,
+                        batch=batch,
+                        include_full_info=include_full,
+                        fetch_seconds=fetch_seconds,
+                        batch_index=batch_index,
+                        grad_accum_index=grad_accum_index,
                     )
-            del batch
+                    if rank == 0:
+                        parent_mib = snapshot["parent"]["rss_bytes"] / 2**20
+                        children_mib = snapshot["children_rss_bytes"] / 2**20
+                        batch_mib = (
+                            sum(item["logical_bytes"] for item in snapshot["batch_tensors"]["by_device"].values())
+                            / 2**20
+                        )
+                        print(
+                            f"iteration={iteration:06d} microbatch={grad_accum_index:02d} "
+                            f"batch_index={batch_index:06d} fetch={fetch_seconds:.3f}s "
+                            f"batch={batch_mib:.1f}MiB parent_rss={parent_mib:.1f}MiB "
+                            f"children_rss={children_mib:.1f}MiB",
+                            flush=True,
+                        )
 
-            trimmed = False
-            if args.gc_every > 0 and (iteration + 1) % args.gc_every == 0:
-                gc.collect()
-            if args.malloc_trim_every > 0 and (iteration + 1) % args.malloc_trim_every == 0:
-                _trim_allocator()
-                trimmed = True
-            if should_log:
-                recorder.record(
-                    "after_release_trimmed" if trimmed else "after_release",
+                # This is the intentional cutoff: the real loop checks
+                # max_iter here, then moves the batch to the accelerator and
+                # enters training_step. This profiler releases it instead.
+                terminal_fetch = iteration >= max_iteration
+                del batch
+
+                trimmed = False
+                if args.gc_every > 0 and (batch_index + 1) % args.gc_every == 0:
+                    gc.collect()
+                if args.malloc_trim_every > 0 and (batch_index + 1) % args.malloc_trim_every == 0:
+                    _trim_allocator()
+                    trimmed = True
+                if should_log:
+                    if terminal_fetch:
+                        release_phase = "after_release_terminal"
+                    elif trimmed:
+                        release_phase = "after_release_trimmed"
+                    else:
+                        release_phase = "after_release"
+                    recorder.record(
+                        release_phase,
+                        iteration,
+                        include_full_info=include_full,
+                        batch_index=batch_index,
+                        grad_accum_index=grad_accum_index,
+                    )
+                batch_index += 1
+
+                if terminal_fetch:
+                    end_profiling = True
+                    break
+
+                # Simulate only training_step's control-flow result. No model,
+                # loss, backward, optimizer, scheduler, or callbacks run.
+                iteration, grad_accum_index = _advance_training_position(
                     iteration,
-                    include_full_info=include_full,
+                    grad_accum_index,
+                    grad_accum_steps,
                 )
-        recorder.record("run_end", args.iterations, include_full_info=True)
+            if end_profiling:
+                break
+        recorder.record(
+            "run_end",
+            iteration,
+            include_full_info=True,
+            batch_index=batch_index,
+            grad_accum_index=grad_accum_index,
+        )
     finally:
         del data_iterator
         del dataloader
         gc.collect()
-        recorder.record("workers_shutdown", args.iterations, include_full_info=True)
+        recorder.record(
+            "workers_shutdown",
+            iteration,
+            include_full_info=True,
+            batch_index=batch_index,
+            grad_accum_index=grad_accum_index,
+        )
         recorder.close()
         if initialized_here and dist.is_initialized():
             dist.destroy_process_group()
@@ -365,8 +454,6 @@ def _run(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     args = _parse_args()
-    if args.disable_accelerator_autoload:
-        os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     output_path = _run(args)
     print(f"Dataloader-only memory trace written to: {output_path}")
 

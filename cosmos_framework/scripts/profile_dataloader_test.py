@@ -1,31 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-import os
-
-from cosmos_framework.scripts.profile_dataloader import _configure_gloo_interface
+from cosmos_framework.scripts.profile_dataloader import _advance_training_position
 
 
-def test_single_node_defaults_gloo_to_loopback(monkeypatch):
-    # Register cleanup before the function under test writes this variable.
-    monkeypatch.setenv("GLOO_SOCKET_IFNAME", "test-placeholder")
-    monkeypatch.delenv("GLOO_SOCKET_IFNAME")
-    monkeypatch.setenv("WORLD_SIZE", "4")
-    monkeypatch.setenv("LOCAL_WORLD_SIZE", "4")
+def test_training_iteration_advances_after_gradient_accumulation_window():
+    iteration = 7
+    grad_accum_index = 0
 
-    assert _configure_gloo_interface(None) == "lo"
-    assert os.environ["GLOO_SOCKET_IFNAME"] == "lo"
+    iteration, grad_accum_index = _advance_training_position(iteration, grad_accum_index, 2)
+    assert (iteration, grad_accum_index) == (7, 1)
 
-
-def test_explicit_gloo_interface_takes_precedence(monkeypatch):
-    monkeypatch.setenv("GLOO_SOCKET_IFNAME", "invalid-existing-value")
-
-    assert _configure_gloo_interface("lo") == "lo"
+    iteration, grad_accum_index = _advance_training_position(iteration, grad_accum_index, 2)
+    assert (iteration, grad_accum_index) == (8, 0)
 
 
-def test_multi_node_does_not_guess_interface(monkeypatch):
-    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
-    monkeypatch.setenv("WORLD_SIZE", "8")
-    monkeypatch.setenv("LOCAL_WORLD_SIZE", "4")
+def test_training_loop_fetches_once_after_reaching_max_iteration():
+    iteration = 0
+    grad_accum_index = 0
+    fetch_count = 0
+    max_iteration = 3
 
-    assert _configure_gloo_interface(None) is None
+    while True:
+        fetch_count += 1
+        if iteration >= max_iteration:
+            break
+        iteration, grad_accum_index = _advance_training_position(iteration, grad_accum_index, 2)
+
+    assert iteration == max_iteration
+    assert fetch_count == max_iteration * 2 + 1
