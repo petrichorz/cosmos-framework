@@ -235,6 +235,7 @@ vision_sft_edge_lerobot3 = LazyDict(
                                 "head",
                             ],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
                             video_backend="torchcodec",  # 可切换为 "pyav"，用于读取性能与内存对比
+                            video_resize_mode="post_decode",  # 可切换为 "decode_transform"，在解码路径内缩放
                             video_tolerance_s=1e-4,  # PyAV 按时间戳匹配帧时沿用 LeRobot 默认容差
                             caption_key="caption",  # episodes 表里的 caption 列名
                             min_short_edge=0,

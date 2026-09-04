@@ -58,6 +58,7 @@ dataloader.set_start_iteration(N * trainer.grad_accum_iter)
 ```toml
 [dataloader_train]
 video_backend = "pyav"
+video_resize_mode = "decode_transform"
 video_tolerance_s = 1.0e-4
 ```
 
@@ -80,6 +81,37 @@ dataloader_train.dataloader.datasets.video.dataset.video_tolerance_s=0.0001
 ```
 
 TorchCodec 路径继续使用精确 frame range seek 和每个 worker 独立的 decoder LRU cache；`decoder_cache_max_size` 只影响 TorchCodec。比较两个后端时，除 `video_backend` 外应保持 worker、预取、pin memory、数据顺序和迭代数一致，并分别使用独立输出目录。
+
+### 比较解码时 resize 与读入后 resize
+
+`video_resize_mode` 支持两种值：
+
+- `post_decode`（默认）：先生成源分辨率的整段 TCHW tensor，再用 `torch.nn.functional.interpolate` 做 bicubic resize。这与修改前的行为一致。
+- `decode_transform`：TorchCodec 把 `Resize` transform 传给 `VideoDecoder`；PyAV 在每个 `VideoFrame` 转为 NumPy/Tensor 前调用 `reformat`。两条路径都避免在 Python 侧保留整段源分辨率 tensor。
+
+建议对同一数据顺序分别执行以下四组实验。下面只列出每组命令末尾需要增加的 override；其余 profiler 参数应与“LIBERO 单进程基线”完全一致：
+
+```text
+# 1. TorchCodec：读入后 resize
+dataloader_train.dataloader.datasets.video.dataset.video_backend=torchcodec
+dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=post_decode
+
+# 2. TorchCodec：解码时 resize
+dataloader_train.dataloader.datasets.video.dataset.video_backend=torchcodec
+dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=decode_transform
+
+# 3. PyAV：读入后 resize
+dataloader_train.dataloader.datasets.video.dataset.video_backend=pyav
+dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=post_decode
+
+# 4. PyAV：解码时 resize
+dataloader_train.dataloader.datasets.video.dataset.video_backend=pyav
+dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=decode_transform
+```
+
+四组实验必须使用不同的 `--output-dir` 和 `--wandb-name`，例如 `torchcodec-post`、`torchcodec-decode`、`pyav-post`、`pyav-decode`。固定相同的 `dataloader_train.seed`、worker 数、prefetch、cache 大小和迭代数后，重点比较 JSONL 中的 `process_tree_rss_bytes`、`process_tree_uss_bytes`、`children_fds`、`fetch_seconds`，以及 W&B 各 `phase/*` 下对应的 MiB/FD/时间指标。
+
+注意：当前 TorchCodec 0.10 的 decoder Resize 固定使用带 antialias 的 bilinear；PyAV decode transform 使用 FFmpeg/libswscale bicubic；`post_decode` 使用 PyTorch bicubic。因此本实验用于比较内存和吞吐，不应把不同模式的像素值当作逐位一致性测试。输出尺寸、裁剪范围和下游 packing 逻辑保持一致。
 
 每个输出目录包含：
 
