@@ -9,8 +9,9 @@ import pytest
 
 from cosmos_framework.scripts.profile_dataloader import (
     _advance_training_position,
+    _init_wandb_run,
+    _MemoryRecorder,
     _record_to_wandb_metrics,
-    _upload_trace_to_wandb,
 )
 
 
@@ -69,23 +70,7 @@ def test_wandb_metrics_use_phase_namespaces_and_mib():
     assert "phase/after_next/parent/pid" not in metrics
 
 
-def test_wandb_upload_replays_completed_trace_into_rank_folder(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    trace_path = tmp_path / "rank_000.jsonl"
-    trace_path.write_text(
-        json.dumps(
-            {
-                "phase": "run_end",
-                "elapsed_seconds": 1.0,
-                "iteration": 2,
-                "rank": 0,
-                "parent": {"pid": 123, "rss_bytes": 2**20},
-                "children": [],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
+def test_wandb_run_writes_to_rank_folder(tmp_path, monkeypatch: pytest.MonkeyPatch):
     class FakeRun:
         def __init__(self):
             self.logged = []
@@ -107,8 +92,8 @@ def test_wandb_upload_replays_completed_trace_into_rank_folder(tmp_path, monkeyp
 
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=fake_init))
 
-    rank_dir = _upload_trace_to_wandb(
-        trace_path,
+    fake_result, rank_dir = _init_wandb_run(
+        tmp_path / "rank_000.jsonl",
         mode="offline",
         project="profile-test",
         group="comparison",
@@ -120,6 +105,32 @@ def test_wandb_upload_replays_completed_trace_into_rank_folder(tmp_path, monkeyp
     assert rank_dir.is_dir()
     assert init_kwargs["dir"] == str(rank_dir)
     assert init_kwargs["mode"] == "offline"
-    assert fake_run.logged[0][1] == 0
-    assert fake_run.summary["trace_records"] == 1
-    assert fake_run.finished
+    assert fake_result is fake_run
+    assert not fake_run.logged
+    assert not fake_run.finished
+
+
+def test_memory_recorder_logs_each_snapshot_to_wandb_immediately(tmp_path):
+    class FakeRun:
+        def __init__(self):
+            self.logged = []
+
+        def log(self, metrics, step):
+            self.logged.append((metrics, step))
+
+    fake_run = FakeRun()
+    trace_path = tmp_path / "rank_000.jsonl"
+    recorder = _MemoryRecorder(trace_path, rank=0, wandb_run=fake_run)
+    try:
+        recorder.record("before_next", iteration=3, batch_index=6, grad_accum_index=0)
+        assert len(fake_run.logged) == 1
+        metrics, step = fake_run.logged[0]
+        assert step == 0
+        assert metrics["trace/phase"] == "before_next"
+        assert metrics["trace/iteration"] == 3
+    finally:
+        recorder.close()
+
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "before_next"

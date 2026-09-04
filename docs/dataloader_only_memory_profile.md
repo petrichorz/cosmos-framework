@@ -91,7 +91,7 @@ TorchCodec 路径继续使用精确 frame range seek 和每个 worker 独立的 
 
 ### 写入 Weights & Biases
 
-W&B 默认关闭。在线上传并将 W&B 本地文件保存在 profiler 输出目录时，增加：
+W&B 默认关闭。启用后，每次生成内存快照都会立即调用 `wandb.log()`；在线实时上传并将 W&B 本地文件保存在 profiler 输出目录时，增加：
 
 ```text
 --wandb-mode online \
@@ -122,7 +122,9 @@ phase/after_next/worker_max_num_fds
 phase/after_next/fetch_seconds
 ```
 
-原始字节数和每个 worker 的完整明细仍以 JSONL 为准；W&B 将内存字段转换成 MiB，并上传常用聚合值。脚本先完成全部 profiling、关闭 worker 并写完 JSONL，然后才初始化 W&B 并回放记录。因此 W&B 后台进程、网络线程及其文件描述符不会进入内存快照，也不会影响 `fetch_seconds`。
+原始字节数和每个 worker 的完整明细仍以 JSONL 为准；W&B 将内存字段转换成 MiB，并实时上传常用聚合值。每次 `record()` 会先将该快照写入 JSONL，再使用相同的 `trace/step` 写入 W&B，因此运行中可以直接观察曲线，任务中断前已经提交的点也会保留。
+
+实时记录会启动 W&B 后台服务，并在主进程中增加序列化和发送开销。它可能增加少量主进程 RSS、FD 和每次快照的墙钟时间；W&B 服务进程也可能出现在 `children` 进程树中。因此，需要最干净的内存基线时应使用 `--wandb-mode disabled`，实时观察实验和最终无 W&B 基线应使用相同数据配置分别运行。
 
 ## 多 rank 复现
 

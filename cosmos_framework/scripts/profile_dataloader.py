@@ -50,7 +50,7 @@ def _parse_args() -> argparse.Namespace:
         "--wandb-mode",
         choices=("disabled", "offline", "online"),
         default="disabled",
-        help="采集结束后回放 JSONL 到 W&B；默认关闭，offline 仅写本地目录",
+        help="每次内存快照实时写入 W&B；默认关闭，offline 仅写本地目录",
     )
     parser.add_argument(
         "--wandb-ranks",
@@ -114,11 +114,13 @@ def _tensor_summary(value: Any) -> dict[str, Any]:
 
 
 class _MemoryRecorder:
-    def __init__(self, path: Path, rank: int) -> None:
+    def __init__(self, path: Path, rank: int, wandb_run: Any = None) -> None:
         import psutil
 
         self.path = path
         self.rank = rank
+        self.wandb_run = wandb_run
+        self.trace_step = 0
         self.process = psutil.Process(os.getpid())
         self.started_at = time.monotonic()
         self.last: dict[str, int] = {}
@@ -247,6 +249,12 @@ class _MemoryRecorder:
                 record[f"delta_{key}"] = value - self.last[key]
             self.last[key] = value
         self.file.write(json.dumps(record, sort_keys=True) + "\n")
+        if self.wandb_run is not None:
+            self.wandb_run.log(
+                _record_to_wandb_metrics(record, self.trace_step),
+                step=self.trace_step,
+            )
+        self.trace_step += 1
         return record
 
     def close(self) -> None:
@@ -341,17 +349,17 @@ def _record_to_wandb_metrics(record: dict[str, Any], trace_step: int) -> dict[st
     return metrics
 
 
-def _upload_trace_to_wandb(
-    trace_path: Path,
+def _init_wandb_run(
+    output_path: Path,
     *,
     mode: str,
     project: str,
     group: str | None,
     name: str,
     config: dict[str, Any],
-) -> Path:
-    """Replay a completed JSONL trace so W&B cannot contaminate the measurement."""
-    rank_dir = trace_path.parent / "wandb" / trace_path.stem
+) -> tuple[Any, Path]:
+    """Initialize the real-time W&B sink inside this rank process."""
+    rank_dir = output_path.parent / "wandb" / output_path.stem
     rank_dir.mkdir(parents=True, exist_ok=True)
     temporary_env = {
         "WANDB_CACHE_DIR": str(rank_dir / "cache"),
@@ -379,18 +387,7 @@ def _upload_trace_to_wandb(
     finally:
         for key in added_env:
             os.environ.pop(key, None)
-    try:
-        trace_records = 0
-        with trace_path.open(encoding="utf-8") as trace_file:
-            for trace_step, line in enumerate(trace_file):
-                record = json.loads(line)
-                run.log(_record_to_wandb_metrics(record, trace_step), step=trace_step)
-                trace_records += 1
-        run.summary["trace_path"] = str(trace_path)
-        run.summary["trace_records"] = trace_records
-    finally:
-        run.finish()
-    return rank_dir
+    return run, rank_dir
 
 
 def _run(args: argparse.Namespace) -> Path:
@@ -444,7 +441,33 @@ def _run(args: argparse.Namespace) -> Path:
     output_path = output_dir / f"rank_{rank:03d}.jsonl"
     if rank == 0:
         LazyConfig.save_yaml(config, str(output_dir / "effective_config.yaml"))
-    recorder = _MemoryRecorder(output_path, rank)
+    wandb_run = None
+    wandb_dir = None
+    if args.wandb_mode != "disabled" and (args.wandb_ranks == "all" or rank == 0):
+        project = args.wandb_project or str(config.job.project) or "cosmos-dataloader-profile"
+        group = args.wandb_group or str(config.job.group) or None
+        base_name = args.wandb_name or f"{config.job.name}-dataloader-profile"
+        run_name = f"{base_name}-rank{rank:03d}"
+        wandb_run, wandb_dir = _init_wandb_run(
+            output_path,
+            mode=args.wandb_mode,
+            project=project,
+            group=group,
+            name=run_name,
+            config={
+                "sft_toml": args.sft_toml,
+                "rank": rank,
+                "iterations": args.iterations,
+                "start_iteration": args.start_iteration,
+                "log_every": args.log_every,
+                "full_info_every": args.full_info_every,
+                "hydra_overrides": list(args.opts),
+                "effective_config_path": str(output_dir / "effective_config.yaml"),
+                "logging_semantics": "real_time",
+            },
+        )
+        print(f"W&B {args.wandb_mode} real-time run started; local files: {wandb_dir}", flush=True)
+    recorder = _MemoryRecorder(output_path, rank, wandb_run=wandb_run)
 
     dataloader = None
     data_iterator = None
@@ -578,44 +601,25 @@ def _run(args: argparse.Namespace) -> Path:
         del data_iterator
         del dataloader
         gc.collect()
-        recorder.record(
-            "workers_shutdown",
-            iteration,
-            include_full_info=True,
-            batch_index=batch_index,
-            grad_accum_index=grad_accum_index,
-        )
-        recorder.close()
-        # Keep post-run W&B replay from perturbing another rank that is still
-        # profiling. This barrier is outside the recorded interval.
+        try:
+            recorder.record(
+                "workers_shutdown",
+                iteration,
+                include_full_info=True,
+                batch_index=batch_index,
+                grad_accum_index=grad_accum_index,
+            )
+        finally:
+            recorder.close()
+        # Let every rank finish recording before the selected W&B runs flush.
         if args.wandb_mode != "disabled" and dist.is_initialized():
             dist.barrier()
+        if wandb_run is not None:
+            wandb_run.summary["trace_path"] = str(output_path)
+            wandb_run.summary["trace_records"] = recorder.trace_step
+            wandb_run.finish()
         if initialized_here and dist.is_initialized():
             dist.destroy_process_group()
-
-    if args.wandb_mode != "disabled" and (args.wandb_ranks == "all" or rank == 0):
-        project = args.wandb_project or str(config.job.project) or "cosmos-dataloader-profile"
-        group = args.wandb_group or str(config.job.group) or None
-        base_name = args.wandb_name or f"{config.job.name}-dataloader-profile"
-        run_name = f"{base_name}-rank{rank:03d}"
-        wandb_dir = _upload_trace_to_wandb(
-            output_path,
-            mode=args.wandb_mode,
-            project=project,
-            group=group,
-            name=run_name,
-            config={
-                "sft_toml": args.sft_toml,
-                "rank": rank,
-                "iterations": args.iterations,
-                "start_iteration": args.start_iteration,
-                "log_every": args.log_every,
-                "full_info_every": args.full_info_every,
-                "hydra_overrides": list(args.opts),
-                "effective_config_path": str(output_dir / "effective_config.yaml"),
-            },
-        )
-        print(f"W&B {args.wandb_mode} run files written to: {wandb_dir}", flush=True)
     return output_path
 
 
