@@ -728,6 +728,28 @@ class DataloaderTrainConfig(BaseModel):
             "recipe default. Skipped on VLM (the data packer caps via max_sequence_length)."
         ),
     )
+    video_backend: Literal["torchcodec", "pyav"] = Field(
+        default="torchcodec",
+        description=(
+            "VFM LeRobot only. Video decoder backend, remapped to the nested SFT dataset. "
+            "Skipped on VLM datasets, which own their backend configuration."
+        ),
+    )
+    video_resize_mode: Literal["post_decode", "decode_transform"] = Field(
+        default="post_decode",
+        description=(
+            "VFM LeRobot only. Resize source-resolution tensors after decoding, or resize each frame "
+            "inside the configured decoder path before materializing the batch tensor."
+        ),
+    )
+    video_tolerance_s: float = Field(
+        default=1e-4,
+        gt=0,
+        description=(
+            "VFM LeRobot only. Timestamp matching tolerance used by the PyAV backend. "
+            "Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
     seed: int = Field(
         default=42,
         description=(

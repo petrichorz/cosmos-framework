@@ -85,6 +85,9 @@ save_iter            = 100
 
 [dataloader_train]
 max_sequence_length = 45056
+video_backend     = "torchcodec" # 可切换为 "pyav"
+video_resize_mode = "post_decode" # 可切换为 "decode_transform"
+video_tolerance_s = 1.0e-4       # PyAV 最近帧匹配容差；TorchCodec 后端不使用
 # Per-caption token cap before truncation. Structured-JSON captions run longer than
 # dense prose (measured max ~1790 tokens), so keep headroom; raise it for longer captions.
 max_caption_tokens = 2048

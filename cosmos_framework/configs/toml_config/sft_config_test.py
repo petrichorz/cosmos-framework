@@ -406,3 +406,23 @@ class TestExampleTomlConfigs:
         overrides = build_hydra_overrides(raw)
         assert overrides[0] == "--"
         assert any(o.startswith("experiment=") for o in overrides), overrides
+
+
+def test_vfm_lerobot_video_backend_and_resize_route_to_nested_dataset() -> None:
+    raw = {
+        "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
+        "dataloader_train": {
+            "video_backend": "pyav",
+            "video_resize_mode": "decode_transform",
+            "video_tolerance_s": 1e-4,
+        },
+    }
+
+    SFTExperimentConfig.model_validate(raw)
+    overrides = build_hydra_overrides(raw)
+
+    assert "dataloader_train.dataloader.datasets.video.dataset.video_backend=pyav" in overrides
+    assert (
+        "dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=decode_transform" in overrides
+    )
+    assert "dataloader_train.dataloader.datasets.video.dataset.video_tolerance_s=0.0001" in overrides
