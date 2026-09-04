@@ -5,9 +5,9 @@ import torch
 import wandb
 
 from cosmos_framework.callbacks.every_n import EveryN
+from cosmos_framework.data.generator.sequence_packing.runtime import get_padding_stats
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.trainer import ImaginaireTrainer
-from cosmos_framework.data.generator.sequence_packing.runtime import get_padding_stats
 
 
 class SequencePackingPadding(EveryN):
@@ -46,6 +46,24 @@ class SequencePackingPadding(EveryN):
                 log_dict[f"SequencePackingPadding/und_token_length_{modality}"] = output_batch["und_token_length"]
             if "gen_token_length" in output_batch:
                 log_dict[f"SequencePackingPadding/gen_token_length_{modality}"] = output_batch["gen_token_length"]
+            if "source_token_length" in output_batch:
+                log_dict[f"SequencePackingPadding/source_token_length_{modality}"] = output_batch["source_token_length"]
+            if "expanded_token_length" in output_batch:
+                log_dict[f"SequencePackingPadding/expanded_token_length_{modality}"] = output_batch[
+                    "expanded_token_length"
+                ]
+            if "teacher_forcing_q_token_length" in output_batch:
+                log_dict[f"SequencePackingPadding/teacher_forcing_q_token_length_{modality}"] = output_batch[
+                    "teacher_forcing_q_token_length"
+                ]
+            if output_batch.get("source_packing_utilization") is not None:
+                log_dict[f"SequencePackingPadding/source_packing_utilization_{modality}"] = output_batch[
+                    "source_packing_utilization"
+                ]
+            if output_batch.get("expanded_packing_utilization") is not None:
+                log_dict[f"SequencePackingPadding/expanded_packing_utilization_{modality}"] = output_batch[
+                    "expanded_packing_utilization"
+                ]
             if "action_token_length" in output_batch:
                 log_dict[f"SequencePackingPadding/action_token_length"] = output_batch["action_token_length"]
             if "sound_token_length" in output_batch:

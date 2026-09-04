@@ -1074,6 +1074,36 @@ class OmniMoTModel(ImaginaireModel):
         _action_tokens = len(packed_sequence.action.sequence_indexes) if packed_sequence.action else 0
         _sound_tokens = len(packed_sequence.sound.sequence_indexes) if packed_sequence.sound else 0
 
+        # Token accounting must distinguish the source sequence consumed by the
+        # dataloader packer from the sequence that the network actually sees.
+        # Teacher forcing expands every vision stream from [UND | V] to
+        # [UND | clean V | noisy V], so the source budget is U+V while the
+        # network/BSA KV length is U+2V and the GEN query length is 2V.
+        # All values below come from shape/list metadata and therefore do not
+        # introduce a device-to-host synchronization in the training step.
+        _source_token_length = packed_sequence.sequence_length
+        _teacher_forcing_q_token_length = 0
+        if packed_sequence.teacher_forcing is not None:
+            _teacher_forcing_layout = packed_sequence.teacher_forcing.layout
+            _source_token_length = sum(_teacher_forcing_layout.original_sample_lens)
+            _teacher_forcing_q_token_length = _teacher_forcing_layout.gen_query_indexes.numel()
+
+        _expanded_token_length = packed_sequence.sequence_length
+        _source_token_limit = self.config.max_num_tokens_after_packing
+        _expanded_token_limit = (
+            self.config.teacher_forcing_max_sequence_length
+            if packed_sequence.teacher_forcing is not None
+            else _source_token_limit
+        )
+        _source_packing_utilization = (
+            _source_token_length / _source_token_limit if _source_token_limit and _source_token_limit > 0 else None
+        )
+        _expanded_packing_utilization = (
+            _expanded_token_length / _expanded_token_limit
+            if _expanded_token_limit is not None and _expanded_token_limit > 0
+            else None
+        )
+
         output_batch = {
             "x0": gen_data_clean.x0_tokens_vision,
             "xt": gen_data_noised.xt_tokens_vision,
@@ -1083,6 +1113,11 @@ class OmniMoTModel(ImaginaireModel):
             "condition_mask_action": packed_sequence.action.condition_mask if packed_sequence.action else None,
             "und_token_length": packed_sequence.text_indexes.shape[0],
             "gen_token_length": packed_sequence.sequence_length - packed_sequence.text_indexes.shape[0],
+            "source_token_length": _source_token_length,
+            "expanded_token_length": _expanded_token_length,
+            "teacher_forcing_q_token_length": _teacher_forcing_q_token_length,
+            "source_packing_utilization": _source_packing_utilization,
+            "expanded_packing_utilization": _expanded_packing_utilization,
             "vision_token_length": _vision_tokens,
             "action_token_length": _action_tokens,
             "sound_token_length": _sound_tokens,
