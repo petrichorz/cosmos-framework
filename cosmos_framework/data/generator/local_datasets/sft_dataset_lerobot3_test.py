@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -12,6 +14,7 @@ import torch
 from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
     LeRobotSFTDataset,
     _LeRobotVideoDecoderCache,
+    _limit_temporal_interval_by_fps,
     _load_single_lerobot_metadata,
 )
 
@@ -82,6 +85,113 @@ def test_lerobot_metadata_duration_and_frame_filters_are_configurable(tmp_path, 
         caption_key="caption",
     )
     assert len(custom_filtered) == 3
+
+
+@pytest.mark.parametrize(
+    ("original_fps", "temporal_interval", "max_video_fps", "expected"),
+    [
+        (20.0, 1, 30.0, 1),
+        (30.0, 1, 30.0, 1),
+        (31.0, 1, 30.0, 2),
+        (50.0, 1, 30.0, 2),
+        (60.0, 1, 30.0, 2),
+        (61.0, 1, 30.0, 3),
+        (60.0, 4, 30.0, 4),
+        (60.0, 1, 0.0, 1),
+    ],
+)
+def test_limit_temporal_interval_by_fps(original_fps, temporal_interval, max_video_fps, expected):
+    assert _limit_temporal_interval_by_fps(original_fps, temporal_interval, max_video_fps) == expected
+
+
+def test_torchcodec_passes_temporal_interval_as_decoder_step():
+    calls = []
+
+    class FakeDecoder:
+        def get_frames_in_range(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(data=torch.zeros((4, 3, 2, 2), dtype=torch.uint8))
+
+    dataset = object.__new__(LeRobotSFTDataset)
+    dataset._decoder_cache = SimpleNamespace(get_decoder=lambda video_path, resize_hw: FakeDecoder())
+
+    frames = dataset._decode_video_frames_torchcodec(
+        "video.mp4",
+        start_frame=3,
+        end_frame=12,
+        temporal_interval=3,
+    )
+
+    assert calls == [{"start": 3, "stop": 13, "step": 3}]
+    assert frames.shape[0] == 4
+
+
+def _native_fps_dataset() -> LeRobotSFTDataset:
+    dataset = object.__new__(LeRobotSFTDataset)
+    dataset.output_sizes = {"1,1": (8, 8)}
+    dataset.num_video_frames = -1
+    dataset.max_video_fps = 30.0
+    dataset.temporal_compression_factor = 4
+    dataset.conditioning_fps = -1
+    dataset.conditioning_fps_noise_std = 0.0
+    dataset.caption_suffix = ""
+    dataset.cfg_dropout_keep_metadata = False
+    dataset.cfg_dropout_rate = 0.0
+    dataset.append_duration_fps_timestamps = False
+    dataset.append_resolution_info = False
+    dataset.conditioning_config = None
+    dataset._decoder_cache = None
+    dataset._tokenize_caption = lambda caption: ([1], caption)
+    return dataset
+
+
+def test_native_chunk_applies_max_video_fps(monkeypatch):
+    dataset = _native_fps_dataset()
+    calls = []
+
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.get_video_metadata",
+        lambda path: {"fps": 60.0, "total_frames": 61},
+    )
+
+    def fake_decode(**kwargs):
+        calls.append(kwargs)
+        return [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(31)]
+
+    dataset._decode_video_frames = fake_decode
+    metadata = {
+        "uuid": "episode-1",
+        "vision_path": "video.mp4",
+        "width": 8,
+        "height": 8,
+        "aspect_ratio": "1,1",
+        "t2w_windows": [{"start_frame": 0, "end_frame": 60, "temporal_interval": 1, "caption": "task"}],
+    }
+
+    sample = dataset.process_one_sample(metadata)
+
+    assert calls[0]["temporal_interval"] == 2
+    assert sample["conditioning_fps"] == 30.0
+    assert sample["num_multiplier"] == 2
+    assert sample["num_frames"] == 29
+
+
+def test_fixed_frame_request_is_skipped_when_fps_cap_makes_window_too_short(monkeypatch):
+    dataset = _native_fps_dataset()
+    dataset.num_video_frames = 40
+    dataset.temporal_interval_mode = "force_one"
+
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.get_video_metadata",
+        lambda path: {"fps": 60.0, "total_frames": 61},
+    )
+    dataset._decode_video_frames = lambda **kwargs: pytest.fail("decode should not be called")
+
+    metadata = _minimal_metadata() | {
+        "vision_path": "video.mp4",
+        "t2w_windows": [{"start_frame": 0, "end_frame": 60, "temporal_interval": 1, "caption": "task"}],
+    }
+    assert dataset.process_one_sample(metadata) is None
 
 
 def test_pyav_backend_uses_lerobot_timestamp_decoder(monkeypatch):
@@ -240,6 +350,7 @@ def test_video_decode_error_discards_cache_and_skips_sample(monkeypatch):
     dataset = object.__new__(LeRobotSFTDataset)
     dataset.output_sizes = {"1,1": (8, 8)}
     dataset.num_video_frames = -1
+    dataset.max_video_fps = 30.0
     dataset.video_backend = "torchcodec"
     dataset.video_resize_mode = "decode_transform"
     discarded = []

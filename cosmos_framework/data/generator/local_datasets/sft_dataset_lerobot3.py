@@ -14,6 +14,7 @@
 #     本类 = 本地 mp4 直接 get_video_metadata + 可配置后端按帧区间读取
 import hashlib
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any, Optional
@@ -266,6 +267,23 @@ _SUPPORTED_VIDEO_BACKENDS = {"pyav", "torchcodec"}
 _SUPPORTED_VIDEO_RESIZE_MODES = {"decode_transform", "post_decode"}
 
 
+def _limit_temporal_interval_by_fps(
+    original_fps: float,
+    temporal_interval: int,
+    max_video_fps: float,
+) -> int:
+    """Return an integer frame stride whose effective FPS does not exceed the cap."""
+    if original_fps <= 0:
+        raise ValueError(f"original_fps must be positive, got {original_fps}")
+    if temporal_interval < 1:
+        raise ValueError(f"temporal_interval must be at least 1, got {temporal_interval}")
+    if max_video_fps < 0:
+        raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
+    if max_video_fps == 0:
+        return temporal_interval
+    return max(temporal_interval, math.ceil(original_fps / max_video_fps))
+
+
 class _LeRobotVideoDecoderCache:
     """按视频路径缓存 torchcodec VideoDecoder 的 LRU 缓存。
 
@@ -332,6 +350,7 @@ class LeRobotSFTDataset(SFTDataset):
         video_backend: str = "torchcodec",
         video_resize_mode: str = "post_decode",
         video_tolerance_s: float = 1e-4,
+        max_video_fps: float = 30.0,
         decoder_cache_max_size: int = 64,
         **kwargs,
     ):
@@ -346,12 +365,15 @@ class LeRobotSFTDataset(SFTDataset):
             )
         if video_tolerance_s <= 0:
             raise ValueError(f"video_tolerance_s must be positive, got {video_tolerance_s}")
+        if max_video_fps < 0:
+            raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
         if video_backend == "torchcodec" and decoder_cache_max_size < 1:
             raise ValueError(f"decoder_cache_max_size must be at least 1, got {decoder_cache_max_size}")
         super().__init__(*args, **kwargs)
         self.video_backend = video_backend
         self.video_resize_mode = video_resize_mode
         self.video_tolerance_s = video_tolerance_s
+        self.max_video_fps = float(max_video_fps)
         self._decoder_cache = (
             _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size) if video_backend == "torchcodec" else None
         )
@@ -369,10 +391,12 @@ class LeRobotSFTDataset(SFTDataset):
         decoder = self._decoder_cache.get_decoder(video_path, resize_hw=resize_hw)
 
         # torchcodec uses a half-open [start, stop) range.
-        frame_batch = decoder.get_frames_in_range(start=start_frame, stop=end_frame + 1)
+        frame_batch = decoder.get_frames_in_range(
+            start=start_frame,
+            stop=end_frame + 1,
+            step=temporal_interval,
+        )
         data = frame_batch.data  # [N, C, H, W] uint8
-        if temporal_interval > 1:
-            data = data[0::temporal_interval]
         return data
 
     def _decode_video_frames_pyav(
@@ -560,14 +584,29 @@ class LeRobotSFTDataset(SFTDataset):
             if self.temporal_interval_mode == "force_one":
                 temporal_interval = 1
             elif self.temporal_interval_mode == "max_30fps":
-                temporal_interval = max(1, int(original_fps / 30.0))
+                temporal_interval = max(1, math.ceil(original_fps / 30.0))
             elif self.temporal_interval_mode == "entire_chunk":
                 temporal_interval = frames_in_window // self.num_video_frames
                 temporal_interval = max(1, temporal_interval)
             else:
                 raise ValueError(f"Unknown temporal_interval_mode: {self.temporal_interval_mode}")
 
+        temporal_interval = _limit_temporal_interval_by_fps(
+            original_fps,
+            temporal_interval,
+            self.max_video_fps,
+        )
+
+        if self.num_video_frames != -1:
             num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
+            if num_frames_before_downsample > frames_in_window:
+                log.warning(
+                    f"FPS cap leaves too few frames in window: {metadata['uuid']}, "
+                    f"original_fps={original_fps}, max_video_fps={self.max_video_fps}, "
+                    f"temporal_interval={temporal_interval}, frames_in_window={frames_in_window}, "
+                    f"required_span={num_frames_before_downsample}, requested_frames={self.num_video_frames}"
+                )
+                return None
             if self.frame_selection_mode == "first":
                 start_frame = window_start
             elif self.frame_selection_mode == "center":
@@ -737,6 +776,7 @@ def get_sft_dataset_from_lerobot(
     video_backend: str = "torchcodec",
     video_resize_mode: str = "post_decode",
     video_tolerance_s: float = 1e-4,
+    max_video_fps: float = 30.0,
     decoder_cache_max_size: int = 64,
     **kwargs,
 ) -> LeRobotSFTDataset:
@@ -755,6 +795,8 @@ def get_sft_dataset_from_lerobot(
         raise ValueError(f"min_video_frames must be at least 1, got {min_video_frames}")
     if max_video_duration_s < 0:
         raise ValueError(f"max_video_duration_s must be non-negative, got {max_video_duration_s}")
+    if max_video_fps < 0:
+        raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
 
     # LeRobot 是本地加载，不需要 S3 下载凭证（SFTDataset 构造仍要求 s3_credentials 参数）
     if INTERNAL:
@@ -808,6 +850,7 @@ def get_sft_dataset_from_lerobot(
         video_backend=video_backend,
         video_resize_mode=video_resize_mode,
         video_tolerance_s=video_tolerance_s,
+        max_video_fps=max_video_fps,
         decoder_cache_max_size=decoder_cache_max_size,
     )
     return dataset

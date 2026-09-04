@@ -736,6 +736,14 @@ class DataloaderTrainConfig(BaseModel):
             "Set 0 to disable the duration cap. Remapped to the nested SFT dataset and skipped on VLM."
         ),
     )
+    max_video_fps: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "VFM LeRobot only. Integer-stride downsample videos whose native FPS exceeds this cap. "
+            "Set 0 to disable FPS downsampling. Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
     video_backend: Literal["torchcodec", "pyav"] = Field(
         default="torchcodec",
         description=(

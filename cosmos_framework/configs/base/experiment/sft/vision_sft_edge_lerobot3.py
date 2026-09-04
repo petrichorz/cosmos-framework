@@ -237,6 +237,7 @@ vision_sft_edge_lerobot3 = LazyDict(
                             video_backend="torchcodec",  # 可切换为 "pyav"
                             video_resize_mode="post_decode",  # 可切换为 "decode_transform"
                             video_tolerance_s=1e-4,  # PyAV 最近帧匹配容差
+                            max_video_fps=30.0,  # 0 disables FPS downsampling
                             caption_key="caption",  # episodes 表里的 caption 列名
                             min_short_edge=0,
                             num_video_frames=-1,
