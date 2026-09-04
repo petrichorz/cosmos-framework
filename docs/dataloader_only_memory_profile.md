@@ -85,8 +85,44 @@ TorchCodec 路径继续使用精确 frame range seek 和每个 worker 独立的 
 
 - `effective_config.yaml`：所有 TOML 和命令行 override 合并后的有效配置。
 - `rank_000.jsonl`：每行一个内存快照；多 rank 时每个 rank 各写一个文件。
+- `wandb/rank_000/`：启用 W&B 后，该 rank 的本地 W&B run 文件。
 
 不要让两个同时运行的任务共用输出目录，同 rank 文件会在启动时覆盖。
+
+### 写入 Weights & Biases
+
+W&B 默认关闭。在线上传并将 W&B 本地文件保存在 profiler 输出目录时，增加：
+
+```text
+--wandb-mode online \
+--wandb-project cosmos-dataloader-profile \
+--wandb-group torchcodec-vs-pyav \
+--wandb-name torchcodec-cache64
+```
+
+只生成本地 W&B run、不访问网络时，使用：
+
+```text
+--wandb-mode offline
+```
+
+默认只为 rank 0 创建 W&B run。需要观察每个 rank 时增加：
+
+```text
+--wandb-ranks all
+```
+
+此时每个 rank 创建独立 run，run 名自动追加 `-rankNNN`，本地文件分别位于 `wandb/rank_NNN/`。W&B 中的指标按快照 phase 分组，例如：
+
+```text
+phase/after_next/process_tree_rss_mib
+phase/after_release/process_tree_pss_mib
+phase/after_next/children_fds
+phase/after_next/worker_max_num_fds
+phase/after_next/fetch_seconds
+```
+
+原始字节数和每个 worker 的完整明细仍以 JSONL 为准；W&B 将内存字段转换成 MiB，并上传常用聚合值。脚本先完成全部 profiling、关闭 worker 并写完 JSONL，然后才初始化 W&B 并回放记录。因此 W&B 后台进程、网络线程及其文件描述符不会进入内存快照，也不会影响 `fetch_seconds`。
 
 ## 多 rank 复现
 

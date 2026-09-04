@@ -46,6 +46,21 @@ def _parse_args() -> argparse.Namespace:
         help="每隔多少个 batch 读取一次较慢的 USS/PSS；0 表示关闭",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="默认写到当前 job 目录下")
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("disabled", "offline", "online"),
+        default="disabled",
+        help="采集结束后回放 JSONL 到 W&B；默认关闭，offline 仅写本地目录",
+    )
+    parser.add_argument(
+        "--wandb-ranks",
+        choices=("rank0", "all"),
+        default="rank0",
+        help="上传 rank 0，或让每个 rank 创建独立 W&B run（默认：rank0）",
+    )
+    parser.add_argument("--wandb-project", default=None, help="默认沿用 TOML 的 job.project")
+    parser.add_argument("--wandb-group", default=None, help="默认沿用 TOML 的 job.group")
+    parser.add_argument("--wandb-name", default=None, help="默认使用 <job.name>-dataloader-profile-rankNNN")
     parser.add_argument("--gc-every", type=int, default=0, help="诊断选项：定期 gc.collect()；0 表示关闭")
     parser.add_argument(
         "--malloc-trim-every",
@@ -254,6 +269,130 @@ def _advance_training_position(iteration: int, grad_accum_index: int, grad_accum
     return iteration, grad_accum_index
 
 
+def _wandb_metric_name(name: str) -> str:
+    if name.endswith("_bytes"):
+        return f"{name[:-6]}_mib"
+    return name
+
+
+def _wandb_metric_value(name: str, value: int | float) -> int | float:
+    if name.endswith("_bytes"):
+        return value / 2**20
+    return value
+
+
+def _record_to_wandb_metrics(record: dict[str, Any], trace_step: int) -> dict[str, Any]:
+    """Select scalar trace fields for W&B while the JSONL remains the lossless record."""
+    phase = str(record["phase"])
+    prefix = f"phase/{phase}"
+    metrics: dict[str, Any] = {
+        "trace/step": trace_step,
+        "trace/phase": phase,
+        "trace/elapsed_seconds": record["elapsed_seconds"],
+        "trace/iteration": record["iteration"],
+        "trace/rank": record["rank"],
+    }
+    for key in ("batch_index", "grad_accum_index"):
+        if key in record:
+            metrics[f"trace/{key}"] = record[key]
+
+    parent = record.get("parent", {})
+    for key, value in parent.items():
+        if key == "pid" or not isinstance(value, (int, float)):
+            continue
+        metrics[f"{prefix}/parent/{_wandb_metric_name(key)}"] = _wandb_metric_value(key, value)
+
+    top_level_scalars = (
+        "children_count",
+        "children_rss_bytes",
+        "children_pinned_bytes",
+        "children_fds",
+        "system_memory_available_bytes",
+        "process_tree_rss_bytes",
+        "children_uss_bytes",
+        "children_pss_bytes",
+        "process_tree_uss_bytes",
+        "process_tree_pss_bytes",
+        "system_shm_used_bytes",
+        "fetch_seconds",
+    )
+    for key in top_level_scalars:
+        value = record.get(key)
+        if isinstance(value, (int, float)):
+            metrics[f"{prefix}/{_wandb_metric_name(key)}"] = _wandb_metric_value(key, value)
+
+    for key, value in record.items():
+        if key.startswith("delta_") and isinstance(value, (int, float)):
+            metrics[f"{prefix}/{_wandb_metric_name(key)}"] = _wandb_metric_value(key, value)
+
+    children = record.get("children", [])
+    if children:
+        worker_rss = [child["rss_bytes"] for child in children if "rss_bytes" in child]
+        worker_fds = [child["num_fds"] for child in children if "num_fds" in child]
+        if worker_rss:
+            metrics[f"{prefix}/worker_max_rss_mib"] = max(worker_rss) / 2**20
+        if worker_fds:
+            metrics[f"{prefix}/worker_max_num_fds"] = max(worker_fds)
+
+    for device, stats in record.get("batch_tensors", {}).get("by_device", {}).items():
+        safe_device = str(device).replace(":", "_")
+        metrics[f"{prefix}/batch/{safe_device}/tensor_count"] = stats["count"]
+        metrics[f"{prefix}/batch/{safe_device}/logical_mib"] = stats["logical_bytes"] / 2**20
+    return metrics
+
+
+def _upload_trace_to_wandb(
+    trace_path: Path,
+    *,
+    mode: str,
+    project: str,
+    group: str | None,
+    name: str,
+    config: dict[str, Any],
+) -> Path:
+    """Replay a completed JSONL trace so W&B cannot contaminate the measurement."""
+    rank_dir = trace_path.parent / "wandb" / trace_path.stem
+    rank_dir.mkdir(parents=True, exist_ok=True)
+    temporary_env = {
+        "WANDB_CACHE_DIR": str(rank_dir / "cache"),
+        "WANDB_DATA_DIR": str(rank_dir / "data"),
+    }
+    added_env = []
+    try:
+        for key, value in temporary_env.items():
+            if key not in os.environ:
+                os.environ[key] = value
+                added_env.append(key)
+        import wandb
+
+        run = wandb.init(
+            project=project,
+            group=group or None,
+            name=name,
+            mode=mode,
+            dir=str(rank_dir),
+            config=config,
+            tags=["dataloader-profile"],
+        )
+    except ImportError as error:
+        raise RuntimeError("--wandb-mode requires the wandb package") from error
+    finally:
+        for key in added_env:
+            os.environ.pop(key, None)
+    try:
+        trace_records = 0
+        with trace_path.open(encoding="utf-8") as trace_file:
+            for trace_step, line in enumerate(trace_file):
+                record = json.loads(line)
+                run.log(_record_to_wandb_metrics(record, trace_step), step=trace_step)
+                trace_records += 1
+        run.summary["trace_path"] = str(trace_path)
+        run.summary["trace_records"] = trace_records
+    finally:
+        run.finish()
+    return rank_dir
+
+
 def _run(args: argparse.Namespace) -> Path:
     # Match the NPU compatibility bootstrap in cosmos_framework.scripts.train
     # before importing the backend selector used by distributed.init().
@@ -447,8 +586,36 @@ def _run(args: argparse.Namespace) -> Path:
             grad_accum_index=grad_accum_index,
         )
         recorder.close()
+        # Keep post-run W&B replay from perturbing another rank that is still
+        # profiling. This barrier is outside the recorded interval.
+        if args.wandb_mode != "disabled" and dist.is_initialized():
+            dist.barrier()
         if initialized_here and dist.is_initialized():
             dist.destroy_process_group()
+
+    if args.wandb_mode != "disabled" and (args.wandb_ranks == "all" or rank == 0):
+        project = args.wandb_project or str(config.job.project) or "cosmos-dataloader-profile"
+        group = args.wandb_group or str(config.job.group) or None
+        base_name = args.wandb_name or f"{config.job.name}-dataloader-profile"
+        run_name = f"{base_name}-rank{rank:03d}"
+        wandb_dir = _upload_trace_to_wandb(
+            output_path,
+            mode=args.wandb_mode,
+            project=project,
+            group=group,
+            name=run_name,
+            config={
+                "sft_toml": args.sft_toml,
+                "rank": rank,
+                "iterations": args.iterations,
+                "start_iteration": args.start_iteration,
+                "log_every": args.log_every,
+                "full_info_every": args.full_info_every,
+                "hydra_overrides": list(args.opts),
+                "effective_config_path": str(output_dir / "effective_config.yaml"),
+            },
+        )
+        print(f"W&B {args.wandb_mode} run files written to: {wandb_dir}", flush=True)
     return output_path
 
 
