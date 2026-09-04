@@ -112,6 +112,7 @@ def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
 def _load_single_lerobot_metadata(
     lerobot_root: str,
     min_frames: int,
+    max_video_duration_s: float,
     min_short_edge: int,
     video_feature_key: str | None,
     caption_key: str,
@@ -172,8 +173,8 @@ def _load_single_lerobot_metadata(
         length = int(row.get("length", end_frame - start_frame + 1))
         duration = to_ts - from_ts
 
-        # 过滤（对齐 sft_dataset._load_sft_metadata_from_s3）
-        if duration > 61.0:
+        # 过滤（默认值对齐 sft_dataset._load_sft_metadata_from_s3；LeRobot 路径可配置）
+        if max_video_duration_s > 0 and duration > max_video_duration_s:
             continue
         if min_short_edge > 0 and min(width, height) < min_short_edge:
             continue
@@ -222,7 +223,8 @@ def _load_single_lerobot_metadata(
 
 def _load_lerobot_metadata(
     lerobot_root: str,
-    min_frames: int = 61,
+    min_frames: int,
+    max_video_duration_s: float,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
@@ -245,6 +247,7 @@ def _load_lerobot_metadata(
             _load_single_lerobot_metadata(
                 root,
                 min_frames=min_frames,
+                max_video_duration_s=max_video_duration_s,
                 min_short_edge=min_short_edge,
                 video_feature_key=video_feature_key,
                 caption_key=caption_key,
@@ -710,6 +713,8 @@ def get_sft_dataset_from_lerobot(
     lerobot_root: str,
     resolution: str = "720",
     num_video_frames: int = -1,  # LeRobot 场景默认 -1（native chunk mode，直接用 t2w_windows 里的帧区间）
+    min_video_frames: int = 61,
+    max_video_duration_s: float = 61.0,
     temporal_interval_mode: str = "entire_chunk",
     frame_selection_mode: str = "center",
     tokenizer_config: Optional[Any] = None,
@@ -746,6 +751,10 @@ def get_sft_dataset_from_lerobot(
     """
     log.info(f"Unknown kwargs for get_sft_dataset_from_lerobot: {kwargs}")
     assert resolution in VIDEO_RES_SIZE_INFO.keys(), "The provided resolution cannot be found in VIDEO_RES_SIZE_INFO."
+    if min_video_frames < 1:
+        raise ValueError(f"min_video_frames must be at least 1, got {min_video_frames}")
+    if max_video_duration_s < 0:
+        raise ValueError(f"max_video_duration_s must be non-negative, got {max_video_duration_s}")
 
     # LeRobot 是本地加载，不需要 S3 下载凭证（SFTDataset 构造仍要求 s3_credentials 参数）
     if INTERNAL:
@@ -756,7 +765,8 @@ def get_sft_dataset_from_lerobot(
 
     metadata_list = _load_lerobot_metadata(
         lerobot_root,
-        min_frames=61,
+        min_frames=min_video_frames,
+        max_video_duration_s=max_video_duration_s,
         min_short_edge=min_short_edge,
         video_feature_key=video_feature_key,
         caption_key=caption_key,

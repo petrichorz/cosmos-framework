@@ -228,15 +228,20 @@ vision_sft_edge_lerobot3 = LazyDict(
                             conditioning_fps=-1,
                             conditioning_fps_noise_std=0.0,
                             frame_selection_mode="first",
-                            lerobot_root="${oc.env:DATASET_PATH}",   # LeRobot 数据集根目录（含 meta/info.json）
+                            lerobot_root="${oc.env:DATASET_PATH}",  # LeRobot 数据集根目录（含 meta/info.json）
                             video_feature_key=None,  # 显式指定 feature 名（精确匹配）；None 则不显式指定
-                            video_feature_keywords=["top", "head"],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
+                            video_feature_keywords=[
+                                "top",
+                                "head",
+                            ],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
                             video_backend="torchcodec",  # 可切换为 "pyav"
                             video_resize_mode="post_decode",  # 可切换为 "decode_transform"
                             video_tolerance_s=1e-4,  # PyAV 最近帧匹配容差
-                            caption_key="caption",                   # episodes 表里的 caption 列名
+                            caption_key="caption",  # episodes 表里的 caption 列名
                             min_short_edge=0,
                             num_video_frames=-1,
+                            min_video_frames=61,  # metadata filter; configurable from TOML
+                            max_video_duration_s=61.0,  # set 0 in TOML to disable the duration cap
                             resolution="256",
                             sample_by_window=False,
                             temporal_compression_factor=4,

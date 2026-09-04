@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import json
+
+import pandas as pd
 import pytest
 import torch
 
 from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
     LeRobotSFTDataset,
     _LeRobotVideoDecoderCache,
+    _load_single_lerobot_metadata,
 )
 
 
@@ -22,6 +26,62 @@ def test_rejects_unknown_video_resize_mode():
     dataset = object.__new__(LeRobotSFTDataset)
     with pytest.raises(ValueError, match="Unsupported video_resize_mode='decoder'"):
         dataset.__init__(video_resize_mode="decoder")
+
+
+def test_lerobot_metadata_duration_and_frame_filters_are_configurable(tmp_path, monkeypatch):
+    video_key = "observation.images.top"
+    info = {
+        "fps": 10,
+        "features": {video_key: {"dtype": "video", "shape": [8, 8, 3]}},
+        "video_path": "videos/{video_key}/chunk-{chunk_index}/file-{file_index}.mp4",
+    }
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta" / "info.json").write_text(json.dumps(info))
+    episodes_dir = tmp_path / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    (episodes_dir / "file-000.parquet").touch()
+
+    rows = [
+        {
+            "episode_index": 0,
+            f"videos/{video_key}/from_timestamp": 0.0,
+            f"videos/{video_key}/to_timestamp": 6.1,
+            "tasks": ["exactly 61 frames"],
+        },
+        {
+            "episode_index": 1,
+            f"videos/{video_key}/from_timestamp": 6.1,
+            f"videos/{video_key}/to_timestamp": 12.0,
+            "tasks": ["fewer than 61 frames"],
+        },
+        {
+            "episode_index": 2,
+            f"videos/{video_key}/from_timestamp": 12.0,
+            f"videos/{video_key}/to_timestamp": 74.0,
+            "tasks": ["longer than 61 seconds"],
+        },
+    ]
+    monkeypatch.setattr(pd, "read_parquet", lambda _: pd.DataFrame(rows))
+
+    default_filtered = _load_single_lerobot_metadata(
+        str(tmp_path),
+        min_frames=61,
+        max_video_duration_s=61.0,
+        min_short_edge=0,
+        video_feature_key=video_key,
+        caption_key="caption",
+    )
+    assert [item["uuid"] for item in default_filtered] == [f"{tmp_path.name}_chunk_0_file_0_episode_0"]
+
+    custom_filtered = _load_single_lerobot_metadata(
+        str(tmp_path),
+        min_frames=50,
+        max_video_duration_s=0,
+        min_short_edge=0,
+        video_feature_key=video_key,
+        caption_key="caption",
+    )
+    assert len(custom_filtered) == 3
 
 
 def test_pyav_backend_uses_lerobot_timestamp_decoder(monkeypatch):

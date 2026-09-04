@@ -85,6 +85,8 @@ save_iter            = 100
 
 [dataloader_train]
 max_sequence_length = 45056
+min_video_frames    = 61          # episode 最少帧数
+max_video_duration_s = 61.0       # episode 最长秒数；设为 0 可关闭上限
 video_backend     = "torchcodec" # 可切换为 "pyav"
 video_resize_mode = "post_decode" # 可切换为 "decode_transform"
 video_tolerance_s = 1.0e-4       # PyAV 最近帧匹配容差；TorchCodec 后端不使用
