@@ -448,7 +448,7 @@ class LeRobotSFTDataset(SFTDataset):
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
-        tolerance_s: float = 1e-4,
+        tolerance_s: float = 0.034,
         decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
         **kwargs,
     ):
@@ -557,12 +557,29 @@ class LeRobotSFTDataset(SFTDataset):
         # 【lerobot 加载】帧号 → 绝对时间戳 → decode_video_frames（返回 [T,C,H,W] float ∈ [0,1]）
         frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
         timestamps = [idx / original_fps for idx in frame_indices]
-        video_frames = _vu.decode_video_frames(
-            input_video_path,
-            timestamps,
-            tolerance_s=self.tolerance_s,
-            backend=self.video_backend,
-        )  # [T, C, H, W] float32 ∈ [0,1]
+        try:
+            video_frames = _vu.decode_video_frames(
+                input_video_path,
+                timestamps,
+                tolerance_s=self.tolerance_s,
+                backend=self.video_backend,
+            )  # [T, C, H, W] float32 ∈ [0,1]
+        except AssertionError as e:
+            # 时间戳与视频 pts 偏差超过 tolerance_s 时，lerobot 内部 assert 会抛 AssertionError。
+            # 打印其详细提示（哪些时间戳违反 tolerance、视频路径等），并跳过该样本，避免中断训练。
+            log.warning(
+                f"AssertionError decoding video for sample {metadata['uuid']} "
+                f"(start={start_frame}, end={end_frame}, path={metadata['vision_path']}): {e}"
+            )
+            return None
+        except Exception as e:
+            # 其它解码失败（坏文件、解码器异常等），同样跳过该样本。
+            log.warning(
+                f"Failed to decode video for sample {metadata['uuid']} "
+                f"(start={start_frame}, end={end_frame}, path={metadata['vision_path']}): "
+                f"{type(e).__name__}: {e}"
+            )
+            return None
 
         if video_frames.shape[0] == 0:
             log.warning(
@@ -700,7 +717,7 @@ def get_sft_dataset_from_lerobot(
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
     video_backend: str | None = None,
-    tolerance_s: float = 1e-4,
+    tolerance_s: float = 0.034,
     decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
     **kwargs,
 ) -> LeRobotSFTDataset:
