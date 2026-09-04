@@ -128,13 +128,13 @@ def build_teacher_forcing_layout(
     sample_lens: list[int] = []
     split_lens: list[int] = []
     attn_modes: list[str] = []
-    source_sequence_indexes: list[int] = []
-    sample_ids: list[int] = []
-    stream_ids: list[int] = []
-    block_ids: list[int] = []
-    gen_query_indexes: list[int] = []
-    clean_token_indexes: list[int] = []
-    noisy_output_indexes: list[int] = []
+    source_sequence_index_chunks: list[torch.Tensor] = []
+    sample_id_chunks: list[torch.Tensor] = []
+    stream_id_chunks: list[torch.Tensor] = []
+    block_id_chunks: list[torch.Tensor] = []
+    gen_query_index_chunks: list[torch.Tensor] = []
+    clean_token_index_chunks: list[torch.Tensor] = []
+    noisy_output_index_chunks: list[torch.Tensor] = []
 
     original_offset = 0
     new_offset = 0
@@ -153,10 +153,17 @@ def build_teacher_forcing_layout(
         original_sample_len = und_count + vision_count
         new_sample_len = und_count + 2 * vision_count
 
-        und_source = list(range(original_offset, original_offset + und_count))
-        vision_source = list(range(original_offset + und_count, original_offset + original_sample_len))
-        vision_frame_ids = torch.arange(num_frames, dtype=torch.long).repeat_interleave(spatial_tokens)
-        vision_block_ids = torch.div(vision_frame_ids, block_size, rounding_mode="floor").tolist()
+        und_source = torch.arange(original_offset, original_offset + und_count, dtype=torch.long)
+        vision_source = torch.arange(
+            original_offset + und_count,
+            original_offset + original_sample_len,
+            dtype=torch.long,
+        )
+        vision_block_ids = torch.div(
+            torch.arange(num_frames, dtype=torch.long),
+            block_size,
+            rounding_mode="floor",
+        ).repeat_interleave(spatial_tokens)
 
         clean_start = new_offset + und_count
         noisy_start = clean_start + vision_count
@@ -166,17 +173,29 @@ def build_teacher_forcing_layout(
         sample_lens.append(new_sample_len)
         split_lens.extend((und_count, 2 * vision_count))
         attn_modes.extend(("causal", "full"))
-        source_sequence_indexes.extend(und_source + vision_source + vision_source)
-        sample_ids.extend([sample_id] * new_sample_len)
-        stream_ids.extend(
-            [int(TeacherForcingStream.UND)] * und_count
-            + [int(TeacherForcingStream.CLEAN)] * vision_count
-            + [int(TeacherForcingStream.NOISY)] * vision_count
+        source_sequence_index_chunks.append(torch.cat((und_source, vision_source, vision_source)))
+        sample_id_chunks.append(torch.full((new_sample_len,), sample_id, dtype=torch.long))
+        stream_id_chunks.append(
+            torch.cat(
+                (
+                    torch.full((und_count,), int(TeacherForcingStream.UND), dtype=torch.long),
+                    torch.full((vision_count,), int(TeacherForcingStream.CLEAN), dtype=torch.long),
+                    torch.full((vision_count,), int(TeacherForcingStream.NOISY), dtype=torch.long),
+                )
+            )
         )
-        block_ids.extend([-1] * und_count + vision_block_ids + vision_block_ids)
-        gen_query_indexes.extend(range(clean_start, new_sample_end))
-        clean_token_indexes.extend(range(clean_start, noisy_start))
-        noisy_output_indexes.extend(range(noisy_start, new_sample_end))
+        block_id_chunks.append(
+            torch.cat(
+                (
+                    torch.full((und_count,), -1, dtype=torch.long),
+                    vision_block_ids,
+                    vision_block_ids,
+                )
+            )
+        )
+        gen_query_index_chunks.append(torch.arange(clean_start, new_sample_end, dtype=torch.long))
+        clean_token_index_chunks.append(torch.arange(clean_start, noisy_start, dtype=torch.long))
+        noisy_output_index_chunks.append(torch.arange(noisy_start, new_sample_end, dtype=torch.long))
 
         original_offset += original_sample_len
         new_offset = new_sample_end
@@ -189,13 +208,13 @@ def build_teacher_forcing_layout(
         sample_lens=tuple(sample_lens),
         split_lens=tuple(split_lens),
         attn_modes=tuple(attn_modes),
-        source_sequence_indexes=torch.tensor(source_sequence_indexes, dtype=torch.long),
-        sample_ids=torch.tensor(sample_ids, dtype=torch.long),
-        stream_ids=torch.tensor(stream_ids, dtype=torch.long),
-        block_ids=torch.tensor(block_ids, dtype=torch.long),
-        gen_query_indexes=torch.tensor(gen_query_indexes, dtype=torch.long),
-        clean_token_indexes=torch.tensor(clean_token_indexes, dtype=torch.long),
-        noisy_output_indexes=torch.tensor(noisy_output_indexes, dtype=torch.long),
+        source_sequence_indexes=torch.cat(source_sequence_index_chunks),
+        sample_ids=torch.cat(sample_id_chunks),
+        stream_ids=torch.cat(stream_id_chunks),
+        block_ids=torch.cat(block_id_chunks),
+        gen_query_indexes=torch.cat(gen_query_index_chunks),
+        clean_token_indexes=torch.cat(clean_token_index_chunks),
+        noisy_output_indexes=torch.cat(noisy_output_index_chunks),
     )
 
 
@@ -534,8 +553,8 @@ def _validate_teacher_forcing_packed_sequence(
 
     vision_token_shapes: list[tuple[int, int, int]] = []
     und_token_counts: list[int] = []
-    expected_text_indexes: list[int] = []
-    expected_vision_indexes: list[int] = []
+    expected_text_index_chunks: list[torch.Tensor] = []
+    expected_vision_index_chunks: list[torch.Tensor] = []
     expected_split_lens: list[int] = []
     expected_attn_modes: list[str] = []
     sample_offset = 0
@@ -549,26 +568,42 @@ def _validate_teacher_forcing_packed_sequence(
             raise ValueError(
                 f"sample {sample_id} must contain at least one UND token before its vision tokens, got {und_count}"
             )
-        expected_text_indexes.extend(range(sample_offset, sample_offset + und_count))
-        expected_vision_indexes.extend(range(sample_offset + und_count, sample_offset + sample_len))
+        expected_text_index_chunks.append(
+            torch.arange(
+                sample_offset,
+                sample_offset + und_count,
+                dtype=packed_sequence.text_indexes.dtype,
+                device=packed_sequence.text_indexes.device,
+            )
+        )
+        expected_vision_index_chunks.append(
+            torch.arange(
+                sample_offset + und_count,
+                sample_offset + sample_len,
+                dtype=vision.sequence_indexes.dtype,
+                device=vision.sequence_indexes.device,
+            )
+        )
         expected_split_lens.extend((und_count, vision_count))
         expected_attn_modes.extend(("causal", "full"))
         und_token_counts.append(und_count)
         vision_token_shapes.append((num_frames, height, width))
         sample_offset += sample_len
 
-    if packed_sequence.text_indexes.tolist() != expected_text_indexes:
+    expected_text_indexes = torch.cat(expected_text_index_chunks)
+    expected_vision_indexes = torch.cat(expected_vision_index_chunks)
+    if not torch.equal(packed_sequence.text_indexes, expected_text_indexes):
         raise ValueError("text and vision sequence indexes must form the expected per-sample UND/GEN partition")
-    if vision.sequence_indexes.tolist() != expected_vision_indexes:
+    if not torch.equal(vision.sequence_indexes, expected_vision_indexes):
         raise ValueError("text and vision sequence indexes must form the expected per-sample UND/GEN partition")
     if packed_sequence.split_lens != expected_split_lens or packed_sequence.attn_modes != expected_attn_modes:
         raise ValueError(
             "source attention splits must alternate one causal UND split and one full vision split per sample"
         )
-    if packed_sequence.text_ids.numel() != len(expected_text_indexes):
+    if packed_sequence.text_ids.numel() != expected_text_indexes.numel():
         raise ValueError(
             "text_ids must contain one payload per UND sequence index, "
-            f"got {packed_sequence.text_ids.numel()} and {len(expected_text_indexes)}"
+            f"got {packed_sequence.text_ids.numel()} and {expected_text_indexes.numel()}"
         )
 
     return und_token_counts, vision_token_shapes
@@ -577,21 +612,33 @@ def _validate_teacher_forcing_packed_sequence(
 def _build_source_to_stream_index(
     layout: TeacherForcingLayout,
     stream: TeacherForcingStream,
-) -> dict[int, int]:
+) -> torch.LongTensor:
+    """Build a dense source-index lookup without extracting Python scalars."""
+
     stream_indexes = torch.nonzero(layout.stream_ids == int(stream), as_tuple=True)[0]
-    return {int(layout.source_sequence_indexes[new_index]): int(new_index) for new_index in stream_indexes}
+    source_indexes = layout.source_sequence_indexes.index_select(0, stream_indexes)
+    source_to_new = torch.full(
+        (sum(layout.original_sample_lens),),
+        -1,
+        dtype=torch.long,
+        device=layout.source_sequence_indexes.device,
+    )
+    source_to_new[source_indexes] = stream_indexes
+    return source_to_new
 
 
-def _remap_indexes(indexes: torch.Tensor | None, source_to_new: dict[int, int], name: str) -> torch.Tensor | None:
+def _remap_indexes(indexes: torch.Tensor | None, source_to_new: torch.Tensor, name: str) -> torch.Tensor | None:
     if indexes is None:
         return None
-    try:
-        remapped = [source_to_new[int(index)] for index in indexes]
-    except KeyError as error:
-        raise ValueError(
-            f"{name} contains an index outside the supported source stream: {int(error.args[0])}"
-        ) from error
-    return torch.tensor(remapped, dtype=torch.long)
+    if indexes.device != source_to_new.device:
+        raise ValueError(f"{name} and source index lookup must be on the same device")
+    indexes = indexes.to(dtype=torch.long)
+    if bool(((indexes < 0) | (indexes >= source_to_new.numel())).any()):
+        raise ValueError(f"{name} contains an index outside the packed source sequence")
+    remapped = source_to_new.index_select(0, indexes)
+    if bool((remapped < 0).any()):
+        raise ValueError(f"{name} contains an index outside the supported source stream")
+    return remapped
 
 
 def expand_packed_sequence_for_teacher_forcing(
@@ -605,7 +652,8 @@ def expand_packed_sequence_for_teacher_forcing(
 
     from cosmos_framework.data.generator.sequence_packing.modality import ModalitySpan
 
-    und_token_counts, vision_token_shapes = _validate_teacher_forcing_packed_sequence(packed_sequence)
+    with torch.autograd.profiler.record_function("teacher_forcing/validate_layout"):
+        und_token_counts, vision_token_shapes = _validate_teacher_forcing_packed_sequence(packed_sequence)
     assert packed_sequence.vision is not None
     vision = packed_sequence.vision
 
@@ -631,39 +679,46 @@ def expand_packed_sequence_for_teacher_forcing(
                 f"got {clean_token.device} and {noisy_token.device}"
             )
 
-    layout = build_teacher_forcing_layout(
-        und_token_counts=und_token_counts,
-        vision_token_shapes=vision_token_shapes,
-        block_size=block_size,
-        history_blocks=history_blocks,
-    )
-    source_to_und = _build_source_to_stream_index(layout, TeacherForcingStream.UND)
-    source_to_noisy = _build_source_to_stream_index(layout, TeacherForcingStream.NOISY)
+    with torch.autograd.profiler.record_function("teacher_forcing/build_layout"):
+        layout = build_teacher_forcing_layout(
+            und_token_counts=und_token_counts,
+            vision_token_shapes=vision_token_shapes,
+            block_size=block_size,
+            history_blocks=history_blocks,
+        )
+    with torch.autograd.profiler.record_function("teacher_forcing/remap_indexes"):
+        source_to_und = _build_source_to_stream_index(layout, TeacherForcingStream.UND)
+        source_to_noisy = _build_source_to_stream_index(layout, TeacherForcingStream.NOISY)
 
-    remapped_text_indexes = _remap_indexes(packed_sequence.text_indexes, source_to_und, "text_indexes")
-    remapped_ce_loss_indexes = _remap_indexes(
-        packed_sequence.ce_loss_indexes,
-        source_to_und,
-        "ce_loss_indexes",
-    )
-    remapped_vision_indexes = _remap_indexes(vision.sequence_indexes, source_to_noisy, "vision.sequence_indexes")
-    remapped_mse_loss_indexes = _remap_indexes(
-        vision.mse_loss_indexes,
-        source_to_noisy,
-        "vision.mse_loss_indexes",
-    )
+        remapped_text_indexes = _remap_indexes(packed_sequence.text_indexes, source_to_und, "text_indexes")
+        remapped_ce_loss_indexes = _remap_indexes(
+            packed_sequence.ce_loss_indexes,
+            source_to_und,
+            "ce_loss_indexes",
+        )
+        remapped_vision_indexes = _remap_indexes(vision.sequence_indexes, source_to_noisy, "vision.sequence_indexes")
+        remapped_mse_loss_indexes = _remap_indexes(
+            vision.mse_loss_indexes,
+            source_to_noisy,
+            "vision.mse_loss_indexes",
+        )
     assert remapped_text_indexes is not None
     assert remapped_vision_indexes is not None
     assert remapped_mse_loss_indexes is not None
 
     remapped_spans: list[ModalitySpan] = []
     for span in vision.spans:
-        span_indexes = [
-            source_to_noisy[index] for index in range(span.sequence_start, span.sequence_start + span.sequence_len)
-        ]
-        if span_indexes != list(range(span_indexes[0], span_indexes[0] + span.sequence_len)):
+        span_source_indexes = torch.arange(
+            span.sequence_start,
+            span.sequence_start + span.sequence_len,
+            dtype=torch.long,
+            device=source_to_noisy.device,
+        )
+        span_indexes = _remap_indexes(span_source_indexes, source_to_noisy, "vision span")
+        assert span_indexes is not None
+        if span_indexes.numel() > 1 and not bool((span_indexes[1:] == span_indexes[:-1] + 1).all()):
             raise ValueError(f"vision span at source index {span.sequence_start} is not contiguous after remapping")
-        remapped_spans.append(replace(span, sequence_start=span_indexes[0]))
+        remapped_spans.append(replace(span, sequence_start=int(span_indexes[0])))
 
     expanded_vision = replace(
         vision,

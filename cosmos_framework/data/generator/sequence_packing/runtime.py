@@ -32,31 +32,6 @@ SequencePack = dict[str, Any]
 # ------------------------------------
 
 
-def _find_non_causal_text_token_idx(
-    attn_modes: List[str], split_lens: List[int], und_token_indexes: List[int]
-) -> List[int]:
-    """
-    Find the indexes of the "und" tokens that are under the "full" mode.
-    This are indices into the full_only_seq.
-    """
-    # Return indexes *into* full_only_seq, not into the original packed sequence.
-    # The order within full_only_seq is the concatenation of each "full" split in order.
-    out = []
-    full_offset = 0
-    packed_idx = 0
-    und_token_set = set(und_token_indexes)
-    for attn_mode, split_len in zip(attn_modes, split_lens):
-        if attn_mode == "full":
-            split_indices = range(packed_idx, packed_idx + split_len)
-            # For this "full" split, find the und tokens within this split, mapped local to full_only_seq offset
-            for local_idx, split_idx in enumerate(split_indices):
-                if split_idx in und_token_set:
-                    out.append(full_offset + local_idx)
-            full_offset += split_len
-        packed_idx += split_len
-    return out
-
-
 def _compute_mode_indices_and_offsets(
     split_lens: torch.Tensor | List[int], attn_modes: List[str], mode: str, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -250,14 +225,16 @@ def sequence_pack_from_packed_sequence(
     """
     del packed_gen_token_indexes
 
-    non_causal_text_idxs = _find_non_causal_text_token_idx(attn_modes, split_lens, packed_und_token_indexes.tolist())
-    assert len(non_causal_text_idxs) == 0, "non_causal_text_idxs should be empty"
-
     assert sum(sample_lens) == packed_sequence.shape[0], (
         "sum(sample_lens) must be equal to the length of the packed sequence"
     )
 
     meta = init_sequence_pack(sample_lens, split_lens, attn_modes, packed_sequence.device)
+    with torch.autograd.profiler.record_function("sequence_packing/validate_indexes"):
+        full_token_mask = torch.zeros(packed_sequence.shape[0], dtype=torch.bool, device=packed_sequence.device)
+        full_token_mask[meta["_full_indices"].long()] = True
+        und_indexes = packed_und_token_indexes.to(device=packed_sequence.device, dtype=torch.long)
+        assert not bool(full_token_mask.index_select(0, und_indexes).any()), "non_causal_text_idxs should be empty"
     causal_seq = packed_sequence[meta["_causal_indices"]]  # [N_causal_tokens,D]
     full_only_seq = packed_sequence[meta["_full_indices"]]  # [N_full_tokens,D]
 
