@@ -757,6 +757,14 @@ class DataloaderTrainConfig(BaseModel):
             "recipe default. Skipped on VLM (the data packer caps via max_sequence_length)."
         ),
     )
+    vision_token_cost_multiplier: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "VFM packing-cost multiplier for patchified vision latent tokens. "
+            "Use 2 for teacher forcing, where CLEAN and NOISY vision streams are both processed."
+        ),
+    )
     align_teacher_forcing_block_frames: bool = Field(
         default=False,
         description=(

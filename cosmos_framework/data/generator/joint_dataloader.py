@@ -12,14 +12,14 @@ import torch
 import webdataset
 from torch.utils.data.dataloader import default_collate
 
-from cosmos_framework.utils.lazy_config import instantiate
-from cosmos_framework.utils import log
 from cosmos_framework.model.generator.tokenizers.uniae.frame_math import (
     get_uniae_chunk_frames,
     get_uniae_latent_num_frames,
     normalize_uniae_chunk_frames,
 )
+from cosmos_framework.utils import log
 from cosmos_framework.utils.generator.data_utils import read_positive_int_metadata
+from cosmos_framework.utils.lazy_config import instantiate
 
 _TIMING_KEYS = {"_sample_time", "_aug_time", "_pre_aug_time", "_aug_step_times"}
 _BATCH_TIMING_KEYS = {
@@ -179,6 +179,7 @@ class JointDataLoader(webdataset.WebLoader):
         lookahead_limits: Dict[str, int] | None = None,
         uniae_chunk_frames: int | Mapping[str, int] | None = None,
         uniae_pad_frames: int | None = None,
+        vision_token_cost_multiplier: int = 1,
     ):
         """
         Initialize the JointDataLoader with multiple datasets.
@@ -202,6 +203,10 @@ class JointDataLoader(webdataset.WebLoader):
             lookahead_limits: Optional ``{dataset_name: int}`` per-dataloader override.
             uniae_chunk_frames: Optional UniAE full chunk size, or resolution-keyed chunk sizes.
             uniae_pad_frames: Optional UniAE boundary padding frames per chunk.
+            vision_token_cost_multiplier: Multiplier applied only to patchified
+                vision latent tokens when estimating the packing cost. Teacher
+                forcing uses 2 because CLEAN and NOISY vision streams are both
+                processed by the network; ordinary training keeps the default 1.
 
         Example:
             joint_loader = IterativeJointDataLoader(
@@ -229,6 +234,9 @@ class JointDataLoader(webdataset.WebLoader):
         self.default_lookahead_limit = int(default_lookahead_limit)
         self.uniae_pad_frames = int(uniae_pad_frames) if uniae_pad_frames is not None else None
         self.uniae_chunk_frames = self._normalize_uniae_chunk_frames(uniae_chunk_frames)
+        self.vision_token_cost_multiplier = int(vision_token_cost_multiplier)
+        if self.vision_token_cost_multiplier < 1:
+            raise ValueError(f"vision_token_cost_multiplier must be >= 1, got {self.vision_token_cost_multiplier}")
 
         assert (self.max_sequence_length is None) != (self.max_samples_per_batch is None), (
             "Exactly one of max_sequence_length or max_samples_per_batch must be None, but not both."
@@ -448,9 +456,9 @@ class JointDataLoader(webdataset.WebLoader):
                 latent_t_shape = self._compute_vision_latent_t_shape(T, H, W)
 
             num_vision_tokens = patch_h_shape * patch_w_shape * latent_t_shape
+            num_tokens += self.vision_token_cost_multiplier * num_vision_tokens
             if has_text_tokens:
-                num_vision_tokens += 2
-            num_tokens += num_vision_tokens
+                num_tokens += 2
 
         # Action part: each action time step is 1 token.
         # Action tensor shape is (T_action, D) per sample; stored as a single-element list.
@@ -676,7 +684,7 @@ class IterativeJointDataLoader(JointDataLoader):
 
                 if (
                     self.max_sequence_length is not None
-                    and metrics.current_sequence_length + num_tokens_in_current_sample >= self.max_sequence_length
+                    and metrics.current_sequence_length + num_tokens_in_current_sample > self.max_sequence_length
                 ):
                     if len(output_batch) == 0:
                         # This case happens when current_sequence_length = 0 and num_tokens_in_current_sample > self.max_sequence_length
@@ -873,6 +881,7 @@ class PackingDataLoader(JointDataLoader):
         lookahead_limit: int = JointDataLoader._DEFAULT_LOOKAHEAD_LIMIT,
         uniae_chunk_frames: int | Mapping[str, int] | None = None,
         uniae_pad_frames: int | None = None,
+        vision_token_cost_multiplier: int = 1,
     ):
         """
         Args:
@@ -890,6 +899,8 @@ class PackingDataLoader(JointDataLoader):
             lookahead_limit: Packing-loop look-ahead for the wrapped dataloader.
             uniae_chunk_frames: Optional UniAE full chunk size, or resolution-keyed chunk sizes.
             uniae_pad_frames: Optional UniAE boundary padding frames per chunk.
+            vision_token_cost_multiplier: Multiplier applied to patchified
+                vision latent tokens for packing-budget accounting.
         """
         wrapped = {dataset_name: {"dataloader": dataloader, "ratio": 1}}
         super().__init__(
@@ -904,6 +915,7 @@ class PackingDataLoader(JointDataLoader):
             lookahead_limits={dataset_name: int(lookahead_limit)},
             uniae_chunk_frames=uniae_chunk_frames,
             uniae_pad_frames=uniae_pad_frames,
+            vision_token_cost_multiplier=vision_token_cost_multiplier,
         )
 
     def __iter__(self):
@@ -936,7 +948,7 @@ class PackingDataLoader(JointDataLoader):
 
                 if (
                     self.max_sequence_length is not None
-                    and current_sequence_length + num_tokens_in_current_sample >= self.max_sequence_length
+                    and current_sequence_length + num_tokens_in_current_sample > self.max_sequence_length
                 ):
                     if len(output_batch) == 0:
                         # This case happens when current_sequence_length = 0 and num_tokens_in_current_sample > self.max_sequence_length
@@ -1051,7 +1063,7 @@ class RandomJointDataLoader(JointDataLoader):
 
                 if (
                     self.max_sequence_length is not None
-                    and metrics.current_sequence_length + num_tokens_in_current_sample >= self.max_sequence_length
+                    and metrics.current_sequence_length + num_tokens_in_current_sample > self.max_sequence_length
                 ):
                     if len(output_batch) == 0:
                         # This case happens when current_sequence_length = 0 and num_tokens_in_current_sample > self.max_sequence_length

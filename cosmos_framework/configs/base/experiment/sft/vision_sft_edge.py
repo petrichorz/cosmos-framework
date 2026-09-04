@@ -235,6 +235,7 @@ vision_sft_edge = LazyDict(
             sound_latent_fps=0,
             tokenizer_spatial_compression_factor=16,
             tokenizer_temporal_compression_factor=4,
+            vision_token_cost_multiplier=1,
             dataloader=L(RankPartitionedDataLoader)(
                 batch_size=1,
                 in_order=True,

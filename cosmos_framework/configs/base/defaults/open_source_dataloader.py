@@ -124,6 +124,7 @@ def get_open_source_sft_dataloader(
     tokenizer_spatial_compression_factor: int = 16,
     tokenizer_temporal_compression_factor: int = 4,
     sound_latent_fps: int = 0,
+    vision_token_cost_multiplier: int = 1,
     dataset_name: str = "default",
     video_stream_ratio: float = 1.0,
 ):
@@ -165,6 +166,7 @@ def get_open_source_sft_dataloader(
         sound_latent_fps=sound_latent_fps,
         tokenizer_spatial_compression_factor=tokenizer_spatial_compression_factor,
         tokenizer_temporal_compression_factor=tokenizer_temporal_compression_factor,
+        vision_token_cost_multiplier=vision_token_cost_multiplier,
     )
 
 

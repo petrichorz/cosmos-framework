@@ -118,6 +118,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_samples_per_batch"): ("dataloader_train", "batcher", "max_batch_size"),
         ("dataloader_train", "max_sequence_length"): ("dataloader_train", "batcher", "max_tokens"),
         ("dataloader_train", "max_caption_tokens"): None,  # VFM-only knob — VLM packer caps via max_sequence_length
+        ("dataloader_train", "vision_token_cost_multiplier"): None,
         ("dataloader_train", "align_teacher_forcing_block_frames"): None,
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
