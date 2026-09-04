@@ -43,6 +43,36 @@ python -m cosmos_framework.scripts.profile_dataloader \
 
 NPU 或 CUDA 训练机上不要添加 `--disable-accelerator-autoload`，否则 `pin_memory` 行为可能与训练不一致。只有在无加速器的 CPU 冒烟测试中才使用该选项。
 
+### 切换视频读取后端
+
+配置默认使用 `torchcodec`。可以直接修改 TOML：
+
+```toml
+[dataloader_train]
+video_backend = "pyav"
+video_tolerance_s = 1.0e-4
+```
+
+临时切换到 LeRobot 注册的 PyAV 后端时，也可以在命令末尾增加：
+
+```text
+dataloader_train.dataloader.datasets.video.dataset.video_backend=pyav
+```
+
+切回 TorchCodec：
+
+```text
+dataloader_train.dataloader.datasets.video.dataset.video_backend=torchcodec
+```
+
+PyAV 路径复用 LeRobot 的时间戳读取与最近帧匹配逻辑，默认容差为 `1e-4` 秒；必要时可通过下面的 override 调整：
+
+```text
+dataloader_train.dataloader.datasets.video.dataset.video_tolerance_s=0.0001
+```
+
+TorchCodec 路径继续使用精确 frame range seek 和每个 worker 独立的 decoder LRU cache；`decoder_cache_max_size` 只影响 TorchCodec。比较两个后端时，除 `video_backend` 外应保持 worker、预取、pin memory、数据顺序和迭代数一致，并分别使用独立输出目录。
+
 每个输出目录包含：
 
 - `effective_config.yaml`：所有 TOML 和命令行 override 合并后的有效配置。
@@ -55,8 +85,10 @@ NPU 或 CUDA 训练机上不要添加 `--disable-accelerator-autoload`，否则 
 如果训练本身使用多个 rank，应保持相同的每节点进程数：
 
 ```bash
-torchrun --standalone --nproc-per-node=8 \
+torchrun --nnodes=1 --node-rank=0 --nproc-per-node=8 \
+  --master-addr=127.0.0.1 --master-port=29501 \
   -m cosmos_framework.scripts.profile_dataloader \
+  --gloo-interface lo \
   --sft-toml examples/toml/sft_config/vision_sft_edge.toml \
   --iterations 500 \
   --log-every 1 \
@@ -68,7 +100,14 @@ torchrun --standalone --nproc-per-node=8 \
   +model.config.vlm_config.tokenizer.tokenizer_type="$COSMOS3_EDGE_PROCESSOR_PATH"
 ```
 
-脚本使用 Gloo 完成 dataloader 所需的 rank 初始化，不会建立模型通信。`num_workers=4` 是每个 rank 的 worker 数；8 rank 会产生约 32 个读取 worker，运行前需确认主机内存足够。
+脚本使用 Gloo 完成 dataloader 所需的 rank 初始化，不会建立模型通信。单机运行会自动设置 `GLOO_SOCKET_IFNAME=lo`；命令中仍显式写出 `--gloo-interface lo`，便于确认实际绑定的网卡。`num_workers=4` 是每个 rank 的 worker 数；8 rank 会产生约 32 个读取 worker，运行前需确认主机内存足够。
+
+如果出现 `IPv6 network addresses ... cannot be retrieved`，说明 rendezvous 地址或 Gloo 网卡仍在使用无法解析的主机名：
+
+- 单机多卡必须把 `--master-addr` 设置为 `127.0.0.1`，并使用 `--gloo-interface lo`。
+- 多机多卡必须把 `--master-addr` 设置为 rank 0 节点可达的 IPv4 地址，不能使用当前 DNS 无法解析的 hostname。
+- 多机时每个节点传入相同类型的数据网卡，例如 `--gloo-interface enp189s0f0`；可通过 `ls /sys/class/net` 查看网卡名，不能使用 `lo`。
+- `--master-addr` 由 `torchrun` 在 Python 脚本启动前使用，只有 `GLOO_SOCKET_IFNAME` 或 `--gloo-interface` 不能修复错误的 rendezvous 地址。
 
 ## 快照阶段与字段
 

@@ -36,6 +36,11 @@ def _parse_args() -> argparse.Namespace:
         help="每隔多少个 batch 读取一次较慢的 USS/PSS；0 表示关闭",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="默认写到当前 job 目录下")
+    parser.add_argument(
+        "--gloo-interface",
+        default=None,
+        help="Gloo 使用的网卡名；单机 torchrun 默认自动使用 lo，多机需指定各节点共有的数据网卡",
+    )
     parser.add_argument("--gc-every", type=int, default=0, help="诊断选项：定期 gc.collect()；0 表示关闭")
     parser.add_argument(
         "--malloc-trim-every",
@@ -63,7 +68,29 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _ensure_distributed_initialized() -> bool:
+def _configure_gloo_interface(requested_interface: str | None) -> str | None:
+    """Choose an explicit Gloo interface without resolving the host name."""
+    if requested_interface:
+        interface = requested_interface
+    elif os.environ.get("GLOO_SOCKET_IFNAME"):
+        return os.environ["GLOO_SOCKET_IFNAME"]
+    else:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
+        is_single_node = world_size == 1 or (local_world_size is not None and int(local_world_size) == world_size)
+        if not is_single_node:
+            return None
+        interface = "lo"
+
+    network_interfaces = Path("/sys/class/net")
+    if network_interfaces.is_dir() and not (network_interfaces / interface).exists():
+        available = sorted(path.name for path in network_interfaces.iterdir())
+        raise ValueError(f"Gloo interface {interface!r} does not exist; available interfaces: {available}")
+    os.environ["GLOO_SOCKET_IFNAME"] = interface
+    return interface
+
+
+def _ensure_distributed_initialized(gloo_interface: str | None = None) -> bool:
     """Initialize a CPU process group required by RankPartitionedDataLoader."""
     import torch.distributed as dist
 
@@ -74,6 +101,7 @@ def _ensure_distributed_initialized() -> bool:
     os.environ.setdefault("LOCAL_RANK", "0")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
+    _configure_gloo_interface(gloo_interface)
     dist.init_process_group(backend="gloo", init_method="env://")
     return True
 
@@ -256,7 +284,7 @@ def _run(args: argparse.Namespace) -> Path:
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
     from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 
-    initialized_here = _ensure_distributed_initialized()
+    initialized_here = _ensure_distributed_initialized(args.gloo_interface)
     rank = dist.get_rank()
     config = load_experiment_from_toml(args.sft_toml, extra_overrides=args.opts)
     seed = int(config.trainer.seed) + rank
