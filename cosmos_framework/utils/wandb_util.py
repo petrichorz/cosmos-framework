@@ -11,13 +11,13 @@ import wandb
 import wandb.util
 from omegaconf import DictConfig
 
-from cosmos_framework.utils.lazy_config.lazy import LazyConfig
 from cosmos_framework.utils import distributed, log, object_store
 from cosmos_framework.utils.easy_io import easy_io
+from cosmos_framework.utils.lazy_config.lazy import LazyConfig
 
 if TYPE_CHECKING:
-    from cosmos_framework.utils.config import CheckpointConfig, Config, JobConfig
     from cosmos_framework.model._base import ImaginaireModel
+    from cosmos_framework.utils.config import CheckpointConfig, Config, JobConfig
 
 JOB_INFO = {}
 
@@ -63,7 +63,11 @@ def init_wandb(config: Config, model: ImaginaireModel) -> None:
         config_resolved = attrs.asdict(config)
     import swanlab
 
-    swanlab.sync_wandb(mode=config_job.wandb_mode, wandb_run=False)
+    swanlab.sync_wandb(
+        mode=config_job.wandb_mode,
+        wandb_run=False,
+        log_dir=os.path.join(config_job.path_local, "swanlab"),
+    )
     # Initialize the wandb library. If we attempt to resume an existing run
     # but the current user does not have permission to update that run
     # (common when re-using an ID created by someone else), fall back to
