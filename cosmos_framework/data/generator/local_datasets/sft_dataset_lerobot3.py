@@ -306,6 +306,16 @@ class _LeRobotVideoDecoderCache:
                 pass
         return decoder
 
+    def discard(self, video_path: str) -> None:
+        """Close and remove every cached decoder variant for one video path."""
+        matching_keys = [key for key in self._cache if key[0] == video_path]
+        for key in matching_keys:
+            _, file_handle = self._cache.pop(key)
+            try:
+                file_handle.close()
+            except Exception:
+                pass
+
 
 class LeRobotSFTDataset(SFTDataset):
     """SFTDataset 子类，override process_one_sample 为「本地 mp4 + 可配置后端读取」。
@@ -513,7 +523,16 @@ class LeRobotSFTDataset(SFTDataset):
 
         # 【LeRobot 差异】本地 mp4 直接读 metadata，跳过 download + 临时文件
         input_video_path = metadata["vision_path"]
-        video_info = get_video_metadata(input_video_path)
+        try:
+            video_info = get_video_metadata(input_video_path)
+        except Exception as error:
+            log.exception(
+                "Failed to read video metadata; skipping sample and advancing to the next video. "
+                f"uuid={metadata['uuid']}, path={input_video_path}, "
+                f"error={type(error).__name__}: {error}",
+                rank0_only=False,
+            )
+            return None
         original_fps = video_info["fps"]
         total_frames = video_info["total_frames"]
 
@@ -560,15 +579,28 @@ class LeRobotSFTDataset(SFTDataset):
         fps = original_fps / temporal_interval
 
         # 【LeRobot 差异】可配置后端按 episode 帧区间读取，替代父类全量 ffmpeg decode
-        video_chunk = self._decode_video_frames(
-            video_path=input_video_path,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            temporal_interval=temporal_interval,
-            original_fps=original_fps,
-            resize_h=resize_h,
-            resize_w=resize_w,
-        )
+        try:
+            video_chunk = self._decode_video_frames(
+                video_path=input_video_path,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                temporal_interval=temporal_interval,
+                original_fps=original_fps,
+                resize_h=resize_h,
+                resize_w=resize_w,
+            )
+        except Exception as error:
+            if self._decoder_cache is not None:
+                self._decoder_cache.discard(input_video_path)
+            log.exception(
+                "Failed to decode video; skipping sample and advancing to the next video. "
+                f"uuid={metadata['uuid']}, path={input_video_path}, "
+                f"backend={self.video_backend}, resize_mode={self.video_resize_mode}, "
+                f"frame_range=[{start_frame}, {end_frame}], temporal_interval={temporal_interval}, "
+                f"error={type(error).__name__}: {error}",
+                rank0_only=False,
+            )
+            return None
 
         if not video_chunk:
             log.warning(

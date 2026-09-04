@@ -6,7 +6,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import LeRobotSFTDataset
+from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
+    LeRobotSFTDataset,
+    _LeRobotVideoDecoderCache,
+)
 
 
 def test_rejects_unknown_video_backend():
@@ -137,3 +140,90 @@ def test_decode_transform_passes_target_size_to_backend_without_post_resize(monk
     assert calls == [(8, 10)]
     assert len(frames) == 2
     assert frames[0].shape == (8, 10, 3)
+
+
+def _minimal_metadata() -> dict:
+    return {
+        "uuid": "episode-1",
+        "vision_path": "broken.mp4",
+        "width": 16,
+        "height": 16,
+        "aspect_ratio": "1,1",
+        "t2w_windows": [{"start_frame": 0, "end_frame": 4, "temporal_interval": 1}],
+    }
+
+
+def test_video_metadata_error_is_logged_and_sample_is_skipped(monkeypatch):
+    dataset = object.__new__(LeRobotSFTDataset)
+    dataset.output_sizes = {"1,1": (8, 8)}
+    logged = []
+
+    def fail_metadata(video_path):
+        raise OSError("ffprobe failed")
+
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.get_video_metadata",
+        fail_metadata,
+    )
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.log.exception",
+        lambda message, rank0_only: logged.append((message, rank0_only)),
+    )
+
+    assert dataset.process_one_sample(_minimal_metadata()) is None
+    assert "ffprobe failed" in logged[0][0]
+    assert "advancing to the next video" in logged[0][0]
+    assert logged[0][1] is False
+
+
+def test_video_decode_error_discards_cache_and_skips_sample(monkeypatch):
+    dataset = object.__new__(LeRobotSFTDataset)
+    dataset.output_sizes = {"1,1": (8, 8)}
+    dataset.num_video_frames = -1
+    dataset.video_backend = "torchcodec"
+    dataset.video_resize_mode = "decode_transform"
+    discarded = []
+    logged = []
+    dataset._decoder_cache = type("FakeCache", (), {"discard": lambda self, path: discarded.append(path)})()
+
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.get_video_metadata",
+        lambda path: {"fps": 20.0, "total_frames": 100},
+    )
+    monkeypatch.setattr(
+        dataset,
+        "_decode_video_frames",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("decoder failed")),
+    )
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.log.exception",
+        lambda message, rank0_only: logged.append((message, rank0_only)),
+    )
+
+    assert dataset.process_one_sample(_minimal_metadata()) is None
+    assert discarded == ["broken.mp4"]
+    assert "decoder failed" in logged[0][0]
+    assert "backend=torchcodec" in logged[0][0]
+    assert logged[0][1] is False
+
+
+def test_decoder_cache_discard_closes_all_resize_variants():
+    class FakeHandle:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    cache = _LeRobotVideoDecoderCache(max_size=4)
+    matching_handles = [FakeHandle(), FakeHandle()]
+    retained_handle = FakeHandle()
+    cache._cache[("broken.mp4", None)] = (object(), matching_handles[0])
+    cache._cache[("broken.mp4", (8, 8))] = (object(), matching_handles[1])
+    cache._cache[("healthy.mp4", None)] = (object(), retained_handle)
+
+    cache.discard("broken.mp4")
+
+    assert all(handle.closed for handle in matching_handles)
+    assert not retained_handle.closed
+    assert list(cache._cache) == [("healthy.mp4", None)]
