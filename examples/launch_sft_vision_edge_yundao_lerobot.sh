@@ -65,10 +65,15 @@ TOML_FILE="examples/toml/sft_config/vision_sft_edge.toml"
 : "${DATASET_PATH:=examples/data/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
 
-# 【LeRobot 3.x 适配】校验 LeRobot 数据集：$DATASET_PATH 下任意深度存在 meta/info.json（支持父目录下多个数据集）
-EXTRA_DATASET_CHECK='[[ -n "$(find "$DATASET_PATH" -path "*/meta/info.json" -print -quit)" ]] || { echo "ERROR: no meta/info.json found under $DATASET_PATH" >&2; exit 1; }'
-# 【留档】原 JSONL 校验（改用 LeRobot 后注释掉，未删除）
-# EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }'
+# 【LeRobot 3.x 适配】_sft_launcher_common.sh 对 DATASET_PATH 做 -d（目录）硬检查，
+# manifest 的 .jsonl 文件过不了。这里保存原始值，若为文件则临时指向其父目录通过检查。
+_DATASET_ORIGINAL="$DATASET_PATH"
+if [[ -f "$DATASET_PATH" && ! -d "$DATASET_PATH" ]]; then
+    DATASET_PATH="$(dirname "$DATASET_PATH")"
+fi
+
+# EXTRA_DATASET_CHECK：校验原始路径存在 + 恢复 DATASET_PATH（供 config 的 ${oc.env:DATASET_PATH} 读取）
+EXTRA_DATASET_CHECK="[[ -e \"$_DATASET_ORIGINAL\" ]] || { echo \"ERROR: dataset not found: $_DATASET_ORIGINAL\" >&2; exit 1; }; export DATASET_PATH=\"$_DATASET_ORIGINAL\";"
 TAIL_OVERRIDES=(
       "model.config.vlm_config.tokenizer.repository=null"
       "model.config.vlm_config.tokenizer.revision=null"

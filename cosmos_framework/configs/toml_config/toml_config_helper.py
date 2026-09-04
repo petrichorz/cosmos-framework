@@ -56,6 +56,13 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_caption_tokens"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_caption_tokens",
         ),
+        # 多分辨率 / 多 fps 训练开关，同样落在 SFT dataset 节点
+        ("dataloader_train", "use_multi_resolution"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_resolution",
+        ),
+        ("dataloader_train", "use_multi_fps"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_fps",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,

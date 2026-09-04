@@ -228,18 +228,21 @@ vision_sft_edge_lerobot3 = LazyDict(
                             conditioning_fps=-1,
                             conditioning_fps_noise_std=0.0,
                             frame_selection_mode="first",
-                            lerobot_root="${oc.env:DATASET_PATH}",   # LeRobot 数据集根目录（含 meta/info.json）
+                            dataset_path="${oc.env:DATASET_PATH}",  # 统一入口：.jsonl 文件→manifest 模式；目录→单数据集根/父目录
                             video_feature_key=None,  # 显式指定 feature 名（精确匹配）；None 则不显式指定
                             video_feature_keywords=["top", "head"],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
-                            caption_key="caption",                   # episodes 表里的 caption 列名
+                            caption_key="task",                   # episodes 表里的 caption 列名
                             min_short_edge=0,
                             num_video_frames=-1,
                             resolution="256",
+                            use_multi_resolution=False,  # 多分辨率训练开关（256/480/720 随机，不上采样）
+                            use_multi_fps=False,         # 多 fps 训练开关（temporal_interval 随机 2/3/4）
                             sample_by_window=False,
                             temporal_compression_factor=4,
                             temporal_interval_mode="max_30fps",
                             use_system_prompt=False,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
+                            video_backend="pyav"
                         ),
                     ),
                 ),
