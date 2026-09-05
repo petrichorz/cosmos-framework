@@ -31,6 +31,26 @@ _CUSTOM_PAYLOAD = {
 # 1. pydantic schema validation                                               #
 # --------------------------------------------------------------------------- #
 class TestSchemaValidation:
+    def test_training_benchmark_fields_validate(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge"},
+            "trainer": {
+                "benchmarking": {
+                    "enabled": True,
+                    "num_epochs": 1,
+                    "warmup_iterations": 2,
+                    "output_subdir": "benchmark",
+                    "save_final_checkpoint": False,
+                }
+            },
+        }
+
+        cfg = SFTExperimentConfig.model_validate(raw)
+
+        assert cfg.trainer.benchmarking.enabled is True
+        assert cfg.trainer.benchmarking.num_epochs == 1
+        assert cfg.trainer.benchmarking.output_subdir == "benchmark"
+
     def test_vfm_fsdp_mixed_precision_fields_validate(self) -> None:
         raw = {
             "job": {"task": "vfm", "experiment": "vision_sft_edge"},

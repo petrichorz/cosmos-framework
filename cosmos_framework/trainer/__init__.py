@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
+import contextlib
 import functools
 import inspect
 import os
@@ -11,9 +12,14 @@ import torch
 import torch.distributed as dist
 import torch.utils.data
 
-from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.context_managers import distributed_init
-from cosmos_framework.utils.profiling import maybe_enable_memory_snapshot, maybe_enable_nsys_profiling, maybe_enable_profiling
+from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_nsys_profiling,
+    maybe_enable_profiling,
+)
+from cosmos_framework.utils.training_benchmark import TrainingBenchmark
 
 try:
     from megatron.core import parallel_state
@@ -23,12 +29,11 @@ except ImportError:
     USE_MEGATRON = False
 
 
-from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import callback, distributed, ema, log, misc
 from cosmos_framework.utils.checkpointer import Checkpointer
+from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.utils.misc import StragglerDetectorV2
-
 
 
 class ImaginaireTrainer:
@@ -219,6 +224,17 @@ class ImaginaireTrainer:
         if hasattr(dataloader_train, "set_start_iteration"):
             dataloader_train.set_start_iteration(iteration * self.config.trainer.grad_accum_iter)
         grad_accum_iter = 0
+        benchmark = (
+            TrainingBenchmark(
+                self.config.trainer.benchmarking,
+                self.config.job.path_local,
+                dataloader_train,
+                start_iteration=iteration,
+            )
+            if self.config.trainer.benchmarking.enabled
+            else None
+        )
+        self.training_benchmark = benchmark
         log.critical(f"Distributed parallelism mode: {self.config.trainer.distributed_parallelism}")
         if self.config.trainer.distributed_parallelism == "ddp":
             # Create a DDP model wrapper.
@@ -254,10 +270,13 @@ class ImaginaireTrainer:
             while True:
                 dataloader_train_iter = iter(dataloader_train)
                 while True:
+                    if benchmark and grad_accum_iter == 0:
+                        benchmark.begin_iteration()
                     self.callbacks.on_before_dataloading(iteration)
                     try:
                         with (
                             self.training_timer("dataloader_train"),
+                            benchmark.phase("dataloader_train") if benchmark else contextlib.nullcontext(),
                             self.straggler_detector.profile_section(
                                 "dataloading",
                                 self.config.trainer.straggler_detection.analyze_dataloading,
@@ -280,7 +299,10 @@ class ImaginaireTrainer:
                         _end_training = True
                         break
                     # Move all tensors in the data batch to GPU device.
-                    data_batch = misc.to(data_batch, device="cuda")
+                    if benchmark:
+                        benchmark.record_batch(data_batch)
+                    with benchmark.phase("host_to_device") if benchmark else contextlib.nullcontext():
+                        data_batch = misc.to(data_batch, device="cuda")
                     # The actual training step.
                     self.callbacks.on_training_step_start(model, data_batch, iteration=iteration)
                     self.callbacks.on_training_step_batch_start(model, data_batch, iteration=iteration)
@@ -309,6 +331,7 @@ class ImaginaireTrainer:
                     if iteration % self.config.checkpoint.save_iter == 0:
                         self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
                     self.callbacks.on_training_step_end(model, data_batch, output_batch, loss, iteration=iteration)
+                    benchmark_should_stop = benchmark.finish_iteration(iteration) if benchmark else False
                     # Validation.
                     if self.config.trainer.run_validation and iteration % self.config.trainer.validation_iter == 0:
                         self.validate(model, dataloader_val, iteration=iteration)
@@ -321,15 +344,28 @@ class ImaginaireTrainer:
                         memory_profiler.step()
                     if nsys_profiler:
                         nsys_profiler.step()
+                    if benchmark_should_stop:
+                        log.info(
+                            f"Training benchmark reached {benchmark.cumulative_global_samples}/"
+                            f"{benchmark.target_global_samples} global samples; stopping after logical epoch boundary."
+                        )
+                        _end_training = True
+                        break
                 if _end_training:
                     break
         log.success("Done with training.")
         if sm_carveout:
             torch._C._set_sm_carveout_experimental(None)
-        if iteration % self.config.checkpoint.save_iter != 0:
+        save_final_checkpoint = not benchmark or self.config.trainer.benchmarking.save_final_checkpoint
+        if save_final_checkpoint and iteration % self.config.checkpoint.save_iter != 0:
             self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
         self.callbacks.on_train_end(model, iteration=iteration)
         self.checkpointer.finalize()
+        if benchmark:
+            benchmark.close()
+        distributed.barrier()
+        if benchmark:
+            benchmark.write_global_summary()
         distributed.barrier()
         self.callbacks.on_app_end()
         if dist.is_available() and dist.is_initialized():
@@ -364,7 +400,8 @@ class ImaginaireTrainer:
         # Only let DDP sync gradient at the last iteration of the gradient accumulation window
         with distributed.ddp_sync_grad(model_ddp, grad_accum_iter == self.config.trainer.grad_accum_iter - 1):
             self.callbacks.on_before_forward(iteration=iteration)
-            with self.training_timer("forward"):
+            benchmark = getattr(self, "training_benchmark", None)
+            with self.training_timer("forward"), benchmark.phase("forward") if benchmark else contextlib.nullcontext():
                 with self.straggler_detector.profile_section(
                     "fwd", self.config.trainer.straggler_detection.analyze_forward
                 ):
@@ -372,7 +409,10 @@ class ImaginaireTrainer:
             self.callbacks.on_after_forward(iteration=iteration)
             model = model_ddp.module if self.config.trainer.distributed_parallelism == "ddp" else model_ddp
             self.callbacks.on_before_backward(model, loss, iteration=iteration)
-            with self.training_timer("backward"):
+            with (
+                self.training_timer("backward"),
+                benchmark.phase("backward") if benchmark else contextlib.nullcontext(),
+            ):
                 with self.straggler_detector.profile_section(
                     "bwd", self.config.trainer.straggler_detection.analyze_backward
                 ):
@@ -382,7 +422,10 @@ class ImaginaireTrainer:
             self.callbacks.on_after_backward(model, iteration=iteration)
         grad_accum_iter += 1
         if grad_accum_iter == self.config.trainer.grad_accum_iter:
-            with self.training_timer("optimizer_step"):
+            with (
+                self.training_timer("optimizer_step"),
+                benchmark.phase("optimizer_step") if benchmark else contextlib.nullcontext(),
+            ):
                 with self.straggler_detector.profile_section(
                     "opt", self.config.trainer.straggler_detection.analyze_optimizer
                 ):

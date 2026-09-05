@@ -24,9 +24,9 @@ try:
 except ImportError:
     USE_MEGATRON = False
 
+from cosmos_framework.utils import distributed
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
-from cosmos_framework.utils import distributed
 from cosmos_framework.utils.misc import Color
 
 T = TypeVar("T")
@@ -407,6 +407,21 @@ class Profiling:
 
 @make_freezable
 @attrs.define(slots=False)
+class BenchmarkingConfig:
+    """Low-overhead, full-run training benchmark configuration."""
+
+    enabled: bool = False
+    # A logical epoch is one globally consumed, post-filter dataset length.
+    num_epochs: int = 1
+    # Exclude startup iterations from steady-state percentile summaries.
+    warmup_iterations: int = 2
+    output_subdir: str = "benchmark"
+    # Profiling runs normally should not emit a large final DCP checkpoint.
+    save_final_checkpoint: bool = False
+
+
+@make_freezable
+@attrs.define(slots=False)
 class CompileConfig:
     """
     torch.compile config options passed to set_torch_compile_options function.
@@ -471,6 +486,8 @@ class TrainerConfig:
     straggler_detection: StragglerDetectionConfig = attrs.field(factory=StragglerDetectionConfig)
     # Profiling config
     profiling: Profiling = attrs.field(factory=Profiling)
+    # Low-overhead full-epoch benchmark metrics.
+    benchmarking: BenchmarkingConfig = attrs.field(factory=BenchmarkingConfig)
     compile_config: CompileConfig = attrs.field(factory=CompileConfig)
 
     # Whether to save the checkpoint at iteration 0.

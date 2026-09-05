@@ -624,6 +624,18 @@ class TrainerCallbacksConfig(BaseModel):
     grad_clip: GradClipCallback = Field(default_factory=GradClipCallback)
 
 
+class BenchmarkingConfig(BaseModel):
+    """Low-overhead metrics and logical-epoch stopping for performance baselines."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    enabled: bool = False
+    num_epochs: int = Field(default=1, ge=1)
+    warmup_iterations: int = Field(default=2, ge=0)
+    output_subdir: str = "benchmark"
+    save_final_checkpoint: bool = False
+
+
 class TrainerConfig(BaseModel):
     """Trainer-level knobs that the TOML drives directly."""
 
@@ -651,6 +663,7 @@ class TrainerConfig(BaseModel):
         default=500,
         description="Total number of optimizer steps the run will execute.",
     )
+    benchmarking: BenchmarkingConfig = Field(default_factory=BenchmarkingConfig)
     callbacks: TrainerCallbacksConfig = Field(default_factory=TrainerCallbacksConfig)
 
 

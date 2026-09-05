@@ -12,14 +12,14 @@ import torch
 import webdataset
 from torch.utils.data.dataloader import default_collate
 
-from cosmos_framework.utils.lazy_config import instantiate
-from cosmos_framework.utils import log
 from cosmos_framework.model.generator.tokenizers.uniae.frame_math import (
     get_uniae_chunk_frames,
     get_uniae_latent_num_frames,
     normalize_uniae_chunk_frames,
 )
+from cosmos_framework.utils import log
 from cosmos_framework.utils.generator.data_utils import read_positive_int_metadata
+from cosmos_framework.utils.lazy_config import instantiate
 
 _TIMING_KEYS = {"_sample_time", "_aug_time", "_pre_aug_time", "_aug_step_times"}
 _BATCH_TIMING_KEYS = {
@@ -487,6 +487,11 @@ class JointDataLoader(webdataset.WebLoader):
             if key in _BATCH_TIMING_KEYS:
                 if key not in output_batch:
                     output_batch[key] = value
+                elif key == "_worker_aug_step_times":
+                    for step_name, seconds in value.items():
+                        output_batch[key][step_name] = output_batch[key].get(step_name, 0.0) + seconds
+                elif key != "_worker_id":
+                    output_batch[key] += value
             elif key in self._FLATTEN_LIST_KEYS and isinstance(value, list):
                 if key not in output_batch:
                     output_batch[key] = value
@@ -963,6 +968,11 @@ class PackingDataLoader(JointDataLoader):
             if len(output_batch) == 0:
                 return
 
+            output_batch["_packing_num_samples"] = num_samples
+            output_batch["_packing_num_tokens"] = current_sequence_length
+            output_batch["_packing_efficiency"] = (
+                current_sequence_length / self.max_sequence_length if self.max_sequence_length else 0.0
+            )
             self.global_id += 1
             yield output_batch
 

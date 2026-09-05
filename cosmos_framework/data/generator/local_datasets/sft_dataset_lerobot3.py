@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -535,6 +536,7 @@ class LeRobotSFTDataset(SFTDataset):
         父类 = download 到临时文件 + 全量 ffmpeg decode + 过滤；
         本类 = 本地 mp4 直接 get_video_metadata + 可配置后端按帧区间读取。
         """
+        sample_started = time.perf_counter()
         windows = metadata["t2w_windows"]
         win_idx = random.randrange(len(windows))
         t2w_window = windows[win_idx]
@@ -550,6 +552,7 @@ class LeRobotSFTDataset(SFTDataset):
 
         # 【LeRobot 差异】本地 mp4 直接读 metadata，跳过 download + 临时文件
         input_video_path = metadata["vision_path"]
+        metadata_started = time.perf_counter()
         try:
             video_info = get_video_metadata(input_video_path)
         except Exception as error:
@@ -560,6 +563,7 @@ class LeRobotSFTDataset(SFTDataset):
                 rank0_only=False,
             )
             return None
+        metadata_seconds = time.perf_counter() - metadata_started
         original_fps = video_info["fps"]
         total_frames = video_info["total_frames"]
 
@@ -621,6 +625,7 @@ class LeRobotSFTDataset(SFTDataset):
         fps = original_fps / temporal_interval
 
         # 【LeRobot 差异】可配置后端按 episode 帧区间读取，替代父类全量 ffmpeg decode
+        decode_started = time.perf_counter()
         try:
             video_chunk = self._decode_video_frames(
                 video_path=input_video_path,
@@ -643,6 +648,8 @@ class LeRobotSFTDataset(SFTDataset):
                 rank0_only=False,
             )
             return None
+        decode_seconds = time.perf_counter() - decode_started
+        postprocess_started = time.perf_counter()
 
         if not video_chunk:
             log.warning(
@@ -740,6 +747,14 @@ class LeRobotSFTDataset(SFTDataset):
                 condition_frame_indexes_vision=list(range(num_cond)),
             )
 
+        postprocess_seconds = time.perf_counter() - postprocess_started
+        ret["_sample_time"] = time.perf_counter() - sample_started
+        ret["_aug_time"] = postprocess_seconds
+        ret["_aug_step_times"] = {
+            "video_metadata": metadata_seconds,
+            "video_decode_resize": decode_seconds,
+            "post_decode_processing": postprocess_seconds,
+        }
         return ret
 
 
