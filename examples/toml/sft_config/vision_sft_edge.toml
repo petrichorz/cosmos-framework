@@ -14,7 +14,7 @@ name         = "vision_sft_edge_test_lerobot3"
 wandb_mode   = "offline"
 
 [model]
-max_num_tokens_after_packing = 45056
+max_num_tokens_after_packing = 65760
 joint_attn_implementation    = "two_way"
 precision                    = "bfloat16"                # was [model.parallelism].precision
 
@@ -84,7 +84,7 @@ load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter            = 100
 
 [dataloader_train]
-max_sequence_length = 45056
+max_sequence_length = 65760
 # Per-caption token cap before truncation. Structured-JSON captions run longer than
 # dense prose (measured max ~1790 tokens), so keep headroom; raise it for longer captions.
 max_caption_tokens = 2048
@@ -95,3 +95,7 @@ max_caption_tokens = 2048
 use_multi_resolution = true
 # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
 use_multi_fps = true
+# episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃
+min_frames = 61
+# episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃
+max_duration_s = 61.0

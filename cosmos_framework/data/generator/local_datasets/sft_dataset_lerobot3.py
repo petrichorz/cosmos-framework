@@ -3,22 +3,23 @@
 
 # LeRobot 3.x SFT dataset loader —— 动态加载 LeRobot 数据集（episodes 表带 caption 列）。
 #
-# 本文件是 sft_dataset.py 的「LeRobot 扩展」，通过子类 + 新增函数承载新增逻辑，
-# 原 sft_dataset.py（JSONL / S3 流程）保持一行不改。
+# 本文件是 sft_dataset.py 的「LeRobot 独立实现」，通过独立 IterableDataset + 新增函数
+# 承载 LeRobot 数据加载逻辑，原 sft_dataset.py（JSONL / S3 流程）保持一行不改。
 #
-# 与父模块的关系：
-#   - 复用 SFTDataset（继承）、_select_caption / _flatten_metadata_by_window /
-#     _DURATION_TEMPLATE / _RESOLUTION_TEMPLATE / _MAX_CAPTION_TOKENS（import）
+# 与 sft_dataset.py 的关系（只 import 纯函数，不继承 SFTDataset）：
+#   - 复用 _select_caption / _DURATION_TEMPLATE / _RESOLUTION_TEMPLATE /
+#     _MAX_CAPTION_TOKENS（import）
 #   - metadata 与视频加载都基于 lerobot 官方 package（参考 action 侧 cosmos3_action_lerobot）：
 #     LeRobotDatasetMetadata 读 info/episodes（自动 drop stats 列、保留 caption），
 #     decode_video_frames 按时间戳解码视频（torchcodec + LRU decoder cache）。
-#   - LeRobotSFTDataset override process_one_sample，仅替换「中段视频加载」，
-#     保留多分辨率/多 fps 的扩展。
+#   - LeRobotSFTDataset 是独立 IterableDataset，自实现 __init__/__len__/__iter__/
+#     _tokenize_caption/process_one_sample，保留多分辨率/多 fps 的扩展。
 import hashlib
 import json
 import os
 import random
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
@@ -33,17 +34,17 @@ from cosmos_framework.data.generator.local_datasets.helper import (
     get_aspect_ratio,
 )
 from cosmos_framework.data.generator.local_datasets.sft_dataset import (
-    SFTDataset,
     _DURATION_TEMPLATE,
     _MAX_CAPTION_TOKENS,
     _RESOLUTION_TEMPLATE,
-    _flatten_metadata_by_window,
     _select_caption,
 )
 from cosmos_framework.data.generator.sequence_packing import SequencePlan
+from cosmos_framework.data.generator.sequence_packing.modalities import add_special_tokens
 from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
+from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
 from cosmos_framework.utils import log
-from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
 
 # 多分辨率训练：候选档位（短边像素），只选 <= 视频短边的档位（不上采样）。
 # _MULTI_RESOLUTION_TIERS = ("256", "480", "720")
@@ -52,6 +53,8 @@ _MULTI_RESOLUTION_TIERS = ("256", "480")
 _MULTI_FPS_INTERVALS = (2, 3, 4)
 
 # lerobot 解码器 LRU 缓存容量（替换 lerobot 自带的「无界 dict」缓存，防止 worker 内存无界增长）。
+# ⚠️ 仅 torchcodec 后端生效：lerobot 的 pyav 路径（decode_video_frames_torchvision）每次新建
+# reader、用完即关，不查 _default_decoder_cache。所以当前 video_backend="pyav" 下本缓存是 no-op。
 _LRU_VIDEO_CACHE_MAX_SIZE = 64
 
 _hf_offline_applied = False
@@ -81,6 +84,11 @@ class _LRUVideoDecoderCache:
 
     lerobot 自带的 ``VideoDecoderCache`` 是「无界 dict、只加不删」，多 worker 场景下
     decoder 索引 + FFmpeg 上下文会持续累积导致内存上涨；这里用 LRU 封顶。
+
+    ⚠️ 仅 torchcodec 后端生效：lerobot 的 pyav 路径（``decode_video_frames_torchvision``）
+    每次调用都新建 ``VideoReader`` 并 close，完全不查 ``_default_decoder_cache``。因此
+    在 ``video_backend="pyav"`` 下本类永远不会被触发（no-op）；只有切到 torchcodec 后，
+    ``decode_video_frames_torchcodec`` 才会经 ``_default_decoder_cache.get_decoder()`` 复用它。
     """
 
     def __init__(self, max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
@@ -144,6 +152,10 @@ def _patch_decoder_cache(max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
     """把 lerobot 模块级 ``_default_decoder_cache`` 替换为 LRU 版，防止无界内存增长。
 
     幂等，每个进程只 patch 一次。参考 action 侧 ``cosmos3_action_lerobot._patch_decoder_cache``。
+
+    ⚠️ 仅 torchcodec 后端生效：pyav 路径不查 ``_default_decoder_cache``，因此在
+    ``video_backend="pyav"`` 下本函数是 no-op（替换了也无人使用）。保留它是为了将来
+    切 torchcodec 时能防 lerobot 无界缓存的 worker 内存膨胀。
     """
     global _decoder_cache_patched
     if _decoder_cache_patched:
@@ -157,20 +169,46 @@ def _patch_decoder_cache(max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
 # ============================================================================
 
 
+@dataclass
+class _LerobotSource:
+    """一个 LeRobot 数据集的惰性加载描述符。
+
+    数据集级常量（width/height/fps/aspect_ratio/total_frames/video_key 等）
+    只在此存一份；episode 级字段（from/to_timestamp、start/end_frame、caption、
+    uuid、vision_path 等）在采样期由 ``process_one_sample`` 从
+    ``meta.episodes[ep_idx]`` 现算，不再在加载期物化成 dict。
+    """
+
+    root: Path
+    meta: LeRobotDatasetMetadata
+    video_key: str
+    width: int
+    height: int
+    fps: float
+    aspect_ratio: str
+    total_frames: int
+    caption_key: str
+    root_hash: str
+    name: str
+
+
 def _select_lerobot_video_key(
-    info: dict,
+    meta,
     video_feature_key: str | None = None,
     video_feature_keywords: list[str] | None = None,
 ) -> str:
-    """从 info.json 的 features 里选定要用的 video 字段名。
+    """从 LeRobot 数据集 metadata 里选定要用的 video 字段名。
 
     优先级：
     1. 显式传入的 ``video_feature_key``（精确匹配）
     2. 关键字匹配：``video_feature_keywords`` 里任一关键字是 key 名的子串
        （如 ["top", "head"] 命中 "observation.images.top"），取第一个命中字段
-    3. 第一个 ``dtype == "video"`` 的字段（兜底）
+    3. 第一个 video 字段（兜底）
+
+    用官方 ``LeRobotDatasetMetadata.video_keys``（dtype=="video"）做候选集合，
+    不再手写 ``info["features"]`` 的 dtype 过滤。
     """
-    video_keys = [k for k, v in info["features"].items() if v.get("dtype") == "video"]
+    video_keys = meta.video_keys
     if not video_keys:
         raise ValueError("info.json 的 features 里没有 dtype=video 的字段")
 
@@ -185,22 +223,6 @@ def _select_lerobot_video_key(
                 return k
 
     return video_keys[0]
-
-
-def _get_lerobot_video_width_height(info: dict, video_key: str) -> tuple[int, int]:
-    """从 video 字段的 shape 抓 (width, height)。
-
-    shape 是 [H, W, C]（或 names 里有 width/height），所以 width=shape[1], height=shape[0]。
-    """
-    feat = info["features"][video_key]
-    shape = feat["shape"]  # [H, W, C]
-    names = feat.get("names")  # 通常 ["height", "width", "channels"]
-    if names and "width" in names and "height" in names:
-        w = shape[names.index("width")]
-        h = shape[names.index("height")]
-    else:
-        h, w = shape[0], shape[1]
-    return w, h
 
 
 def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
@@ -228,148 +250,128 @@ def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
     return dataset_roots
 
 
-def _load_single_lerobot_metadata(
+def _build_lerobot_source(
     lerobot_root: str,
     min_frames: int,
+    max_duration_s: float,
     min_short_edge: int,
     video_feature_key: str | None,
     caption_key: str,
     video_feature_keywords: list[str] | None = None,
-) -> list[dict]:
-    """读【单个】LeRobot 数据集，产出 metadata list（基于 lerobot 官方 package）。
+) -> tuple[_LerobotSource, list[int]]:
+    """读【单个】LeRobot 数据集，产出 (source 描述符, 有效 episode 索引列表)。
 
-    被 ``_load_lerobot_metadata`` 调用（后者负责发现多个数据集根并逐个加载合并）。
-    输出的 metadata dict 结构对齐 ``sft_dataset._load_sft_metadata_from_s3``：
-    {uuid, vision_path, width, height, nb_frames, framerate, aspect_ratio, t2w_windows}，
-    额外带上视频解码所需的定位字段 {lerobot_root, episode_index, video_key, from_timestamp}。
+    惰性化加载：这里只解析数据集级常量（宽高/fps/aspect_ratio/total_frames 等）
+    并跑一遍过滤，收集「有效 episode 的索引」，**不物化任何 episode dict**。
+    episode 级字段在采样期由 ``process_one_sample`` 从 ``meta.episodes[ep_idx]`` 现算。
     """
     root = Path(lerobot_root)
     # repo_id="local" + revision="local"：本地数据集，避开 HF Hub 联网（"local" 不是合法 version）
     meta = LeRobotDatasetMetadata(repo_id="local", root=str(root), revision="local")
     fps = float(meta.fps)
 
-    video_key = _select_lerobot_video_key(meta.info, video_feature_key, video_feature_keywords)
-    width, height = _get_lerobot_video_width_height(meta.info, video_key)
+    video_key = _select_lerobot_video_key(meta, video_feature_key, video_feature_keywords)
+    # 用官方 LeRobotDatasetMetadata.shapes / .names 解析宽高（替换手写 feature 解析）。
+    # shape 是 [H, W, C]（或 [H, W]），names 通常是 ["height", "width", "channels"]。
+    shape = meta.shapes[video_key]
+    names = meta.names.get(video_key)
+    if names and "width" in names and "height" in names:
+        width = shape[names.index("width")]
+        height = shape[names.index("height")]
+    else:
+        height, width = shape[0], shape[1]
 
-    root_hash = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8]
+    # 数据集级常量只存一份（原来每个 episode dict 都重复存一份）
+    source = _LerobotSource(
+        root=root,
+        meta=meta,
+        video_key=video_key,
+        width=width,
+        height=height,
+        fps=fps,
+        aspect_ratio=get_aspect_ratio(width, height),
+        total_frames=int(meta.total_frames),
+        caption_key=caption_key,
+        root_hash=hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8],
+        name=root.name,
+    )
 
-    metadata_list: list[dict] = []
+    # 数据集级过滤：短边不满足时整个数据集所有 episode 都无效
+    if min_short_edge > 0 and min(width, height) < min_short_edge:
+        return source, []
+
+    valid_eps: list[int] = []
     # meta.episodes 是 HF Dataset（pyarrow 内存映射，load_episodes 已自动 drop 掉 stats/ 列）
     for ep_pos, ep in enumerate(meta.episodes):
-        episode_index = int(ep["episode_index"])
-
-        # 定位该 episode 的数据文件（跨文件唯一）
-        data_chunk = int(ep.get("data/chunk_index", 0))
-        data_file = int(ep.get("data/file_index", 0))
-
-        # 该 episode 视频在选定 camera 的 mp4 里的时间区间
         from_ts = float(ep.get(f"videos/{video_key}/from_timestamp", 0.0))
         to_ts = float(ep.get(f"videos/{video_key}/to_timestamp", 0.0))
-
-        # 时间区间 → 帧编号（to 是开区间，end 要 -1）
-        start_frame = round(from_ts * fps)
-        end_frame = round(to_ts * fps) - 1
-
-        # caption：优先读配置列名。LIBERO v3 官方数据集把任务名存在 tasks 数组里
-        # 而非 caption 标量，取不到时兜底读 tasks，否则会静默跳过全部样本。
-        caption = ep.get(caption_key)
-        if caption is None and caption_key == "caption":
-            caption = ep.get("tasks")
-        if isinstance(caption, (list, tuple, np.ndarray)):
-            caption = next((str(item).strip() for item in caption if str(item).strip()), None)
-
-        length = int(ep.get("length", end_frame - start_frame + 1))
         duration = to_ts - from_ts
 
         # 过滤（对齐 sft_dataset._load_sft_metadata_from_s3）
-        if duration > 61.0:
+        if duration > max_duration_s:
             continue
-        if min_short_edge > 0 and min(width, height) < min_short_edge:
-            continue
+        start_frame = round(from_ts * fps)
+        end_frame = round(to_ts * fps) - 1
         frames_in_window = end_frame - start_frame + 1
         if frames_in_window < min_frames:
             continue
+        valid_eps.append(ep_pos)
 
-        # uuid 前缀用「目录名 + 完整路径短 hash」，保证不同父目录下的同名数据集（如两个 so100_battery）不冲突
-        uuid = f"{root.name}_{root_hash}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
-
-        # 用 lerobot 原生接口拼本地 mp4 路径
-        vision_path = str(root / meta.get_video_file_path(ep_pos, video_key))
-
-        window = {
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "temporal_interval": 1,
-        }
-        # caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过该样本
-        if caption:
-            window["caption"] = caption
-
-        metadata_list.append(
-            {
-                "uuid": uuid,
-                "vision_path": vision_path,
-                "width": width,
-                "height": height,
-                "nb_frames": length,
-                "framerate": fps,
-                "aspect_ratio": get_aspect_ratio(width, height),
-                "total_frames": int(meta.total_frames),
-                "t2w_windows": [window],
-                # 视频解码定位字段（lerobot decode_video_frames 需要绝对时间戳）
-                "lerobot_root": str(root),
-                "episode_index": episode_index,
-                "video_key": video_key,
-                "from_timestamp": from_ts,
-            }
-        )
-
-    return metadata_list
+    return source, valid_eps
 
 
 def _load_lerobot_metadata(
     lerobot_root: str,
     min_frames: int = 61,
+    max_duration_s: float = 61.0,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
-) -> list[dict]:
-    """读 LeRobot 数据集（单个根或父目录），产出 metadata list。
+) -> tuple[list[_LerobotSource], list[tuple[int, int]]]:
+    """读 LeRobot 数据集（单个根或父目录），产出 (sources, episode_index)。
 
     支持两种 ``lerobot_root``：
     1. 单个数据集根目录（含 meta/info.json）
     2. 父目录（不含 meta/info.json，其任意深度子目录下含多个 meta/info.json）
 
     父目录场景会自动递归发现所有含 ``meta/info.json`` 的子目录，逐个加载并合并。
+
+    ``episode_index`` 是扁平索引，每项为 ``(ds_idx, ep_idx)``，``ds_idx`` 是
+    ``sources`` 里的下标（本地）。
     """
     roots = _discover_lerobot_roots(lerobot_root)
     log.info(f"LeRobot 数据加载：发现 {len(roots)} 个数据集目录")
 
-    metadata_list: list[dict] = []
+    sources: list[_LerobotSource] = []
+    episode_index: list[tuple[int, int]] = []
     for root in roots:
-        metadata_list.extend(
-            _load_single_lerobot_metadata(
-                root,
-                min_frames=min_frames,
-                min_short_edge=min_short_edge,
-                video_feature_key=video_feature_key,
-                caption_key=caption_key,
-                video_feature_keywords=video_feature_keywords,
-            )
+        source, valid_eps = _build_lerobot_source(
+            root,
+            min_frames=min_frames,
+            max_duration_s=max_duration_s,
+            min_short_edge=min_short_edge,
+            video_feature_key=video_feature_key,
+            caption_key=caption_key,
+            video_feature_keywords=video_feature_keywords,
         )
-    return metadata_list
+        ds_idx = len(sources)
+        sources.append(source)
+        episode_index.extend((ds_idx, ep) for ep in valid_eps)
+
+    return sources, episode_index
 
 
 def _load_lerobot_metadata_from_manifest(
     manifest_path: str,
     min_frames: int = 61,
+    max_duration_s: float = 61.0,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
     manifest_max_workers: int | None = None,
-) -> list[dict]:
+) -> tuple[list[_LerobotSource], list[tuple[int, int]]]:
     """读 manifest 文件（JSONL，每行一个 dict），并行加载所有数据集并合并。
 
     manifest 每行支持的 key（其余 key 静默忽略）：
@@ -403,13 +405,14 @@ def _load_lerobot_metadata_from_manifest(
             tasks.append((path, row_feature_key, row_feature_keywords, row_caption_key))
 
     if not tasks:
-        return []
+        return [], []
 
     def _load_one(task):
         path, fk, fkw, ck = task
         return _load_lerobot_metadata(
             path,
             min_frames=min_frames,
+            max_duration_s=max_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=fk,
             caption_key=ck,
@@ -419,68 +422,180 @@ def _load_lerobot_metadata_from_manifest(
     if manifest_max_workers is None:
         manifest_max_workers = min(len(tasks), 8)
 
-    metadata_list: list[dict] = []
+    def _merge(results):
+        sources: list[_LerobotSource] = []
+        episode_index: list[tuple[int, int]] = []
+        for srcs, eps in results:
+            offset = len(sources)
+            sources.extend(srcs)
+            episode_index.extend((ds + offset, ep) for ds, ep in eps)
+        return sources, episode_index
+
     if manifest_max_workers <= 1 or len(tasks) == 1:
         # 单线程：保持原有顺序，无并发开销
-        for task in tasks:
-            metadata_list.extend(_load_one(task))
+        results = [_load_one(task) for task in tasks]
     else:
         from concurrent.futures import ThreadPoolExecutor
 
         log.info(f"[manifest] 并行加载 {len(tasks)} 个数据集，max_workers={manifest_max_workers}")
         with ThreadPoolExecutor(max_workers=manifest_max_workers) as ex:
             # ex.map 保持输入顺序返回，结果顺序与 manifest 行顺序一致
-            for result in ex.map(_load_one, tasks):
-                metadata_list.extend(result)
+            results = list(ex.map(_load_one, tasks))
 
-    return metadata_list
+    return _merge(results)
 
 
 # ============================================================================
-# 2. LeRobotSFTDataset 子类
+# 2. LeRobotSFTDataset（独立 IterableDataset，不继承 SFTDataset）
 # ============================================================================
 
 
-class LeRobotSFTDataset(SFTDataset):
-    """SFTDataset 子类，override process_one_sample 为「本地 mp4 + 按帧编号区间 seek」。
+class LeRobotSFTDataset(torch.utils.data.IterableDataset):
+    """LeRobot 3.x 版 vision SFT 数据集（独立实现，不继承 ``SFTDataset``）。
 
-    与父类的唯一差异：``process_one_sample`` 里视频加载那一段。
+    与 ``sft_dataset.SFTDataset`` 的关系：
+      - 数据来源不同：本地 LeRobot 目录（官方 ``LeRobotDatasetMetadata`` +
+        ``decode_video_frames``），而非 S3 JSONL + ffmpeg。
+      - 接口对齐：保持 IterableDataset 约定（``__iter__`` + ``shard_*`` 属性），
+        供 ``RankPartitionedDataLoader`` 消费；返回 dict 结构与 ``SFTDataset`` 一致。
+      - 复用纯函数：``_select_caption`` / ``_DURATION_TEMPLATE`` /
+        ``_RESOLUTION_TEMPLATE`` / ``_MAX_CAPTION_TOKENS``。
     """
 
     def __init__(
         self,
-        *args,
+        sources: list[_LerobotSource],
+        episode_index: list[tuple[int, int]],
+        resolution: str,
+        tokenizer_config: Optional[Any] = None,
+        cfg_dropout_rate: float = 0.0,
+        use_system_prompt: bool = False,
+        max_caption_tokens: int = _MAX_CAPTION_TOKENS,
+        append_duration_fps_timestamps: bool = True,
+        append_resolution_info: bool = True,
+        cfg_dropout_keep_metadata: bool = False,
+        caption_suffix: str = "",
+        conditioning_fps: float = 24,
+        conditioning_fps_noise_std: float = 0.0,
+        conditioning_config: dict[int, float] | None = None,
+        temporal_compression_factor: int = 4,
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
         tolerance_s: float = 0.034,
         decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
-        **kwargs,
     ):
+        assert temporal_compression_factor >= 1, "temporal_compression_factor must be >= 1"
+
         _ensure_hf_hub_offline()
+        # 仅 torchcodec 后端生效；pyav 下是 no-op（见 _patch_decoder_cache docstring）。
         _patch_decoder_cache(max_size=decoder_cache_max_size)
-        super().__init__(*args, **kwargs)
+
+        self.sources = sources
+        self.episode_index = episode_index
+        self.resolution = resolution
+        self.tokenizer_config = tokenizer_config
+        self.cfg_dropout_rate = cfg_dropout_rate
+        self.use_system_prompt = use_system_prompt
+        self.max_caption_tokens = max_caption_tokens
+        self.append_duration_fps_timestamps = append_duration_fps_timestamps
+        self.append_resolution_info = append_resolution_info
+        self.cfg_dropout_keep_metadata = cfg_dropout_keep_metadata
+        self.caption_suffix = caption_suffix.strip()
+        self.conditioning_fps = conditioning_fps
+        self.conditioning_fps_noise_std = conditioning_fps_noise_std
+        self.temporal_compression_factor = temporal_compression_factor
+
+        self.conditioning_config: dict[int, float] | None = None
+        if conditioning_config is not None:
+            total_prob = sum(conditioning_config.values())
+            assert total_prob > 0, "conditioning_config probabilities must sum to a positive number"
+            self.conditioning_config = {k: v / total_prob for k, v in conditioning_config.items()}
+            log.info(f"Conditioning config: {self.conditioning_config}")
+
+        # LeRobot 扩展参数
         self.use_multi_resolution = use_multi_resolution
         self.use_multi_fps = use_multi_fps
-        # lerobot 默认 codec：torchcodec 可用则用 torchcodec，否则 pyav
+        # lerobot 默认 codec：torchcodec 可用则用 torchcodec，否则 pyav。
+        # 注意：只有 torchcodec 才会用 _LRUVideoDecoderCache；pyav 每次重建 reader、不共享 decoder。
         self.video_backend = video_backend if video_backend else _vu.get_safe_default_codec()
         self.tolerance_s = tolerance_s
 
-    def process_one_sample(self, metadata: dict) -> dict | None:
+        # They will be set by the RankPartitionedDataLoader
+        self.shard_world_size = None
+        self.shard_rank = None
+        self.shard_id = 0
+        self.is_initialized = False
+        self.output_sizes = VIDEO_RES_SIZE_INFO[resolution]
+
+        _vlm_proc = lazy_instantiate(self.tokenizer_config)
+        self.vlm_tokenizer = _vlm_proc.tokenizer
+        self.vlm_tokenizer, _ = add_special_tokens(self.vlm_tokenizer)
+
+    def __len__(self):
+        return len(self.episode_index)
+
+    def _tokenize_caption(self, caption: str) -> tuple[list[int], str]:
+        text_ids = tokenize_caption(
+            caption,
+            self.vlm_tokenizer,
+            is_video=True,
+            use_system_prompt=self.use_system_prompt,
+        )
+        if len(text_ids) > self.max_caption_tokens:
+            log.warning(f"Text ids are too long, truncating: {len(text_ids)} > {self.max_caption_tokens}")
+        text_ids = text_ids[: self.max_caption_tokens]
+        return text_ids, caption
+
+    def process_one_sample(self, ds_idx: int, ep_idx: int) -> dict | None:
         """Process a single LeRobot SFT sample.
 
-        ⚠️ 与 sft_dataset.py:SFTDataset.process_one_sample 保持同步。视频加载与父类完全一致
-        （read_bytes → 临时文件 → ffmpeg 全量解码 + 按帧区间过滤）；仅在此基础上扩展了
-        多分辨率（use_multi_resolution）与多 fps（use_multi_fps）。
+        惰性化采样：传入扁平索引 ``(ds_idx, ep_idx)``，从 ``self.sources[ds_idx]``
+        取数据集级常量，从 ``meta.episodes[ep_idx]`` 现算 episode 级字段（帧区间、
+        caption、uuid、vision_path）。随后依次做：分辨率选择 → 抽帧 → 官方 lerobot
+        ``decode_video_frames`` 按绝对时间戳解码 → 空间/时间裁剪 → caption
+        生成 → tokenize → 组装返回 dict。
         """
-        windows = metadata["t2w_windows"]
-        win_idx = random.randrange(len(windows))
-        t2w_window = windows[win_idx]
-        window_start = t2w_window["start_frame"]
-        window_end = t2w_window["end_frame"]
+        source = self.sources[ds_idx]
+        meta = source.meta
+        ep = meta.episodes[ep_idx]
+
+        # ---- episode 级字段现算（原加载期物化的 dict 字段） ----
+        video_key = source.video_key
+        episode_index = int(ep["episode_index"])
+        data_chunk = int(ep.get("data/chunk_index", 0))
+        data_file = int(ep.get("data/file_index", 0))
+        from_ts = float(ep.get(f"videos/{video_key}/from_timestamp", 0.0))
+        to_ts = float(ep.get(f"videos/{video_key}/to_timestamp", 0.0))
+
+        # 时间区间 → 帧编号（to 是开区间，end 要 -1）
+        window_start = round(from_ts * source.fps)
+        window_end = round(to_ts * source.fps) - 1
+
+        # caption：优先读 episodes 表新增的 caption_key 列；取不到回退官方 tasks 列（任务名）。
+        caption = ep.get(source.caption_key)
+        if not caption:
+            tasks = ep.get("tasks")
+            # tasks 列是官方 episodes 表原生列，实际类型为 numpy.ndarray（非 list），
+            # 用 hasattr(x, "__len__") 判断，取第一个任务名作为 caption。
+            if tasks is not None and hasattr(tasks, "__len__") and len(tasks) > 0:
+                caption = str(tasks[0])
+
+        uuid = f"{source.name}_{source.root_hash}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
+        input_video_path = str(source.root / meta.get_video_file_path(ep_idx, video_key))
+
+        # window 恒为单元素（一个 episode = 一个 window = 一段帧区间 + 一个 caption）
+        t2w_window = {"start_frame": window_start, "end_frame": window_end, "temporal_interval": 1}
+        # caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过该样本
+        if caption:
+            t2w_window["caption"] = caption
+
+        # ---- 数据集级常量（来自 source，只存一份） ----
+        input_w, input_h = source.width, source.height
+        original_fps = source.fps
+        total_frames = source.total_frames
 
         # Compute output resolution
-        input_w, input_h = metadata["width"], metadata["height"]
         if self.use_multi_resolution:
             # 多分辨率：候选档位 = 所有 <= 视频短边 的档位（不上采样），随机选一个。
             # 视频太小时 fallback 到最小档 "256"。
@@ -491,71 +606,20 @@ class LeRobotSFTDataset(SFTDataset):
             output_sizes = VIDEO_RES_SIZE_INFO[random.choice(candidates)]
         else:
             output_sizes = self.output_sizes
-        target_w, target_h = output_sizes[metadata["aspect_ratio"]]
+        target_w, target_h = output_sizes[source.aspect_ratio]
         resize_ratio = max(target_w / input_w, target_h / input_h)
         resize_h, resize_w = (round(input_h * resize_ratio), round(input_w * resize_ratio))
         crop_y, crop_x = (round((resize_h - target_h) / 2), round((resize_w - target_w) / 2))
 
-        # 【lerobot 加载】本地 mp4，用 lerobot decode_video_frames 按时间戳解码（复用 LRU decoder cache）
-        input_video_path = metadata["vision_path"]
-        original_fps = metadata["framerate"]
-        total_frames = metadata["total_frames"]
-
-        # Constrain to the t2w window
+        # Native chunk mode：直接用 window 的帧区间抽帧。
+        # 抽帧步长：use_multi_fps 时随机 2/3/4（保留 1/2、1/3、1/4），否则取 window 自带 interval（=1）。
         actual_end = min(window_end, total_frames - 1)
-        frames_in_window = actual_end - window_start + 1
-
-        if self.num_video_frames == -1:
-            # Native chunk mode: use start/end/interval directly from the window
-            if self.use_multi_fps:
-                # 多 fps：temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
-                temporal_interval = random.choice(_MULTI_FPS_INTERVALS)
-            else:
-                temporal_interval = t2w_window["temporal_interval"]
-            start_frame = window_start
-            end_frame = actual_end
+        if self.use_multi_fps:
+            temporal_interval = random.choice(_MULTI_FPS_INTERVALS)
         else:
-            if frames_in_window < self.num_video_frames:
-                log.warning(
-                    f"Not enough frames in window: {metadata['uuid']}, "
-                    f"frames_in_window: {frames_in_window}, required: {self.num_video_frames}"
-                )
-                return None
-
-            # Compute temporal interval
-            if self.temporal_interval_mode == "force_one":
-                temporal_interval = 1
-            elif self.temporal_interval_mode == "max_30fps":
-                temporal_interval = max(1, int(original_fps / 30.0))
-            elif self.temporal_interval_mode == "entire_chunk":
-                temporal_interval = frames_in_window // self.num_video_frames
-                temporal_interval = max(1, temporal_interval)
-            else:
-                raise ValueError(f"Unknown temporal_interval_mode: {self.temporal_interval_mode}")
-
-            num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
-
-            # 【防御】抽帧跨度超过窗口时，end_frame 会越界（读到相邻 episode 的帧）。
-            # force_one/max_30fps（或将来加的 max_15fps）在 interval>1 时可能触发；
-            # entire_chunk 因 interval 由 frames_in_window//N 推导，几乎不会触发，此检查对其无害。
-            # 注意：JSONL 版 sft_dataset.py 的 process_one_sample 目前【未加】此防御，仍可能有同样问题。
-            if num_frames_before_downsample > frames_in_window:
-                log.warning(
-                    f"Window too short for interval={temporal_interval}: {metadata['uuid']}, "
-                    f"frames_in_window={frames_in_window}, required span={num_frames_before_downsample}"
-                )
-                return None
-
-            if self.frame_selection_mode == "first":
-                start_frame = window_start
-            elif self.frame_selection_mode == "center":
-                start_frame = window_start + (frames_in_window - num_frames_before_downsample) // 2
-            elif self.frame_selection_mode == "random":
-                max_offset = frames_in_window - num_frames_before_downsample
-                start_frame = window_start + random.randint(0, max(0, max_offset))
-            else:
-                raise ValueError(f"Unknown frame_selection_mode: {self.frame_selection_mode}")
-            end_frame = start_frame + num_frames_before_downsample - 1
+            temporal_interval = t2w_window["temporal_interval"]
+        start_frame = window_start
+        end_frame = actual_end
 
         fps = original_fps / temporal_interval
 
@@ -573,23 +637,23 @@ class LeRobotSFTDataset(SFTDataset):
             # 时间戳与视频 pts 偏差超过 tolerance_s 时，lerobot 内部 assert 会抛 AssertionError。
             # 打印其详细提示（哪些时间戳违反 tolerance、视频路径等），并跳过该样本，避免中断训练。
             log.warning(
-                f"AssertionError decoding video for sample {metadata['uuid']} "
-                f"(start={start_frame}, end={end_frame}, path={metadata['vision_path']}): {e}"
+                f"AssertionError decoding video for sample {uuid} "
+                f"(start={start_frame}, end={end_frame}, path={input_video_path}): {e}"
             )
             return None
         except Exception as e:
             # 其它解码失败（坏文件、解码器异常等），同样跳过该样本。
             log.warning(
-                f"Failed to decode video for sample {metadata['uuid']} "
-                f"(start={start_frame}, end={end_frame}, path={metadata['vision_path']}): "
+                f"Failed to decode video for sample {uuid} "
+                f"(start={start_frame}, end={end_frame}, path={input_video_path}): "
                 f"{type(e).__name__}: {e}"
             )
             return None
 
         if video_frames.shape[0] == 0:
             log.warning(
-                f"No frames decoded for sample: {metadata['uuid']} "
-                f"(start={start_frame}, end={end_frame}, path={metadata['vision_path']})"
+                f"No frames decoded for sample: {uuid} "
+                f"(start={start_frame}, end={end_frame}, path={input_video_path})"
             )
             return None
 
@@ -617,7 +681,7 @@ class LeRobotSFTDataset(SFTDataset):
         selected = _select_caption(t2w_window)
         if selected is None:
             log.warning(
-                f"No known caption key found in t2w_window for sample {metadata['uuid']}. "
+                f"No known caption key found in t2w_window for sample {uuid}. "
                 f"Keys: {list(t2w_window)}. Skipping sample."
             )
             return None
@@ -657,11 +721,11 @@ class LeRobotSFTDataset(SFTDataset):
         text_ids, caption = self._tokenize_caption(caption)
 
         ret = dict(
-            __key__=f"{metadata['uuid']}_w{win_idx}",
-            __url__=metadata["vision_path"],
+            __key__=f"{uuid}_w0",
+            __url__=input_video_path,
             fps=original_fps,
             n_orig_video_frames=total_frames,
-            chunk_index=win_idx,
+            chunk_index=0,
             frame_start=start_frame,
             frame_end=end_frame,
             num_frames=video.shape[1],
@@ -690,6 +754,80 @@ class LeRobotSFTDataset(SFTDataset):
 
         return ret
 
+    def __iter__(self):
+        assert not self.is_initialized, "Dataset can only be initialized once."
+        assert len(self.episode_index) > 0, "Did not find any data."
+
+        # Ranks of the same pp/tp/cp group will have the same dp rank and thus share the same group id.
+        # zhao: Cosmos3 does not support TP/SP/CP
+        if self.shard_world_size is not None:
+            train_world_size = self.shard_world_size
+            train_rank = self.shard_rank
+            log.info(f"Using shard_world_size: {train_world_size} and shard_rank: {train_rank}", rank0_only=False)
+        else:
+            train_world_size = torch.distributed.get_world_size()
+            train_rank = torch.distributed.get_rank()
+        train_dp_rank = train_rank
+        train_num_dp_groups = train_world_size
+        train_dp_group_size = 1
+
+        # Get data worker rank. Each trainer have multiple dataloaders
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_rank = worker_info.id
+            total_data_ranks = worker_info.num_workers * train_num_dp_groups
+            data_rank = worker_rank + train_dp_rank * worker_info.num_workers
+            seed = worker_info.seed
+        else:
+            log.warning("No data worker info found. Using default worker rank and number of workers.", rank0_only=False)
+            total_data_ranks = train_num_dp_groups
+            data_rank = train_dp_rank
+            seed = 42
+
+        log.info(
+            f"train_world_size: {train_world_size}; "
+            f"train_rank: {train_rank}; "
+            f"train_dp_rank: {train_dp_rank}; "
+            f"train_num_dp_groups: {train_num_dp_groups}; "
+            f"train_dp_group_size: {train_dp_group_size}; "
+            f"worker_info: {worker_info}; "
+            f"total_data_ranks: {total_data_ranks}; "
+            f"data_rank: {data_rank}; "
+            f"seed: {seed}"
+            f"shard_id: {self.shard_id}; "
+            f"shard_world_size: {self.shard_world_size}; "
+            f"shard_rank: {self.shard_rank}",
+            rank0_only=False,
+        )
+
+        # Make sure len(self.episode_index) is divisible by self.num_groups
+        multiplier = max(1, total_data_ranks * 50 // len(self.episode_index))
+        log.info(f"Dataset multiplier: {multiplier}", rank0_only=False)
+        self.episode_index = self.episode_index * multiplier  # reduce bias caused by sharding
+        num_pad = total_data_ranks - len(self.episode_index) % total_data_ranks
+        self.episode_index = self.episode_index + self.episode_index[:num_pad]
+        # Deterministic shuffle + split list to keep only the data for this rank
+        random.Random(self.shard_id).shuffle(self.episode_index)
+        log.info(f"Shuffled episode index for shard {self.shard_id}", rank0_only=False)
+        self.episode_index = self.episode_index[data_rank::total_data_ranks]
+        log.info(
+            f"DRank {data_rank} has {len(self.episode_index)} episodes.",
+            rank0_only=False,
+        )
+
+        self.is_initialized = True
+
+        # Make sure the data within a DRank is identical
+        rng = random.Random(data_rank + self.shard_id * 12345)
+        while True:
+            rng.shuffle(self.episode_index)
+            for ds_idx, ep_idx in self.episode_index:
+                sample = self.process_one_sample(ds_idx, ep_idx)
+                if sample is None:
+                    log.warning(f"Failed to process sample (ds={ds_idx}, ep={ep_idx}), skipping...")
+                    continue
+                yield sample
+
 
 # ============================================================================
 # 3. 入口函数
@@ -699,11 +837,8 @@ class LeRobotSFTDataset(SFTDataset):
 def get_sft_dataset_from_lerobot(
     dataset_path: str,
     resolution: str = "720",
-    use_multi_resolution: bool = False,  # 多分辨率训练开关：True 时在 256/480/720 随机（不上采样）
-    num_video_frames: int = -1,  # LeRobot 场景默认 -1（native chunk mode，直接用 t2w_windows 里的帧区间）
+    use_multi_resolution: bool = False,  # 多分辨率训练开关：True 时在 256/480 随机（不上采样）
     use_multi_fps: bool = False,  # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机
-    temporal_interval_mode: str = "entire_chunk",
-    frame_selection_mode: str = "center",
     tokenizer_config: Optional[Any] = None,
     cfg_dropout_rate: float = 0.1,
     use_system_prompt: bool = False,
@@ -711,7 +846,8 @@ def get_sft_dataset_from_lerobot(
     append_duration_fps_timestamps: bool = True,
     append_resolution_info: bool = True,
     cfg_dropout_keep_metadata: bool = False,
-    sample_by_window: bool = False,
+    min_frames: int = 61,
+    max_duration_s: float = 61.0,
     min_short_edge: int = 0,
     caption_suffix: str = "",
     conditioning_fps: float = 24,
@@ -732,12 +868,11 @@ def get_sft_dataset_from_lerobot(
     - ``.jsonl`` 文件 → manifest 模式（每行一个 ``{"path": ...}``，加载所有 path 的数据）
     - 目录 → 单数据集根 / 父目录（递归发现其下所有 meta/info.json）
 
-    与 ``sft_dataset.get_sft_dataset`` 的差异仅 3 处：
+    与 ``sft_dataset.get_sft_dataset`` 的差异：
     1. 签名：``dataset_path`` + ``video_feature_key``/``video_feature_keywords`` 替代 ``jsonl_paths``
     2. metadata 来源：``_load_lerobot_metadata(_from_manifest)`` 替代 ``_load_sft_metadata_from_s3``
-    3. 构造类：``LeRobotSFTDataset`` 替代 ``SFTDataset``（后者 override 视频加载为按帧编号 seek）
-
-    其余参数、flatten/shuffle、构造参数列表均与 ``get_sft_dataset`` 一致。
+    3. 构造类：独立 ``LeRobotSFTDataset``（不继承 SFTDataset），本地解码、无需 S3 凭证
+    4. 惰性化加载：加载期只产出 (sources, episode_index) 扁平索引，episode 字段采样期现算
     """
     log.info(f"Unknown kwargs for get_sft_dataset_from_lerobot: {kwargs}")
     assert resolution in VIDEO_RES_SIZE_INFO.keys(), "The provided resolution cannot be found in VIDEO_RES_SIZE_INFO."
@@ -745,17 +880,11 @@ def get_sft_dataset_from_lerobot(
     # 加载 metadata 前就确保 HF 离线，避免 LeRobotDatasetMetadata 触发 HF Hub 联网
     _ensure_hf_hub_offline()
 
-    # LeRobot 是本地加载，不需要 S3 下载凭证（SFTDataset 构造仍要求 s3_credentials 参数）
-    if INTERNAL:
-        with open("credentials/gcs.secret", "r") as f:
-            credentials = json.load(f)
-    else:
-        credentials = {}
-
     if dataset_path.endswith(".jsonl"):
-        metadata_list = _load_lerobot_metadata_from_manifest(
+        sources, episode_index = _load_lerobot_metadata_from_manifest(
             dataset_path,
-            min_frames=61,
+            min_frames=min_frames,
+            max_duration_s=max_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=video_feature_key,
             caption_key=caption_key,
@@ -763,9 +892,10 @@ def get_sft_dataset_from_lerobot(
         )
         source = f"manifest {dataset_path}"
     else:
-        metadata_list = _load_lerobot_metadata(
+        sources, episode_index = _load_lerobot_metadata(
             dataset_path,
-            min_frames=61,
+            min_frames=min_frames,
+            max_duration_s=max_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=video_feature_key,
             caption_key=caption_key,
@@ -773,28 +903,17 @@ def get_sft_dataset_from_lerobot(
         )
         source = dataset_path
 
-    total_windows = sum(len(m["t2w_windows"]) for m in metadata_list)
     log.info(
         f"Finished loading LeRobot metadata from {source}. "
-        f"Total episodes: {len(metadata_list)}, total windows: {total_windows}"
+        f"Total datasets: {len(sources)}, total episodes: {len(episode_index)}"
     )
 
-    if sample_by_window:
-        metadata_list = _flatten_metadata_by_window(metadata_list)
-        log.info(f"sample_by_window=True: flattened to {len(metadata_list)} samples (one per window)")
-
-    # Deterministic shuffle based on the sha256 hash of uuid（与 get_sft_dataset 一致）
-    metadata_list.sort(key=lambda x: hashlib.sha256(x["uuid"].encode("utf-8")).hexdigest())
-
     dataset = LeRobotSFTDataset(
-        metadata=metadata_list,
-        num_video_frames=num_video_frames,
+        sources=sources,
+        episode_index=episode_index,
         resolution=resolution,
         use_multi_resolution=use_multi_resolution,
         use_multi_fps=use_multi_fps,
-        s3_credentials=credentials,
-        temporal_interval_mode=temporal_interval_mode,
-        frame_selection_mode=frame_selection_mode,
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         use_system_prompt=use_system_prompt,
