@@ -193,6 +193,7 @@ def run_training(args: argparse.Namespace, mode: str, run_dir: Path) -> None:
             "COSMOS_NPU_AIC_METRICS": args.aic_metrics,
             "COSMOS_NPU_EXPORT_DB": "0" if args.no_db else "1",
             "COSMOS_NPU_ASYNC_ANALYSIS": "1",
+            "COSMOS_NPU_PROFILE_ACTIVE_STEPS": str(args.profile_active_steps),
             "COSMOS_PERF_SKIP_FINAL_CHECKPOINT": "1",
             "DATASET_DIR": str(args.dataset),
             "OUTPUT_ROOT": str(run_dir / "training_output"),
@@ -232,8 +233,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--max-steps", type=int, default=12)
-    parser.add_argument("--profile-step", type=int, default=8)
+    parser.add_argument(
+        "--profile-step",
+        type=int,
+        default=8,
+        help="final step of the first profiler capture window",
+    )
     parser.add_argument("--profile-warmup", type=int, default=2)
+    parser.add_argument(
+        "--profile-active-steps",
+        type=int,
+        default=1,
+        help="number of consecutive active steps to retain in the profiler capture window",
+    )
     parser.add_argument("--nproc-per-node", type=int, default=8)
     parser.add_argument("--video-backend", choices=("pyav", "torchcodec"), default="pyav")
     parser.add_argument("--video-resize-mode", choices=("decode_transform", "post_decode"), default="decode_transform")
@@ -252,8 +264,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--extra-override", action="append", default=[])
     args = parser.parse_args()
-    if args.profile_step < args.profile_warmup + 1:
-        parser.error("--profile-step must be at least --profile-warmup + 1")
+    if args.profile_warmup < 0:
+        parser.error("--profile-warmup must be non-negative")
+    if args.profile_active_steps < 1:
+        parser.error("--profile-active-steps must be positive")
+    if args.profile_step < args.profile_warmup + args.profile_active_steps:
+        parser.error("--profile-step must be at least --profile-warmup + --profile-active-steps")
     if args.num_workers < 1 or args.data_samples < 1:
         parser.error("--num-workers and --data-samples must be positive")
     if args.nproc_per_node < 1 or args.max_steps < 1 or args.decoder_cache_size < 1:

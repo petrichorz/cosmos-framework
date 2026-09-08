@@ -54,6 +54,20 @@ def _npu_experimental_config(torch_npu):
     )
 
 
+def _profile_schedule_counts(profile_freq: int, warmup: int) -> tuple[int, int, int]:
+    """Return wait/warmup/active counts for one profiler capture window."""
+    try:
+        active = int(os.environ.get("COSMOS_NPU_PROFILE_ACTIVE_STEPS", "1"))
+    except ValueError as error:
+        raise ValueError("COSMOS_NPU_PROFILE_ACTIVE_STEPS must be an integer") from error
+    if active < 1:
+        raise ValueError("COSMOS_NPU_PROFILE_ACTIVE_STEPS must be at least 1")
+    wait = profile_freq - (active + warmup)
+    if wait < 0:
+        raise ValueError("profile_freq must be greater than or equal to warmup + active")
+    return wait, warmup, active
+
+
 @contextlib.contextmanager
 def maybe_enable_profiling(config, *, global_step: int = 0):
     # get user defined profiler settings
@@ -68,10 +82,12 @@ def maybe_enable_profiling(config, *, global_step: int = 0):
     os.makedirs(trace_dir, exist_ok=True)
     rank = distributed.get_rank()
     target_ranks = config.trainer.profiling.target_ranks
-    warmup, active = config.trainer.profiling.profile_warmup, 1
-    wait = profile_freq - (active + warmup)
-    assert wait >= 0, "profile_freq must be greater than or equal to warmup + active"
+    wait, warmup, active = _profile_schedule_counts(
+        profile_freq,
+        config.trainer.profiling.profile_warmup,
+    )
     log.info(f"Profiling active. Traces will be saved at {trace_dir}")
+    log.info(f"Profiler schedule: wait={wait}, warmup={warmup}, active={active}, repeat=1")
 
     if _is_npu_runtime():
         if rank not in target_ranks:

@@ -220,6 +220,7 @@ MASTER_PORT=50125 python tools/profile_cosmos_ascend.py \
   --max-steps 8 \
   --profile-step 8 \
   --profile-warmup 2 \
+  --profile-active-steps 1 \
   --profiler-level level0 \
   --record-shapes \
   --no-with-stack \
@@ -229,7 +230,19 @@ MASTER_PORT=50125 python tools/profile_cosmos_ascend.py \
   --output-root /data5T/profile-results
 ```
 
-调度为 `wait + warmup + active(1)`。上述设置会在第 8 个 step 采集一个 active step，前两个 profiler step 用于 warmup，其余为 wait。
+调度为 `wait + warmup + active`，并且只执行一个采集窗口（`repeat=1`）。上述设置中：
+
+```text
+wait   = profile_step - profile_warmup - profile_active_steps
+       = 8 - 2 - 1
+       = 5
+
+step 1～5：wait，不记录
+step 6～7：warmup，采集但不导出
+step 8：active，正式保存
+```
+
+`--profile-step` 表示第一个采集窗口的结束 step，不是开始 step。
 
 ### 6.1 为什么默认关闭 stack 和 modules
 
@@ -281,6 +294,7 @@ MASTER_PORT=50127 python tools/profile_cosmos_ascend.py \
   --max-steps 8 \
   --profile-step 8 \
   --profile-warmup 2 \
+  --profile-active-steps 1 \
   --profiler-level level1 \
   --aic-metrics memory \
   --no-with-stack \
@@ -289,6 +303,54 @@ MASTER_PORT=50127 python tools/profile_cosmos_ascend.py \
 ```
 
 一次只采集一种 AI Core metric，避免不必要的开销和结果混淆。
+
+### 6.4 连续采集多个 active step
+
+周期性或间歇性问题可能无法通过单个 step 捕获。使用 `--profile-active-steps` 可以在一个窗口中保留连续多个 step。
+
+例如连续采集第 8～10 步：
+
+```bash
+MASTER_PORT=50128 python tools/profile_cosmos_ascend.py \
+  --mode distributed \
+  --dataset /data5T/Embodied-AI/datasets/Cosmos3-DROID/success \
+  --video-backend torchcodec \
+  --video-resize-mode decode_transform \
+  --max-steps 10 \
+  --profile-step 10 \
+  --profile-warmup 2 \
+  --profile-active-steps 3 \
+  --profiler-level level0 \
+  --record-shapes \
+  --no-with-stack \
+  --no-with-modules \
+  --num-workers 8 \
+  --decoder-cache-size 64 \
+  --output-root /data5T/profile-results
+```
+
+对应调度为：
+
+```text
+wait   = 10 - 2 - 3 = 5
+
+step 1～5：wait
+step 6～7：warmup
+step 8～10：active，三个 step 均保留
+```
+
+如果希望采集窗口仍结束在第 8 步，则使用：
+
+```bash
+--max-steps 8 \
+--profile-step 8 \
+--profile-warmup 2 \
+--profile-active-steps 3
+```
+
+此时采集第 6～8 步。`--max-steps` 必须不小于 `--profile-step`，同时 `--profile-step` 必须不小于 `--profile-warmup + --profile-active-steps`。
+
+全 8 rank 连续采集 3 步可能产生 20～25 GiB 或更多数据。建议先使用 Level 0 连续采集定位异常 step，再用 Level 1 对单个代表性 step 采集通信矩阵和详细通信数据。
 
 ## 7. 第四阶段：全 rank 分布式 Profile
 
@@ -303,6 +365,7 @@ MASTER_PORT=50126 python tools/profile_cosmos_ascend.py \
   --max-steps 8 \
   --profile-step 8 \
   --profile-warmup 2 \
+  --profile-active-steps 1 \
   --profiler-level level0 \
   --record-shapes \
   --no-with-stack \
@@ -440,6 +503,7 @@ MASTER_PORT=50126 python tools/profile_cosmos_ascend.py \
   --max-steps 8 \
   --profile-step 8 \
   --profile-warmup 2 \
+  --profile-active-steps 1 \
   --profiler-level level0 \
   --record-shapes \
   --no-with-stack \
