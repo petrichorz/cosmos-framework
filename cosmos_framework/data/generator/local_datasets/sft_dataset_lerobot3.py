@@ -29,6 +29,7 @@ import numpy as np
 import torch
 from lerobot.datasets import video_utils as _vu
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.datasets.video_utils import FrameTimestampError
 
 from cosmos_framework.data.generator.local_datasets.helper import (
     get_aspect_ratio,
@@ -547,6 +548,75 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         text_ids = text_ids[: self.max_caption_tokens]
         return text_ids, caption
 
+    def _decode_video_frames_pyav_resized(
+        self,
+        video_path: str,
+        timestamps: list[float],
+        resize_h: int,
+        resize_w: int,
+    ) -> torch.Tensor:
+        """用底层 PyAV 在解码阶段直接 resize（bicubic），避免外部 F.interpolate。
+
+        镜像 lerobot ``decode_video_frames_torchvision`` 的时间戳选择逻辑，区别在于
+        每解出一帧 AVFrame 就调用 ``frame.reformat`` 一步完成 yuv→rgb24 + 缩放到
+        (resize_h, resize_w)，不再产出全分辨率中间 tensor。
+
+        返回 ``[T, 3, resize_h, resize_w]`` uint8 ∈ [0,255]（已 resize）。
+        注意：与 PyTorch ``F.interpolate(bicubic)`` 数值有细微差异（libswscale vs
+        PyTorch 内核），训练可接受，但非逐像素等价。
+        """
+        import av
+        from av.video.reformatter import Interpolation
+
+        first_ts = min(timestamps)
+        last_ts = max(timestamps)
+        loaded_frames: list[torch.Tensor] = []
+        loaded_ts: list[float] = []
+
+        container = av.open(video_path, metadata_errors="ignore")
+        try:
+            stream = container.streams.video[0]
+            offset = int(round(max(first_ts, 0) / stream.time_base))
+            container.seek(offset, backward=True, any_frame=False, stream=stream)
+            for frame in container.decode(video=0):
+                if frame.pts is None:
+                    # 个别编码的帧可能缺 pts，跳过以免 frame.pts * time_base 抛 TypeError
+                    continue
+                current_ts = float(frame.pts * frame.time_base)
+                resized = frame.reformat(
+                    width=resize_w,
+                    height=resize_h,
+                    format="rgb24",
+                    interpolation=Interpolation.BICUBIC,
+                )
+                # to_ndarray() 返回临时 numpy 数组，copy 一份避免悬空引用
+                loaded_frames.append(torch.from_numpy(resized.to_ndarray().copy()).permute(2, 0, 1))
+                loaded_ts.append(current_ts)
+                if current_ts >= last_ts:
+                    break
+        finally:
+            container.close()
+
+        query_ts = torch.tensor(timestamps)
+        decoded_ts = torch.tensor(loaded_ts)
+        if not loaded_frames:
+            raise FrameTimestampError(f"No frames decoded from video: {video_path}")
+        distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
+        minimum, closest_indices = distances.min(1)
+        within_tolerance = minimum < self.tolerance_s
+        if not within_tolerance.all():
+            raise FrameTimestampError(
+                "One or several query timestamps unexpectedly violate the tolerance "
+                f"({minimum[~within_tolerance]} > tolerance_s={self.tolerance_s})."
+                f"\nqueried timestamps: {query_ts}"
+                f"\nloaded timestamps: {decoded_ts}"
+                f"\nvideo: {video_path}"
+                "\nbackend: pyav"
+            )
+
+        closest_frames = torch.stack([loaded_frames[index] for index in closest_indices])
+        return closest_frames
+
     def process_one_sample(self, ds_idx: int, ep_idx: int) -> dict | None:
         """Process a single LeRobot SFT sample.
 
@@ -623,21 +693,21 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
 
         fps = original_fps / temporal_interval
 
-        # 【lerobot 加载】帧号 → 绝对时间戳 → decode_video_frames（返回 [T,C,H,W] float ∈ [0,1]）
+        # 【lerobot 加载】帧号 → 绝对时间戳 → 解码时直接 resize（返回 uint8 [T,3,resize_h,resize_w]）
         frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
         timestamps = [idx / original_fps for idx in frame_indices]
         try:
-            video_frames = _vu.decode_video_frames(
+            video_frames = self._decode_video_frames_pyav_resized(
                 input_video_path,
                 timestamps,
-                tolerance_s=self.tolerance_s,
-                backend=self.video_backend,
-            )  # [T, C, H, W] float32 ∈ [0,1]
-        except AssertionError as e:
-            # 时间戳与视频 pts 偏差超过 tolerance_s 时，lerobot 内部 assert 会抛 AssertionError。
+                resize_h,
+                resize_w,
+            )
+        except FrameTimestampError as e:
+            # 时间戳与视频 pts 偏差超过 tolerance_s 时抛 FrameTimestampError。
             # 打印其详细提示（哪些时间戳违反 tolerance、视频路径等），并跳过该样本，避免中断训练。
             log.warning(
-                f"AssertionError decoding video for sample {uuid} "
+                f"FrameTimestampError decoding video for sample {uuid} "
                 f"(start={start_frame}, end={end_frame}, path={input_video_path}): {e}"
             )
             return None
@@ -657,12 +727,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             )
             return None
 
-        # resize 到 (resize_h, resize_w)（对齐原 ffmpeg 的 scale + bicubic），再转 [T,H,W,C] uint8
-        import torch.nn.functional as F
-
-        video_frames = video_frames.float()
-        video_frames = F.interpolate(video_frames, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
-        video_frames = video_frames.round().clamp(0, 255).to(torch.uint8)
+        # 已在解码阶段 resize 到 (resize_h, resize_w)，直接转 [T,H,W,3] uint8，无需 F.interpolate
         video_chunk = video_frames.permute(0, 2, 3, 1).cpu().numpy()  # [T,H,W,3] uint8
 
         # Truncate temporally to temporal_compression_factor * N + 1
