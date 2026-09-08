@@ -32,6 +32,7 @@ from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_ca
 from cosmos_framework.utils import log
 from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
+from cosmos_framework.utils.performance import performance_scope
 
 _MAX_CAPTION_TOKENS = 1024
 _DURATION_TEMPLATE = "The video is {duration:.1f} seconds long and is of {fps:.0f} FPS."
@@ -448,7 +449,12 @@ class SFTDataset(torch.utils.data.IterableDataset):
         while True:
             rng.shuffle(self.metadata)
             for metadata in self.metadata:
-                sample = self.process_one_sample(metadata)
+                with performance_scope(
+                    "data_sample",
+                    uuid=metadata.get("uuid"),
+                    video_path=metadata.get("vision_path"),
+                ):
+                    sample = self.process_one_sample(metadata)
                 if sample is None:
                     log.warning(f"Failed to process sample {metadata['uuid']}, skipping...")
                     continue

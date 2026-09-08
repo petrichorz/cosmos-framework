@@ -6,6 +6,7 @@ import functools
 import inspect
 import os
 import signal
+import time
 from typing import Any
 
 import torch
@@ -14,6 +15,7 @@ import torch.utils.data
 
 from cosmos_framework.utils.context_managers import distributed_init
 from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.performance import performance_scope, record_performance_event
 from cosmos_framework.utils.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_nsys_profiling,
@@ -272,9 +274,11 @@ class ImaginaireTrainer:
                 while True:
                     if benchmark and grad_accum_iter == 0:
                         benchmark.begin_iteration()
+                    iteration_start_ns = time.perf_counter_ns()
                     self.callbacks.on_before_dataloading(iteration)
                     try:
                         with (
+                            performance_scope("data_wait", iteration=iteration),
                             self.training_timer("dataloader_train"),
                             benchmark.phase("dataloader_train") if benchmark else contextlib.nullcontext(),
                             self.straggler_detector.profile_section(
@@ -301,7 +305,10 @@ class ImaginaireTrainer:
                     # Move all tensors in the data batch to GPU device.
                     if benchmark:
                         benchmark.record_batch(data_batch)
-                    with benchmark.phase("host_to_device") if benchmark else contextlib.nullcontext():
+                    with (
+                        performance_scope("host_to_device", iteration=iteration),
+                        benchmark.phase("host_to_device") if benchmark else contextlib.nullcontext(),
+                    ):
                         data_batch = misc.to(data_batch, device="cuda")
                     # The actual training step.
                     self.callbacks.on_training_step_start(model, data_batch, iteration=iteration)
@@ -310,15 +317,16 @@ class ImaginaireTrainer:
                         model_ddp.train()
                     assert model_ddp.training, "model_ddp is not in training mode."
                     assert model.training, "model is not in training mode."
-                    output_batch, loss, grad_accum_iter = self.training_step(
-                        model_ddp,
-                        optimizer,
-                        scheduler,
-                        grad_scaler,
-                        data_batch,
-                        iteration=iteration,
-                        grad_accum_iter=grad_accum_iter,
-                    )
+                    with performance_scope("training_step", iteration=iteration):
+                        output_batch, loss, grad_accum_iter = self.training_step(
+                            model_ddp,
+                            optimizer,
+                            scheduler,
+                            grad_scaler,
+                            data_batch,
+                            iteration=iteration,
+                            grad_accum_iter=grad_accum_iter,
+                        )
                     self.callbacks.on_training_step_batch_end(
                         model, data_batch, output_batch, loss, iteration=iteration
                     )
@@ -327,6 +335,11 @@ class ImaginaireTrainer:
                         continue
                     # Do the following when an actual optimizer (update) step has been made.
                     iteration += 1
+                    record_performance_event(
+                        "iteration_core",
+                        duration_ms=(time.perf_counter_ns() - iteration_start_ns) / 1_000_000,
+                        iteration=iteration,
+                    )
                     # Save checkpoint.
                     if iteration % self.config.checkpoint.save_iter == 0:
                         self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
@@ -356,9 +369,14 @@ class ImaginaireTrainer:
         log.success("Done with training.")
         if sm_carveout:
             torch._C._set_sm_carveout_experimental(None)
-        save_final_checkpoint = not benchmark or self.config.trainer.benchmarking.save_final_checkpoint
+        skip_final_checkpoint = os.environ.get("COSMOS_PERF_SKIP_FINAL_CHECKPOINT", "0") == "1"
+        save_final_checkpoint = (
+            not benchmark or self.config.trainer.benchmarking.save_final_checkpoint
+        ) and not skip_final_checkpoint
         if save_final_checkpoint and iteration % self.config.checkpoint.save_iter != 0:
             self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
+        elif skip_final_checkpoint:
+            log.info("Skipping final checkpoint for a performance-only run.")
         self.callbacks.on_train_end(model, iteration=iteration)
         self.checkpointer.finalize()
         if benchmark:
@@ -401,7 +419,11 @@ class ImaginaireTrainer:
         with distributed.ddp_sync_grad(model_ddp, grad_accum_iter == self.config.trainer.grad_accum_iter - 1):
             self.callbacks.on_before_forward(iteration=iteration)
             benchmark = getattr(self, "training_benchmark", None)
-            with self.training_timer("forward"), benchmark.phase("forward") if benchmark else contextlib.nullcontext():
+            with (
+                performance_scope("forward", iteration=iteration),
+                self.training_timer("forward"),
+                benchmark.phase("forward") if benchmark else contextlib.nullcontext(),
+            ):
                 with self.straggler_detector.profile_section(
                     "fwd", self.config.trainer.straggler_detection.analyze_forward
                 ):
@@ -410,6 +432,7 @@ class ImaginaireTrainer:
             model = model_ddp.module if self.config.trainer.distributed_parallelism == "ddp" else model_ddp
             self.callbacks.on_before_backward(model, loss, iteration=iteration)
             with (
+                performance_scope("backward", iteration=iteration),
                 self.training_timer("backward"),
                 benchmark.phase("backward") if benchmark else contextlib.nullcontext(),
             ):
@@ -423,6 +446,7 @@ class ImaginaireTrainer:
         grad_accum_iter += 1
         if grad_accum_iter == self.config.trainer.grad_accum_iter:
             with (
+                performance_scope("optimizer_step", iteration=iteration),
                 self.training_timer("optimizer_step"),
                 benchmark.phase("optimizer_step") if benchmark else contextlib.nullcontext(),
             ):

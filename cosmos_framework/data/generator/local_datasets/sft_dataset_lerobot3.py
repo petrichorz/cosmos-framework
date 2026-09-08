@@ -39,6 +39,7 @@ from cosmos_framework.data.generator.sequence_packing import SequencePlan
 from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.utils import log
 from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.performance import performance_scope, record_performance_event
 
 # ============================================================================
 # 1. video 字段选择 + metadata 加载
@@ -307,21 +308,30 @@ class _LeRobotVideoDecoderCache:
         cache_key = (video_path, resize_hw)
         if cache_key in self._cache:
             self._cache.move_to_end(cache_key)
+            record_performance_event("decoder_cache_hit", video_path=video_path, cache_size=len(self._cache))
             return self._cache[cache_key][0]
 
-        file_handle = fsspec.open(video_path).__enter__()
+        record_performance_event("decoder_cache_miss", video_path=video_path, cache_size=len(self._cache))
+        with performance_scope("video_open", video_path=video_path):
+            file_handle = fsspec.open(video_path).__enter__()
         decoder_kwargs = {"seek_mode": "exact"}
         if resize_hw is not None:
             decoder_kwargs["transforms"] = [Resize(resize_hw)]
         try:
-            decoder = VideoDecoder(file_handle, **decoder_kwargs)
+            with performance_scope("decoder_init_exact", video_path=video_path):
+                decoder = VideoDecoder(file_handle, **decoder_kwargs)
         except Exception:
             file_handle.close()
             raise
         self._cache[cache_key] = (decoder, file_handle)
 
         while len(self._cache) > self._max_size:
-            _, (_, old_fh) = self._cache.popitem(last=False)
+            old_key, (_, old_fh) = self._cache.popitem(last=False)
+            record_performance_event(
+                "decoder_cache_eviction",
+                video_path=old_key[0],
+                cache_size=len(self._cache),
+            )
             try:
                 old_fh.close()
             except Exception:
@@ -392,11 +402,18 @@ class LeRobotSFTDataset(SFTDataset):
         decoder = self._decoder_cache.get_decoder(video_path, resize_hw=resize_hw)
 
         # torchcodec uses a half-open [start, stop) range.
-        frame_batch = decoder.get_frames_in_range(
-            start=start_frame,
-            stop=end_frame + 1,
+        with performance_scope(
+            "video_decode_torchcodec",
+            video_path=video_path,
+            start_frame=start_frame,
+            end_frame=end_frame,
             step=temporal_interval,
-        )
+        ):
+            frame_batch = decoder.get_frames_in_range(
+                start=start_frame,
+                stop=end_frame + 1,
+                step=temporal_interval,
+            )
         data = frame_batch.data  # [N, C, H, W] uint8
         return data
 
@@ -416,16 +433,30 @@ class LeRobotSFTDataset(SFTDataset):
         if resize_hw is None:
             from lerobot.datasets.video_utils import decode_video_frames
 
-            data = decode_video_frames(
-                video_path,
-                timestamps,
-                tolerance_s=self.video_tolerance_s,
-                backend="pyav",
-            )
+            with performance_scope(
+                "video_decode_pyav",
+                video_path=video_path,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                step=temporal_interval,
+            ):
+                data = decode_video_frames(
+                    video_path,
+                    timestamps,
+                    tolerance_s=self.video_tolerance_s,
+                    backend="pyav",
+                )
             # LeRobot returns float32 TCHW in [0, 1]; normalize to the uint8
             # contract shared with the TorchCodec path.
             return data.mul(255).round().clamp(0, 255).to(torch.uint8)
-        return self._decode_video_frames_pyav_resized(video_path, timestamps, resize_hw)
+        with performance_scope(
+            "video_decode_pyav",
+            video_path=video_path,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            step=temporal_interval,
+        ):
+            return self._decode_video_frames_pyav_resized(video_path, timestamps, resize_hw)
 
     def _decode_video_frames_pyav_resized(
         self,
@@ -521,9 +552,10 @@ class LeRobotSFTDataset(SFTDataset):
         if self.video_resize_mode == "post_decode":
             import torch.nn.functional as F
 
-            data = data.float()
-            data = F.interpolate(data, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
-            data = data.round().clamp(0, 255).to(torch.uint8)
+            with performance_scope("video_resize", backend=self.video_backend):
+                data = data.float()
+                data = F.interpolate(data, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
+                data = data.round().clamp(0, 255).to(torch.uint8)
 
         # [N, C, H, W] (uint8) -> list of [H, W, C] (uint8)，对齐父类返回格式
         data_nhwc = data.permute(0, 2, 3, 1).cpu().numpy()  # [N, H, W, C] uint8
@@ -554,7 +586,8 @@ class LeRobotSFTDataset(SFTDataset):
         input_video_path = metadata["vision_path"]
         metadata_started = time.perf_counter()
         try:
-            video_info = get_video_metadata(input_video_path)
+            with performance_scope("video_metadata", video_path=input_video_path):
+                video_info = get_video_metadata(input_video_path)
         except Exception as error:
             log.exception(
                 "Failed to read video metadata; skipping sample and advancing to the next video. "
@@ -658,20 +691,25 @@ class LeRobotSFTDataset(SFTDataset):
             )
             return None
 
-        video_chunk = np.stack(video_chunk, axis=0)  # [T,H,W,3]
+        with performance_scope("video_tensor_prepare", video_path=input_video_path):
+            video_chunk = np.stack(video_chunk, axis=0)  # [T,H,W,3]
 
-        # Truncate temporally to temporal_compression_factor * N + 1
-        target_t = (video_chunk.shape[0] - 1) // self.temporal_compression_factor * self.temporal_compression_factor + 1
+            # Truncate temporally to temporal_compression_factor * N + 1
+            target_t = (
+                (video_chunk.shape[0] - 1) // self.temporal_compression_factor * self.temporal_compression_factor + 1
+            )
 
-        # Apply spatial center crop and temporal truncation
-        video_chunk = video_chunk[:target_t, crop_y : crop_y + target_h, crop_x : crop_x + target_w]  # [T,H,W,3]
+            # Apply spatial center crop and temporal truncation
+            video_chunk = video_chunk[
+                :target_t, crop_y : crop_y + target_h, crop_x : crop_x + target_w
+            ]  # [T,H,W,3]
 
-        # THWC -> CTHW
-        video_chunk = np.transpose(video_chunk, (3, 0, 1, 2))  # [3,T,H,W]
-        video = torch.from_numpy(np.ascontiguousarray(video_chunk)).to(torch.uint8)  # [3,T,H,W]
-        padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
-        # image_size: [target_h, target_w, orig_h, orig_w] in pixel space, for the model to crop the video
-        image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
+            # THWC -> CTHW
+            video_chunk = np.transpose(video_chunk, (3, 0, 1, 2))  # [3,T,H,W]
+            video = torch.from_numpy(np.ascontiguousarray(video_chunk)).to(torch.uint8)  # [3,T,H,W]
+            padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
+            # image_size: [target_h, target_w, orig_h, orig_w] in pixel space, for the model to crop the video
+            image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
 
         selected = _select_caption(t2w_window)
         if selected is None:
@@ -713,7 +751,8 @@ class LeRobotSFTDataset(SFTDataset):
         if not self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
             if random.random() < self.cfg_dropout_rate:
                 caption = ""
-        text_ids, caption = self._tokenize_caption(caption)
+        with performance_scope("caption_tokenize"):
+            text_ids, caption = self._tokenize_caption(caption)
 
         ret = dict(
             __key__=f"{metadata['uuid']}_w{win_idx}",
