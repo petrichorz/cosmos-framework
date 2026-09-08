@@ -20,9 +20,11 @@
 | manifest 并行加载 | 4.8 | ThreadPoolExecutor 并行读多个数据集 |
 | 多分辨率训练 | 4.10 | `use_multi_resolution`：256/480 随机，不上采样 |
 | 多 fps 训练 | 4.10 | `use_multi_fps`：temporal_interval 随机 2/3/4 |
-| 视频解码 | 5 | 复用官方 lerobot `decode_video_frames` 按绝对时间戳解码 |
-| decoder LRU 缓存 | 5.5 | 替换 lerobot 无界缓存为 LRU（**仅 torchcodec 生效，pyav 下 no-op**） |
+| 视频解码 | 5 | 底层 PyAV `av.open` 解码时 `reformat` 直接 resize（消除外部 `F.interpolate`） |
+| decoder LRU 缓存 | 5.5 | 替换 lerobot 无界缓存为 LRU（**仅 torchcodec 生效，当前 pyav 下 no-op**） |
 | caption 回退 | 4.6 | `caption_key` 列优先，回退官方 `tasks` 列 |
+| episode 过滤阈值 | 4.11 | `min_frames`（下界/帧）+ `max_duration_s`（上界/秒）暴露到 toml |
+| 本地 vendored lerobot | 附录 | `lerobot/`（0.5.0），训练时经 `PYTHONPATH=.` 优先于 site-packages |
 
 ---
 
@@ -32,7 +34,7 @@
 - [2. 最终文件组织](#2-最终文件组织)
 - [3. 数据流与惰性化加载回顾](#3-数据流与惰性化加载回顾)
 - [4. 字段映射方案（LeRobot → 样本）](#4-字段映射方案lerobot--样本)
-- [5. 视频解码（复用官方 lerobot `decode_video_frames`）](#5-视频解码复用官方-lerobot-decode_video_frames)
+- [5. 视频解码（底层 PyAV 解码时 resize）](#5-视频解码底层-pyav-解码时-resize)
 - [6. 已确认的风险点与注意事项](#6-已确认的风险点与注意事项)
 - [7. 关键结论速查](#7-关键结论速查)
 - [8. 训练接入改动](#8-训练接入改动)
@@ -517,9 +519,12 @@ max_sequence_length = 65760             # 从 45056 放大（真正生效的 bud
 
 ---
 
-## 5. 视频解码（复用官方 lerobot `decode_video_frames`）
+## 5. 视频解码（底层 PyAV 解码时 resize）
 
-> ⚠️ **本章已重写**。早期方案（旧版第 5 章）是「自建 torchcodec decoder + `get_frames_in_range` 按帧编号 seek + 自写 resize」。最终落地**放弃该方案**，改为直接复用官方 lerobot 的 `decode_video_frames` 按绝对时间戳解码。下面是实际实现。
+> ⚠️ **本章已二次重写**。演进历史：
+> 1. 最早是「自建 torchcodec decoder + `get_frames_in_range` 按帧编号 seek + 自写 resize」；
+> 2. 后改为「复用官方 lerobot `decode_video_frames` 按时间戳解码 + 外部 `F.interpolate` resize」；
+> 3. **最终**改为「底层 PyAV `av.open` 解码时直接 `frame.reformat` resize」，消除全分辨率中间 tensor 与外部 `F.interpolate`。
 
 ### 5.1 问题
 
@@ -533,46 +538,56 @@ for idx, frame in enumerate(ffmpeg_decode_video(input_video_path, ...)):
 
 toy 数据一个 mp4 含 50 个 episode，每个 episode 都全量解码同一文件 → 50 次全量解码，极低效。
 
-### 5.2 方案：复用官方 lerobot（非自建 seek）
+### 5.2 方案：底层 PyAV 解码时 resize（`_decode_video_frames_pyav_resized`）
 
-最终落地放弃「自建 decoder + 帧编号 seek + 自写 resize」，改为直接复用官方 lerobot：
+最终落地用 **PyAV 底层 API**（而非 torchvision `VideoReader`）实现「解码阶段就 resize」：
 
-- 按**绝对时间戳**（非帧编号）解码，由 lerobot 内部用 torchcodec/pyav + 自带 decoder cache 实现。
-- 帧号在 `process_one_sample` 里先转成 timestamp（`idx / original_fps`）再交给 lerobot。
-- 解码、resize、dtype 归一化（返回 `[T,C,H,W]` float ∈ [0,1]）都交给官方实现，避免自建缓存与 resize 的维护成本。
+- 用 `av.open` + `container.decode` 顺序解码（镜像 lerobot 的 `decode_video_frames_torchvision` 时间戳选择逻辑）。
+- 每解出一帧 `AVFrame`，立即 `frame.reformat(width, height, format="rgb24", interpolation=BICUBIC)` **一步完成 yuv→rgb24 + 缩放到 (resize_h, resize_w)**。
+- 不再产出全分辨率 RGB 中间 tensor，也省掉了外部 `F.interpolate`。
+
+```python
+# 新方法签名（sft_dataset_lerobot3.py:551）
+def _decode_video_frames_pyav_resized(
+    self, video_path: str, timestamps: list[float], resize_h: int, resize_w: int
+) -> torch.Tensor:
+    # 返回 [T, 3, resize_h, resize_w] uint8 ∈ [0,255]（已 resize）
+```
+
+**关键收益**：
+- 省掉全分辨率 RGB 中间 tensor 的生成 + 内存带宽 + 一次独立 `F.interpolate` kernel。
+- toy 640×480 收益 <5%（resize 本就是零头）；高分辨率真实数据约 10~20%（全分辨率 RGB 每帧 3~6MB，1341 帧就是 4~8GB 中间搬运）。
+- **省不掉**：yuv 软解本身（帧间依赖，reformat 前必须解出全分辨率 YUV 帧）——这是 87% 的大头。
 
 ### 5.3 帧号 → 时间戳 → 解码（核心流程）
 
-`process_one_sample` 里（`sft_dataset_lerobot3.py:621-631`）：
+`process_one_sample` 里（`sft_dataset_lerobot3.py:694-700`）：
 
 ```python
 # 帧号 → 绝对时间戳
 frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
 timestamps = [idx / original_fps for idx in frame_indices]
 
-# 交给 lerobot 按时间戳解码
-video_frames = _vu.decode_video_frames(
-    input_video_path,
-    timestamps,
-    tolerance_s=self.tolerance_s,
-    backend=self.video_backend,
-)  # [T, C, H, W] float32 ∈ [0,1]
+# 解码时直接 resize（返回 uint8 [T,3,resize_h,resize_w]）
+video_frames = self._decode_video_frames_pyav_resized(
+    input_video_path, timestamps, resize_h, resize_w
+)
 ```
 
 关键点：
 
 - `start_frame`/`end_frame` 仍存帧编号（见 4.5），解码前才转成绝对时间戳。
 - **抽帧**通过「帧号列表步长」实现（`range(..., temporal_interval)`），而非解码层跳帧。
-- `backend`：`video_backend` 参数控制，experiment 配 `"pyav"`（`vision_sft_edge_lerobot3.py:241`）；默认 `_vu.get_safe_default_codec()`（torchcodec 可用则 torchcodec，否则 pyav）。
+- resize 目标就是 `resize_h/resize_w`（缩放到短边对齐 target 后的中间尺寸，见 4.10）。
 
 ### 5.4 解码容错
 
-lerobot 内部对「时间戳与视频 pts 偏差超过 `tolerance_s`」会 `assert` 抛 `AssertionError`；其它坏文件/解码器异常抛通用 `Exception`。`process_one_sample` 里两者都 catch，打印 warning 并跳过该样本，避免中断训练（`sft_dataset_lerobot3.py:624-653`）：
+自定义 `_decode_video_frames_pyav_resized` 对「时间戳与视频 pts 偏差超过 `tolerance_s`」抛 `FrameTimestampError`（`ValueError` 子类）；`process_one_sample` 里 catch 它并跳过坏样本（`sft_dataset_lerobot3.py:706-716`）：
 
 ```python
 try:
-    video_frames = _vu.decode_video_frames(...)
-except AssertionError as e:
+    video_frames = self._decode_video_frames_pyav_resized(...)
+except FrameTimestampError as e:
     log.warning(...); return None   # 时间戳超出 tolerance
 except Exception as e:
     log.warning(...); return None   # 坏文件 / 解码器异常
@@ -581,15 +596,17 @@ if video_frames.shape[0] == 0:      # 空解码结果也跳过
     log.warning(...); return None
 ```
 
+> 注意：不再 catch `AssertionError`（旧版 lerobot 内部 assert），改 catch `FrameTimestampError`。
+
 ### 5.5 decoder 缓存：LRU 替换 lerobot 无界缓存（⚠️ 仅 torchcodec 生效）
 
-lerobot 模块级 `_vu._default_decoder_cache` 是**无界 dict、只加不删**，多 worker 场景下 decoder 索引 + FFmpeg 上下文持续累积导致内存上涨。`_patch_decoder_cache`（`sft_dataset_lerobot3.py:151`）把它替换成本地 LRU 版 `_LRUVideoDecoderCache`（`max_size=64`，`seek_mode="exact"`）：
+lerobot 模块级 `_vu._default_decoder_cache` 是**无界 dict、只加不删**，多 worker 场景下 decoder 索引 + FFmpeg 上下文持续累积导致内存上涨。`_patch_decoder_cache`（`sft_dataset_lerobot3.py:152`）把它替换成本地 LRU 版 `_LRUVideoDecoderCache`（`max_size=64`，`seek_mode="exact"`）：
 
 ```python
 _vu._default_decoder_cache = _LRUVideoDecoderCache(max_size=max_size)
 ```
 
-`_LRUVideoDecoderCache`（`sft_dataset_lerobot3.py:79`）要点：
+`_LRUVideoDecoderCache`（`sft_dataset_lerobot3.py:80`）要点：
 
 1. **LRU 用 `OrderedDict`**：`move_to_end`（命中标记最近）+ `popitem(last=False)`（淘汰最久未用）。
 2. **缓存 `(decoder, file_handle)` 二元组**：构造失败时显式 `close()` 防坏文件累积 fd；淘汰时 `del old_decoder` + `close()`。
@@ -597,26 +614,26 @@ _vu._default_decoder_cache = _LRUVideoDecoderCache(max_size=max_size)
 
 > 与 action 侧 `_LRUVideoDecoderCache` 唯一差异：`seek_mode="exact"`（vision SFT 要精确切 episode 帧边界；action 对精确帧不敏感，用 `approximate`）。
 
-> ⚠️ **重要：本缓存仅在 torchcodec 后端生效。** lerobot 的 pyav 路径（`decode_video_frames_torchvision`）每次调用都新建 `VideoReader` 并 close，**完全不查 `_default_decoder_cache`**。当前 experiment 配 `video_backend="pyav"`，所以 `_patch_decoder_cache` / `_LRUVideoDecoderCache` / `decoder_cache_max_size` 全是 **no-op**。保留它们是给将来切 torchcodec 时防无界内存膨胀（方案 B）。
+> ⚠️ **重要：本缓存仅在 torchcodec 后端生效。** 现在 `_decode_video_frames_pyav_resized` 走的是底层 PyAV，也不查 `_default_decoder_cache`。所以当前 `_patch_decoder_cache` / `_LRUVideoDecoderCache` / `decoder_cache_max_size` 全是 **no-op**。保留它们是给将来切 torchcodec 时防无界内存膨胀（方案 B）。
 
-### 5.6 后处理（resize + 转 uint8）
+### 5.6 后处理（已 resize，直接转 uint8）
 
-lerobot 返回 `[T,C,H,W]` float ∈ [0,1]，仍需 resize 到目标尺寸并转 uint8。这段代码在 `process_one_sample` 内（`sft_dataset_lerobot3.py:655-661`）：
+`_decode_video_frames_pyav_resized` 返回的已经是 resize 好的 `[T,3,resize_h,resize_w]` uint8，所以后处理**不再需要 float + F.interpolate**，直接 permute 转 `[T,H,W,3]`（`sft_dataset_lerobot3.py:731`）：
 
 ```python
-import torch.nn.functional as F
-
-video_frames = video_frames.float()
-video_frames = F.interpolate(video_frames, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
-video_frames = video_frames.round().clamp(0, 255).to(torch.uint8)
+# 已在解码阶段 resize 到 (resize_h, resize_w)，直接转 [T,H,W,3] uint8
 video_chunk = video_frames.permute(0, 2, 3, 1).cpu().numpy()  # [T,H,W,3] uint8
 ```
 
-`F.interpolate(mode="bicubic")` 对齐原版 ffmpeg 的 `-vf scale + bicubic`。
+> 说明：后续 `crop_y/crop_x/target_h/target_w` 的 center crop 逻辑不变——因为帧已 resize 到 `(resize_h, resize_w)`，crop 语义与原来「F.interpolate 到 resize 再 crop」一致。
+
+> ⚠️ **bicubic 非逐像素等价**：PyAV `Interpolation.BICUBIC`（libswscale）与 PyTorch `F.interpolate(bicubic, align_corners=False)` 数值有细微差异，训练可接受，但非逐像素一致。
+
+> **reformat 不可省略**：即使 `resize_h/resize_w == 原尺寸`（target == input，无需缩放），`frame.reformat(format="rgb24")` 仍必须执行——它同时承担 **yuv→rgb 色彩空间转换**，去掉会导致下游拿到 yuv 数据、颜色全错。
 
 ### 5.7 内存账（为什么不能全量 decode 缓存）
 
-toy 一个 mp4：24263 帧 × 480 × 640 × 3 = **约 22.4 GB**（解压后 RGB）。全量缓存会 OOM。lerobot 的 `decode_video_frames` 也是按需解码，不缓存全量帧；缓存的只是 **decoder**（且仅 torchcodec），不是解码后的帧数据，所以内存安全。
+toy 一个 mp4：24263 帧 × 480 × 640 × 3 = **约 22.4 GB**（解压后 RGB）。全量缓存会 OOM。`_decode_video_frames_pyav_resized` 按需顺序解码、边解边 resize，不缓存全量帧；且因为直接在解码阶段缩到目标尺寸，**连全分辨率 RGB 中间 tensor 都不产生**（这是相对旧版 `decode_video_frames` + `F.interpolate` 的额外内存优势）。
 
 ---
 
@@ -869,16 +886,17 @@ loss = 2.0362（前向成功）
 | 文件 | 作用 |
 |------|------|
 | `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | 原 vision SFT 数据加载（JSONL/S3 流程），**未改动**，提供 `_select_caption`/`_DURATION_TEMPLATE`/`_RESOLUTION_TEMPLATE`/`_MAX_CAPTION_TOKENS` 等纯函数供复用（不再继承其 `SFTDataset`） |
-| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py` | ★ 新增：LeRobot 动态加载（惰性化 `sources`+`episode_index` + manifest 加载 + 独立 `LeRobotSFTDataset` + `get_sft_dataset_from_lerobot`） |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py` | ★ 新增：LeRobot 动态加载（惰性化 `sources`+`episode_index` + manifest 加载 + 独立 `LeRobotSFTDataset` + 底层 PyAV 解码时 resize + `get_sft_dataset_from_lerobot`） |
 | `cosmos_framework/data/generator/local_datasets/sft_dataset_260907.py` | ⚠️ 备份文件：是 JSONL 父类 `sft_dataset.py` 的副本（非 LeRobot 版），勿与 `sft_dataset_lerobot3.py` 混淆 |
+| `lerobot/` | ★ 本地 vendored lerobot 0.5.0 源码（调试用）。训练时经 `_sft_launcher_common.sh` 的 `PYTHONPATH=.` 优先于 site-packages 被 import；`__version__` 会误读 conda 的 0.4.4（用源码特征判断真实版本，见正文） |
 | `cosmos_framework/data/generator/local_datasets/helper.py` | `ffmpeg_decode_video`、`get_aspect_ratio`、`get_video_metadata`、`download_from_s3`（未改动） |
 | `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴） |
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | 原 vision SFT 实验配置（JSONL 流程），**未改动** |
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py` | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` + 统一 `dataset_path` 接入；`caption_key="task"`、`video_backend="pyav"`） |
 | `cosmos_framework/configs/base/config.py` | 加 1 行 import 注册新 experiment |
-| `cosmos_framework/configs/toml_config/sft_config.py` | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps` 两个 bool 字段 |
-| `cosmos_framework/configs/toml_config/toml_config_helper.py` | `PATH_REMAPS` 新增两条 remap，把 toml 开关路由到 dataset 节点 |
+| `cosmos_framework/configs/toml_config/sft_config.py` | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps`/`min_frames`/`max_duration_s` 字段 |
+| `cosmos_framework/configs/toml_config/toml_config_helper.py` | `PATH_REMAPS` 新增 remap，把 toml 开关/过滤阈值路由到 dataset 节点 |
 | `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py` | `vae_path` 改绝对路径（环境相关，非本特性，慎提交） |
-| `examples/toml/sft_config/vision_sft_edge.toml` | `experiment` 字段指向 `vision_sft_edge_lerobot3` + 多分辨率/fps 开关 + token 预算放大到 65760 |
+| `examples/toml/sft_config/vision_sft_edge.toml` | `experiment` 字段指向 `vision_sft_edge_lerobot3` + 多分辨率/fps 开关 + 过滤阈值 + token 预算放大到 65760 |
 | `examples/launch_sft_vision_edge_yundao_lerobot.sh` | 启动脚本（`DATASET_PATH` 统一入口 + 绕过 `-d` 检查技巧） |
 | `examples/_sft_launcher_common.sh` | 公共启动脚本，**未改动**（已回滚） |
