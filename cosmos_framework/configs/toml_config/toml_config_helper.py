@@ -63,6 +63,13 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "use_multi_fps"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_fps",
         ),
+        # episode 过滤阈值：最小帧数（下界）/ 最大时长秒（上界），落在 SFT dataset 节点
+        ("dataloader_train", "min_frames"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "min_frames",
+        ),
+        ("dataloader_train", "max_duration_s"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_duration_s",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,

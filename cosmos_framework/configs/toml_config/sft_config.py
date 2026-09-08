@@ -738,7 +738,7 @@ class DataloaderTrainConfig(BaseModel):
     use_multi_resolution: bool = Field(
         default=False,
         description=(
-            "VFM only. 多分辨率训练开关：True 时在 256/480/720 档位随机选一个 "
+            "VFM only. 多分辨率训练开关：True 时在 256/480 档位随机选一个 "
             "（只选 <= 视频短边的档位，不上采样）。remapped 到 SFT dataset 的 "
             "'use_multi_resolution'。"
         ),
@@ -747,8 +747,22 @@ class DataloaderTrainConfig(BaseModel):
         default=False,
         description=(
             "VFM only. 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机 "
-            "（保留 1/2、1/3、1/4）。仅 num_video_frames=-1（native chunk）时生效。"
+            "（保留 1/2、1/3、1/4），直接作用于 native chunk 抽帧步长。"
             "remapped 到 SFT dataset 的 'use_multi_fps'。"
+        ),
+    )
+    min_frames: int = Field(
+        default=61,
+        description=(
+            "VFM only. episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃。"
+            "remapped 到 SFT dataset 的 'min_frames'。"
+        ),
+    )
+    max_duration_s: float = Field(
+        default=61.0,
+        description=(
+            "VFM only. episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃。"
+            "remapped 到 SFT dataset 的 'max_duration_s'。"
         ),
     )
 
