@@ -26,6 +26,8 @@ from typing import Any, TextIO
 import torch
 
 _FILE_HANDLES: dict[int, TextIO] = {}
+_MSTX_DOMAIN = "cosmos_forward"
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def _worker_id() -> int:
@@ -47,6 +49,31 @@ def performance_output_dir() -> Path | None:
 
 def performance_enabled() -> bool:
     return performance_output_dir() is not None
+
+
+def npu_mstx_enabled() -> bool:
+    """Return whether low-overhead Ascend MSTX forward ranges are enabled."""
+    return os.environ.get("COSMOS_NPU_MSTX", "0").lower() in _TRUE_VALUES
+
+
+@contextlib.contextmanager
+def npu_mstx_scope(name: str) -> Iterator[None]:
+    """Annotate host work and its current NPU stream without synchronizing it."""
+    if not npu_mstx_enabled():
+        yield
+        return
+
+    import torch_npu
+
+    range_id = torch_npu.npu.mstx.range_start(
+        f"COSMOS::{name.upper()}",
+        torch_npu.npu.current_stream(),
+        domain=_MSTX_DOMAIN,
+    )
+    try:
+        yield
+    finally:
+        torch_npu.npu.mstx.range_end(range_id, domain=_MSTX_DOMAIN)
 
 
 def _event_file() -> TextIO | None:

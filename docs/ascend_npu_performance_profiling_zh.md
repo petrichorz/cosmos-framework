@@ -438,12 +438,30 @@ collective 会同步所有 rank，因此所有 rank 的 `Stage` 很接近并不�
 
 ## 8. 使用浏览器查看 `trace_view.json`
 
+Profiler 模式默认启用 `--mstx-forward`。它不依赖 `--with-stack` 或
+`--with-modules`，会在 `cosmos_forward` domain 中记录两层低开销范围：
+
+- `COSMOS::FORWARD/01_TEXT_TOKENIZE` 到 `COSMOS::FORWARD/13_LOSS`：训练
+  forward 的数据准备、generation tokenizer/VAE、packing、Host→NPU、denoise 和 loss。
+- `COSMOS::DENOISE/01_ENCODE_TEXT` 到 `COSMOS::DENOISE/11_DECODE_SOUND`：
+  denoise 内部的模态编码、attention metadata、CP 输入/输出、Transformer 和模态解码。
+
+因此，即使当前 torch_npu 组合开启调用栈会崩溃，也可以保持：
+
+```bash
+--mstx-forward --no-with-stack --no-with-modules
+```
+
+如果要关闭这些范围，传入 `--no-mstx-forward`。MSTX 打点不会执行 NPU
+同步；它把当前 stream 与范围关联起来，适合判断某个 `aten::to`、通信或
+NPU kernel 属于哪个 forward 阶段。
+
 推荐使用 Perfetto：
 
 1. 在浏览器访问 `https://ui.perfetto.dev`。
 2. 点击 `Open trace file`。
 3. 选择某个 rank 的 `ASCEND_PROFILER_OUTPUT/trace_view.json`。
-4. 搜索 `COSMOS::TRAINING_STEP`、`COSMOS::FORWARD`、`COSMOS::BACKWARD`、`FSDP`、`allGather` 或 `reduceScatter`。
+4. 搜索 `COSMOS::FORWARD/`、`COSMOS::DENOISE/`、`COSMOS::BACKWARD`、`FSDP`、`allGather` 或 `reduceScatter`。
 
 建议先打开：
 

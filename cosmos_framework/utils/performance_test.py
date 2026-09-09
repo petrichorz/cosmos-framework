@@ -3,8 +3,37 @@
 
 import csv
 import json
+import sys
+from types import SimpleNamespace
 
 from cosmos_framework.utils import performance
+
+
+def test_npu_mstx_scope_disabled(monkeypatch):
+    monkeypatch.delenv("COSMOS_NPU_MSTX", raising=False)
+    with performance.npu_mstx_scope("forward/test"):
+        pass
+
+
+def test_npu_mstx_scope_uses_current_stream(monkeypatch):
+    calls = []
+    fake_mstx = SimpleNamespace(
+        range_start=lambda message, stream, domain: calls.append(("start", message, stream, domain)) or 17,
+        range_end=lambda range_id, domain: calls.append(("end", range_id, domain)),
+    )
+    fake_torch_npu = SimpleNamespace(
+        npu=SimpleNamespace(current_stream=lambda: "stream0", mstx=fake_mstx),
+    )
+    monkeypatch.setenv("COSMOS_NPU_MSTX", "1")
+    monkeypatch.setitem(sys.modules, "torch_npu", fake_torch_npu)
+
+    with performance.npu_mstx_scope("forward/denoise"):
+        pass
+
+    assert calls == [
+        ("start", "COSMOS::FORWARD/DENOISE", "stream0", "cosmos_forward"),
+        ("end", 17, "cosmos_forward"),
+    ]
 
 
 def test_scope_records_jsonl_and_summary(tmp_path, monkeypatch):

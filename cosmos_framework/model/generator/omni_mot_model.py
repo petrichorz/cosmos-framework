@@ -82,6 +82,7 @@ from cosmos_framework.utils.generator.model_weights_stats import WeightTrainingS
 from cosmos_framework.utils.generator.parallelism import ParallelDims
 from cosmos_framework.utils.lazy_config import LazyDict
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
+from cosmos_framework.utils.performance import npu_mstx_scope
 from cosmos_framework.utils.timer import Timer
 
 
@@ -872,20 +873,24 @@ class OmniMoTModel(ImaginaireModel):
             self._update_train_stats(data_batch)
 
         # Load, apply dropout, and tokenize input captions
-        input_text_indexes = self._load_and_tokenize_text_data(data_batch, iteration)
+        with npu_mstx_scope("forward/01_text_tokenize"):
+            input_text_indexes = self._load_and_tokenize_text_data(data_batch, iteration)
 
         # Build sequence plans if not present. SequencePlan has the conditioning information.
-        sequence_plans = build_sequence_plans_from_data_batch(
-            data_batch=data_batch,
-            input_video_key=self.input_video_key,
-            input_image_key=self.input_image_key,
-        )
+        with npu_mstx_scope("forward/02_sequence_plan"):
+            sequence_plans = build_sequence_plans_from_data_batch(
+                data_batch=data_batch,
+                input_video_key=self.input_video_key,
+                input_image_key=self.input_image_key,
+            )
 
         # Get data from raw data batch and tokenize into corresponding tokens for *generation* task
         # The unnoised, tokenized data for the generation task.
-        gen_data_clean = self.get_data_and_condition(data_batch, iteration=iteration)
+        with npu_mstx_scope("forward/03_generation_tokenize"):
+            gen_data_clean = self.get_data_and_condition(data_batch, iteration=iteration)
 
-        gen_data_clean, memory_info = self.memory_init_training(gen_data_clean, data_batch, input_text_indexes)
+        with npu_mstx_scope("forward/04_memory_init"):
+            gen_data_clean, memory_info = self.memory_init_training(gen_data_clean, data_batch, input_text_indexes)
 
         # Compute resolution per sample for per-sample shift lookup
         # image_size[i] may be (1, 4) from IterativeJointDataLoader or (4,) from custom_collate_fn.
@@ -915,15 +920,16 @@ class OmniMoTModel(ImaginaireModel):
             num_vision_latent_frames,
             [plan.condition_frame_indexes_vision for plan in sequence_plans],
         )
-        timesteps_vision, sigmas_vision = self._get_train_noise_level_vision(
-            batch_size=gen_data_clean.batch_size,
-            is_image_batch=gen_data_clean.is_image_batch,
-            resolutions=data_resolutions,
-            num_vision_latent_frames=num_vision_latent_frames,
-            num_tokens=num_tokens_per_sample,
-            iteration=iteration,
-            teacher_forcing_geometry=teacher_forcing_geometry,
-        )  # [B, T_vis] each
+        with npu_mstx_scope("forward/05_noise_schedule_vision"):
+            timesteps_vision, sigmas_vision = self._get_train_noise_level_vision(
+                batch_size=gen_data_clean.batch_size,
+                is_image_batch=gen_data_clean.is_image_batch,
+                resolutions=data_resolutions,
+                num_vision_latent_frames=num_vision_latent_frames,
+                num_tokens=num_tokens_per_sample,
+                iteration=iteration,
+                teacher_forcing_geometry=teacher_forcing_geometry,
+            )  # [B, T_vis] each
 
         # Optional independent action schedule (sampled from rectified_flow_action with
         # action-specific shift). Only active when the config opts in and the batch contains
@@ -938,9 +944,10 @@ class OmniMoTModel(ImaginaireModel):
         rf_cfg = self.config.rectified_flow_training_config
         action_sample_indices = [i for i, plan in enumerate(sequence_plans) if plan.has_action]
         if rf_cfg.independent_action_schedule and action_sample_indices:
-            ts_full, sg_full = self._get_train_noise_level_action(
-                batch_size=gen_data_clean.batch_size, iteration=iteration
-            )  # [B, 1] each
+            with npu_mstx_scope("forward/05_noise_schedule_action"):
+                ts_full, sg_full = self._get_train_noise_level_action(
+                    batch_size=gen_data_clean.batch_size, iteration=iteration
+                )  # [B, 1] each
             idx = torch.tensor(action_sample_indices, dtype=torch.long)  # [n_action]
             timesteps_action = ts_full[idx]  # [n_action, 1]
             sigmas_action = sg_full[idx]  # [n_action, 1]
@@ -951,9 +958,10 @@ class OmniMoTModel(ImaginaireModel):
         # slot, then reindex to the dense audio-bearing subset.
         sound_sample_indices = [i for i, plan in enumerate(sequence_plans) if getattr(plan, "has_sound", False)]
         if getattr(rf_cfg, "independent_sound_schedule", False) and sound_sample_indices:
-            ts_sound_full, sg_sound_full = self._get_train_noise_level_sound(
-                batch_size=gen_data_clean.batch_size
-            )  # [B,1] each
+            with npu_mstx_scope("forward/05_noise_schedule_sound"):
+                ts_sound_full, sg_sound_full = self._get_train_noise_level_sound(
+                    batch_size=gen_data_clean.batch_size
+                )  # [B,1] each
             timesteps_sound, sigmas_sound = build_dense_sound_schedule(
                 sequence_plans,
                 gen_data_clean.x0_tokens_sound,
@@ -994,14 +1002,15 @@ class OmniMoTModel(ImaginaireModel):
                 sigmas_vision,
             )  # [n_sound,T_vis] or None, [n_sound,T_vis] or None
 
-        packed_sequence = self._pack_input_sequence(
-            sequence_plans,
-            input_text_indexes,
-            gen_data_clean,
-            timesteps_vision.cpu(),
-            skip_text_tokens=memory_info["skip_text"],
-            initial_mrope_temporal_offset=memory_info["initial_temporal_offset"],
-        )
+        with npu_mstx_scope("forward/06_pack_sequence"):
+            packed_sequence = self._pack_input_sequence(
+                sequence_plans,
+                input_text_indexes,
+                gen_data_clean,
+                timesteps_vision.cpu(),
+                skip_text_tokens=memory_info["skip_text"],
+                initial_mrope_temporal_offset=memory_info["initial_temporal_offset"],
+            )
 
         # Under independent_action_schedule, overwrite the vision-based action timestep the
         # packer injected with the action timestep, so the denoiser's action timestep embedding
@@ -1051,43 +1060,50 @@ class OmniMoTModel(ImaginaireModel):
             sigmas_vision, gen_data_clean.num_vision_items_per_sample
         )  # [B_items, T_vis]
 
-        memory_info = self.pre_noise_memory_hook(packed_sequence, gen_data_clean, memory_info)
+        with npu_mstx_scope("forward/07_pre_noise_memory"):
+            memory_info = self.pre_noise_memory_hook(packed_sequence, gen_data_clean, memory_info)
 
         # Flow matching/diffusion forward process: noise the input signal with the sampled noise level
-        gen_data_noised = self._add_noise_to_input(
-            gen_data_clean,
-            packed_sequence,
-            sigmas_vision,
-            sigmas_action=sigmas_action,
-            sigmas_sound=sigmas_sound,
-            iteration=iteration,
-        )
-        self._replace_clean_with_noised(packed_sequence, gen_data_noised)
-        packed_sequence = self.post_noise_packing_hook(
-            packed_sequence,
-            gen_data_clean,
-            teacher_forcing_geometry,
-        )
+        with npu_mstx_scope("forward/08_add_noise"):
+            gen_data_noised = self._add_noise_to_input(
+                gen_data_clean,
+                packed_sequence,
+                sigmas_vision,
+                sigmas_action=sigmas_action,
+                sigmas_sound=sigmas_sound,
+                iteration=iteration,
+            )
+        with npu_mstx_scope("forward/09_post_noise_pack"):
+            self._replace_clean_with_noised(packed_sequence, gen_data_noised)
+            packed_sequence = self.post_noise_packing_hook(
+                packed_sequence,
+                gen_data_clean,
+                teacher_forcing_geometry,
+            )
 
         # Move packed sequence to CUDA
-        packed_sequence.to_cuda()
+        with npu_mstx_scope("forward/10_packed_to_device"):
+            packed_sequence.to_cuda()
 
         # Network forward pass
-        memory = self.build_memory_state(packed_sequence, memory_info)  # pylint: disable=assignment-from-none
-        out_net = self.denoise(
-            data_batch_packed=packed_sequence,
-            memory=memory,
-        )
+        with npu_mstx_scope("forward/11_build_memory"):
+            memory = self.build_memory_state(packed_sequence, memory_info)  # pylint: disable=assignment-from-none
+        with npu_mstx_scope("forward/12_denoise"):
+            out_net = self.denoise(
+                data_batch_packed=packed_sequence,
+                memory=memory,
+            )
 
-        loss, losses_dict = self._compute_losses(
-            out_net=out_net,
-            data_batch_packed=packed_sequence,
-            gen_data_noised=gen_data_noised,
-            timesteps=timesteps_vision,
-            is_image_batch=gen_data_clean.is_image_batch,
-            timesteps_action=timesteps_action,
-            timesteps_sound=timesteps_sound,
-        )
+        with npu_mstx_scope("forward/13_loss"):
+            loss, losses_dict = self._compute_losses(
+                out_net=out_net,
+                data_batch_packed=packed_sequence,
+                gen_data_noised=gen_data_noised,
+                timesteps=timesteps_vision,
+                is_image_batch=gen_data_clean.is_image_batch,
+                timesteps_action=timesteps_action,
+                timesteps_sound=timesteps_sound,
+            )
 
         # Pixel-space video shapes for VAE FLOPs estimation in callbacks (e.g. MFU).
         _vae_pixel_shapes: list[tuple[int, int, int]] = []

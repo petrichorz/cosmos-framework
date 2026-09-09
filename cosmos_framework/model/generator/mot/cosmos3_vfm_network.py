@@ -30,6 +30,7 @@ from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAware
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
 from cosmos_framework.model.generator.utils.memory import MemoryState
 from cosmos_framework.utils import log
+from cosmos_framework.utils.performance import npu_mstx_scope
 
 
 class Cosmos3VFMNetworkConfig(PretrainedConfig):
@@ -974,20 +975,24 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # This is intentional for proper batch norm / dropout behavior
         # assert self.training, "Cosmos3VFMNetwork only supports training mode"
 
-        packed_sequence, target_dtype = self._encode_text(packed_seq)  # packed_sequence: [N_total,hidden_size]
+        with npu_mstx_scope("denoise/01_encode_text"):
+            packed_sequence, target_dtype = self._encode_text(packed_seq)  # [N_total,hidden_size]
 
         # encode vision tokens
         original_latent_shapes: List[Tuple[int, int, int]] | None = None
         if self.config.vision_gen:
-            original_latent_shapes = self._encode_vision(packed_seq, packed_sequence, target_dtype)
+            with npu_mstx_scope("denoise/02_encode_vision"):
+                original_latent_shapes = self._encode_vision(packed_seq, packed_sequence, target_dtype)
 
         # encode action tokens
         if self.config.action_gen:
-            self._encode_action(packed_seq, packed_sequence, target_dtype)
+            with npu_mstx_scope("denoise/03_encode_action"):
+                self._encode_action(packed_seq, packed_sequence, target_dtype)
 
         # encode sound tokens
         if self.config.sound_gen:
-            self._encode_sound(packed_seq, packed_sequence, target_dtype)
+            with npu_mstx_scope("denoise/04_encode_sound"):
+                self._encode_sound(packed_seq, packed_sequence, target_dtype)
 
         assert packed_seq.attn_modes is not None
         assert packed_seq.split_lens is not None
@@ -1055,31 +1060,32 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             1 if replicated_attention_io_cp else (self.parallel_dims.cp_size if self.parallel_dims else 1)
         )
 
-        input_pack, attention_meta, natten_metadata_list = build_packed_sequence(
-            runtime_joint_attn_implementation,
-            packed_sequence=packed_sequence,
-            attn_modes=packed_seq.attn_modes,
-            split_lens=packed_seq.split_lens,
-            sample_lens=packed_seq.sample_lens,
-            packed_und_token_indexes=packed_seq.text_indexes,
-            packed_gen_token_indexes=vision_sequence_indexes,
-            num_heads=self.num_heads,
-            is_image_batch=packed_seq.is_image_batch,
-            head_dim=self.head_dim,
-            num_layers=self.num_hidden_layers,
-            token_shapes=packed_seq.vision.token_shapes,
-            natten_parameter_list=self.natten_parameter_list,
-            cp_world_size=sequence_shard_world_size,
-            video_temporal_causal=use_video_temporal_causal,
-            skip_natten_metadata=memory is not None and not memory.requires_natten_metadata(),
-            vision_token_shapes=vision_token_shapes,
-            action_token_shapes=packed_seq.action.token_shapes if packed_seq.action else None,
-            num_action_tokens_per_supertoken=num_action_tokens_per_supertoken,
-            null_action_supertokens=packed_seq.null_action_supertokens,
-            pad_for_cuda_graphs=self.pad_for_cuda_graphs,
-            teacher_forcing_layout=teacher_forcing_layout,
-            teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
-        )
+        with npu_mstx_scope("denoise/05_attention_metadata"):
+            input_pack, attention_meta, natten_metadata_list = build_packed_sequence(
+                runtime_joint_attn_implementation,
+                packed_sequence=packed_sequence,
+                attn_modes=packed_seq.attn_modes,
+                split_lens=packed_seq.split_lens,
+                sample_lens=packed_seq.sample_lens,
+                packed_und_token_indexes=packed_seq.text_indexes,
+                packed_gen_token_indexes=vision_sequence_indexes,
+                num_heads=self.num_heads,
+                is_image_batch=packed_seq.is_image_batch,
+                head_dim=self.head_dim,
+                num_layers=self.num_hidden_layers,
+                token_shapes=packed_seq.vision.token_shapes,
+                natten_parameter_list=self.natten_parameter_list,
+                cp_world_size=sequence_shard_world_size,
+                video_temporal_causal=use_video_temporal_causal,
+                skip_natten_metadata=memory is not None and not memory.requires_natten_metadata(),
+                vision_token_shapes=vision_token_shapes,
+                action_token_shapes=packed_seq.action.token_shapes if packed_seq.action else None,
+                num_action_tokens_per_supertoken=num_action_tokens_per_supertoken,
+                null_action_supertokens=packed_seq.null_action_supertokens,
+                pad_for_cuda_graphs=self.pad_for_cuda_graphs,
+                teacher_forcing_layout=teacher_forcing_layout,
+                teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
+            )
 
         if (
             teacher_forcing_layout is not None
@@ -1153,37 +1159,43 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             attention_meta.noisy_token_range = noisy_range
             attention_meta.control_weights = weights
 
-        input_pack, packed_position_ids = get_context_parallel_sharded_sequence(
-            attn_implementation=runtime_joint_attn_implementation,
-            input_pack=input_pack,
-            position_ids=packed_seq.position_ids,
-            parallel_dims=sequence_shard_parallel_dims,
-        )
+        with npu_mstx_scope("denoise/06_context_parallel_input"):
+            input_pack, packed_position_ids = get_context_parallel_sharded_sequence(
+                attn_implementation=runtime_joint_attn_implementation,
+                input_pack=input_pack,
+                position_ids=packed_seq.position_ids,
+                parallel_dims=sequence_shard_parallel_dims,
+            )
 
-        packed_outputs, lbl_metadata = self.language_model(
-            input_pack,
-            attention_mask=attention_meta,
-            position_ids=packed_position_ids,
-            natten_metadata_list=natten_metadata_list,
-            memory=memory,
-        )
-        last_hidden_state = get_context_parallel_last_hidden_state(
-            packed_outputs=packed_outputs,
-            parallel_dims=sequence_shard_parallel_dims,
-        )  # [N_total,hidden_size]
+        with npu_mstx_scope("denoise/07_transformer"):
+            packed_outputs, lbl_metadata = self.language_model(
+                input_pack,
+                attention_mask=attention_meta,
+                position_ids=packed_position_ids,
+                natten_metadata_list=natten_metadata_list,
+                memory=memory,
+            )
+        with npu_mstx_scope("denoise/08_context_parallel_output"):
+            last_hidden_state = get_context_parallel_last_hidden_state(
+                packed_outputs=packed_outputs,
+                parallel_dims=sequence_shard_parallel_dims,
+            )  # [N_total,hidden_size]
         output_dict = dict()
 
         # decode vision tokens
         if self.config.vision_gen:
-            self._decode_vision(packed_seq, last_hidden_state, output_dict, original_latent_shapes)
+            with npu_mstx_scope("denoise/09_decode_vision"):
+                self._decode_vision(packed_seq, last_hidden_state, output_dict, original_latent_shapes)
 
         # decode action tokens
         if self.config.action_gen:
-            self._decode_action(packed_seq, last_hidden_state, output_dict)
+            with npu_mstx_scope("denoise/10_decode_action"):
+                self._decode_action(packed_seq, last_hidden_state, output_dict)
 
         # decode sound tokens
         if self.config.sound_gen:
-            self._decode_sound(packed_seq, last_hidden_state, output_dict)
+            with npu_mstx_scope("denoise/11_decode_sound"):
+                self._decode_sound(packed_seq, last_hidden_state, output_dict)
 
         output_dict.update(last_hidden_state=last_hidden_state)
         for lbl_metadata_key, lbl_metadata_value in lbl_metadata.items():

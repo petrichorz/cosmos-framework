@@ -194,6 +194,7 @@ def run_training(args: argparse.Namespace, mode: str, run_dir: Path) -> None:
             "COSMOS_NPU_EXPORT_DB": "0" if args.no_db else "1",
             "COSMOS_NPU_ASYNC_ANALYSIS": "1",
             "COSMOS_NPU_PROFILE_ACTIVE_STEPS": str(args.profile_active_steps),
+            "COSMOS_NPU_MSTX": "1" if args.mstx_forward and mode in {"npu", "distributed"} else "0",
             "COSMOS_PERF_SKIP_FINAL_CHECKPOINT": "1",
             "DATASET_DIR": str(args.dataset),
             "OUTPUT_ROOT": str(run_dir / "training_output"),
@@ -254,6 +255,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-shapes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--with-stack", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--with-modules", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--mstx-forward",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="emit nested Cosmos forward ranges into the Ascend trace",
+    )
     parser.add_argument("--no-db", action="store_true")
     parser.add_argument("--data-samples", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)

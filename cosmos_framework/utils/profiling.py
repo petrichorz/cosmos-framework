@@ -46,11 +46,14 @@ def _npu_experimental_config(torch_npu):
     export_types = [torch_npu.profiler.ExportType.Text]
     if os.environ.get("COSMOS_NPU_EXPORT_DB", "1") != "0":
         export_types.append(torch_npu.profiler.ExportType.Db)
+    mstx_enabled = os.environ.get("COSMOS_NPU_MSTX", "0").lower() in {"1", "true", "yes", "on"}
     return torch_npu.profiler._ExperimentalConfig(
         profiler_level=profiler_levels[profiler_level_name],
         aic_metrics=metrics[metric_name],
         data_simplification=False,
         export_type=export_types,
+        mstx=mstx_enabled,
+        mstx_domain_include=["cosmos_forward"] if mstx_enabled else [],
     )
 
 
