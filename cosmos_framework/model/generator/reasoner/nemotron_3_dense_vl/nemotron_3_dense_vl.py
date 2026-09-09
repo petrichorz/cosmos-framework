@@ -20,6 +20,7 @@ from transformers.modeling_utils import PreTrainedModel
 from cosmos_framework.model.generator.reasoner.nemotron_3_dense_vl.configuration_nemotron_3_dense_vl import (
     Nemotron3DenseVLTextConfig,
 )
+from cosmos_framework.utils.performance import npu_mstx_scope
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -54,10 +55,16 @@ class Nemotron3DenseVLRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return (self.weight.to(torch.float32) * hidden_states).to(input_dtype)
+        with npu_mstx_scope("rmsnorm/01_hidden_states_to_fp32"):
+            hidden_states = hidden_states.to(torch.float32)
+        with npu_mstx_scope("rmsnorm/02_variance_and_normalize"):
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        with npu_mstx_scope("rmsnorm/03_weight_to_fp32"):
+            weight_fp32 = self.weight.to(torch.float32)
+        with npu_mstx_scope("rmsnorm/04_output_to_input_dtype"):
+            output = (weight_fp32 * hidden_states).to(input_dtype)
+        return output
 
     def extra_repr(self) -> str:
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -121,16 +128,26 @@ class MultiModalRotaryEmbedding(nn.Module):
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
-        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        position_ids_expanded = position_ids[:, :, None, :].float()
+        with npu_mstx_scope("rotary/01_inv_freq_to_fp32"):
+            inv_freq_expanded = self.inv_freq[None, None, :, None].float()
+        inv_freq_expanded = inv_freq_expanded.expand(3, position_ids.shape[1], -1, 1)
+        with npu_mstx_scope("rotary/02_position_ids_to_fp32"):
+            position_ids_expanded = position_ids[:, :, None, :].float()
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
+            with npu_mstx_scope("rotary/03_matmul_inputs_to_fp32"):
+                inv_freq_fp32 = inv_freq_expanded.float()
+                position_ids_fp32 = position_ids_expanded.float()
+            freqs = (inv_freq_fp32 @ position_ids_fp32).transpose(2, 3)
             freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        with npu_mstx_scope("rotary/04_cos_to_input_dtype"):
+            cos = cos.to(dtype=x.dtype)
+        with npu_mstx_scope("rotary/05_sin_to_input_dtype"):
+            sin = sin.to(dtype=x.dtype)
+        return cos, sin
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         inv_freq, self.attention_scaling = self.compute_default_rope_parameters(self.config, buffer_device)

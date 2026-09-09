@@ -12,9 +12,19 @@ import torch
 from torch import nn
 from torch.distributed import ProcessGroup
 
+from cosmos_framework.data.generator.sequence_packing.runtime import (
+    SequencePack,
+    from_all_seq,
+    from_und_gen_splits,
+    get_device_and_dtype,
+    get_gen_seq,
+    get_und_seq,
+    set_gen_seq,
+    set_und_seq,
+    zeros_like,
+)
 from cosmos_framework.model.attention import attention as imaginaire_attention
 from cosmos_framework.model.attention.masks import CausalType
-from cosmos_framework.utils import log
 from cosmos_framework.model.generator.mot.attention import (
     AttentionMaskType,
     dispatch_attention,
@@ -73,17 +83,8 @@ from cosmos_framework.model.generator.reasoner.qwen3_vl_moe.qwen3_vl_moe import 
     Qwen3VLMoeVisionModel,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryState, MemoryValue
-from cosmos_framework.data.generator.sequence_packing.runtime import (
-    SequencePack,
-    from_all_seq,
-    from_und_gen_splits,
-    get_device_and_dtype,
-    get_gen_seq,
-    get_und_seq,
-    set_gen_seq,
-    set_und_seq,
-    zeros_like,
-)
+from cosmos_framework.utils import log
+from cosmos_framework.utils.performance import npu_mstx_scope
 
 # Torch optimization settings
 torch._dynamo.config.cache_size_limit = 512
@@ -909,20 +910,22 @@ def _impl_forward(
 
     # Create position embeddings (Qwen3 style) - squeeze once at model level
     # tensor below is only used for its dtype and device
-    device, dtype = get_device_and_dtype(pack)
-    _meta_tensor = torch.tensor([], dtype=dtype, device=device)
-    cos, sin = self.rotary_emb(
-        _meta_tensor, position_ids=position_ids.unsqueeze(0) if position_ids.ndim == 1 else position_ids.unsqueeze(1)
-    )  # if ndim == 2, the mrope position_ids is (3, seq_len); inject the batch dim in the
-    # middle to get (3, 1, seq_len) so the rotary_emb's mrope branch broadcasts correctly.
-    # In both branches Qwen3VLTextRotaryEmbedding.apply_interleaved_mrope collapses the
-    # T/H/W axis, so cos / sin always come back as [1, N, head_dim].
-    cos = cos.squeeze(0)  # [N,head_dim]
-    sin = sin.squeeze(0)  # [N,head_dim]
-    position_embeddings = (
-        from_all_seq(cos, pack),
-        from_all_seq(sin, pack),
-    )
+    with npu_mstx_scope("transformer/00_rotary_embedding"):
+        device, dtype = get_device_and_dtype(pack)
+        _meta_tensor = torch.tensor([], dtype=dtype, device=device)
+        cos, sin = self.rotary_emb(
+            _meta_tensor,
+            position_ids=position_ids.unsqueeze(0) if position_ids.ndim == 1 else position_ids.unsqueeze(1),
+        )  # if ndim == 2, the mrope position_ids is (3, seq_len); inject the batch dim in the
+        # middle to get (3, 1, seq_len) so the rotary_emb's mrope branch broadcasts correctly.
+        # In both branches Qwen3VLTextRotaryEmbedding.apply_interleaved_mrope collapses the
+        # T/H/W axis, so cos / sin always come back as [1, N, head_dim].
+        cos = cos.squeeze(0)  # [N,head_dim]
+        sin = sin.squeeze(0)  # [N,head_dim]
+        position_embeddings = (
+            from_all_seq(cos, pack),
+            from_all_seq(sin, pack),
+        )
 
     # Tracking the load balancing loss across all layers. For dense models, lbl_metadata_all
     # will be a dictionary with empty lists for each pathway. For MoE models, the lists
@@ -942,14 +945,15 @@ def _impl_forward(
         # MemoryState: produce read-only MemoryValue for this layer (outside compile)
         memory_value = memory.read_for_layer(i) if memory is not None else None
 
-        hidden_states, lbl_metadata_dict, kv_to_store = decoder_layer(
-            hidden_states,
-            attention_mask,
-            position_embeddings,
-            natten_metadata=None if natten_metadata_list is None else natten_metadata_list[i],
-            memory_value=memory_value,
-            gen_only=memory_gen_only,
-        )
+        with npu_mstx_scope(f"transformer/layer_{i:02d}/total"):
+            hidden_states, lbl_metadata_dict, kv_to_store = decoder_layer(
+                hidden_states,
+                attention_mask,
+                position_embeddings,
+                natten_metadata=None if natten_metadata_list is None else natten_metadata_list[i],
+                memory_value=memory_value,
+                gen_only=memory_gen_only,
+            )
 
         # MemoryState: store K/V produced by this layer (outside compile)
         if kv_to_store is not None and memory is not None:
@@ -979,9 +983,10 @@ def _impl_forward(
                 top_k=top_k,
             )
 
-    hidden_states_out = zeros_like(hidden_states)
-    set_und_seq(hidden_states_out, self.norm(get_und_seq(hidden_states)))  # [N_und,hidden_size]
-    set_gen_seq(hidden_states_out, self.norm_moe_gen(get_gen_seq(hidden_states)))  # [N_gen,hidden_size]
+    with npu_mstx_scope("transformer/99_final_norm"):
+        hidden_states_out = zeros_like(hidden_states)
+        set_und_seq(hidden_states_out, self.norm(get_und_seq(hidden_states)))  # [N_und,hidden_size]
+        set_gen_seq(hidden_states_out, self.norm_moe_gen(get_gen_seq(hidden_states)))  # [N_gen,hidden_size]
 
     return hidden_states_out, final_lbl_metadata
 
@@ -1032,6 +1037,7 @@ class MoTDecoderLayer(nn.Module):
         gen_aux_loss_free_load_balancing_config: AuxLossFreeLoadBalancingConfig | None = None,
     ) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
         self.self_attn = PackedAttentionMoT(
             config,
@@ -1090,12 +1096,14 @@ class MoTDecoderLayer(nn.Module):
             memory_value: Read-only tensor container from MemoryState.read_for_layer().
             gen_only: When True, skip the understanding pathway (und K/V come from cache).
         """
+        scope_prefix = f"transformer/layer_{self.layer_idx:02d}"
         # Pre-Attention layernorm
-        pack_norm_out = from_und_gen_splits(
-            self.input_layernorm(get_und_seq(input)),  # [N_und,hidden_size]
-            self.input_layernorm_moe_gen(get_gen_seq(input)),  # [N_gen,hidden_size]
-            input,
-        )  # [N_und+N_gen,hidden_size]
+        with npu_mstx_scope(f"{scope_prefix}/01_pre_attention_norm"):
+            pack_norm_out = from_und_gen_splits(
+                self.input_layernorm(get_und_seq(input)),  # [N_und,hidden_size]
+                self.input_layernorm_moe_gen(get_gen_seq(input)),  # [N_gen,hidden_size]
+                input,
+            )  # [N_und+N_gen,hidden_size]
 
         # Self Attention + Residual
         kv_to_store: KVToStore | None = None
@@ -1125,60 +1133,69 @@ class MoTDecoderLayer(nn.Module):
                 from_und_gen_splits(_empty_sin_und, get_gen_seq(_sin), _sin),
             )
 
-            pack_attn_out, kv_to_store = self.self_attn(
-                gen_pack,
-                attention_mask,
-                gen_position_embeddings,
-                natten_metadata=natten_metadata,
-                memory_value=memory_value,
-            )
-            gen_attn_out = get_gen_seq(pack_attn_out)
+            with npu_mstx_scope(f"{scope_prefix}/02_self_attention"):
+                pack_attn_out, kv_to_store = self.self_attn(
+                    gen_pack,
+                    attention_mask,
+                    gen_position_embeddings,
+                    natten_metadata=natten_metadata,
+                    memory_value=memory_value,
+                )
+                gen_attn_out = get_gen_seq(pack_attn_out)
             # No residual_und here: the gen_only MLP branch below builds its own
             # length-0 und sequence for ``mlp_out_und_seq``; carrying one through
             # this branch is dead code.
-            residual_gen = get_gen_seq(input) + gen_attn_out
+            with npu_mstx_scope(f"{scope_prefix}/03_attention_residual"):
+                residual_gen = get_gen_seq(input) + gen_attn_out
         else:
             # STANDARD PATH: Process both und and gen tokens
-            pack_attn_out, kv_to_store = self.self_attn(
-                pack_norm_out,
-                attention_mask,
-                packed_position_embeddings,
-                natten_metadata=natten_metadata,
-                memory_value=memory_value,
-            )
-            residual_und = get_und_seq(input) + get_und_seq(pack_attn_out)  # [N_und,hidden_size]
-            residual_gen = get_gen_seq(input) + get_gen_seq(pack_attn_out)  # [N_gen,hidden_size]
+            with npu_mstx_scope(f"{scope_prefix}/02_self_attention"):
+                pack_attn_out, kv_to_store = self.self_attn(
+                    pack_norm_out,
+                    attention_mask,
+                    packed_position_embeddings,
+                    natten_metadata=natten_metadata,
+                    memory_value=memory_value,
+                )
+            with npu_mstx_scope(f"{scope_prefix}/03_attention_residual"):
+                residual_und = get_und_seq(input) + get_und_seq(pack_attn_out)  # [N_und,hidden_size]
+                residual_gen = get_gen_seq(input) + get_gen_seq(pack_attn_out)  # [N_gen,hidden_size]
 
         # Pre-MLP layernorm and processing
         lbl_metadata_dict: dict[str, LBLMetadata] = dict()
 
         if gen_only:
             # gen_only: skip und, compute gen tokens only
-            ln_out_und = residual_gen.new_empty(0, residual_gen.shape[-1])
-            ln_out_gen = self.post_attention_layernorm_moe_gen(residual_gen)
+            with npu_mstx_scope(f"{scope_prefix}/04_pre_mlp_norm"):
+                ln_out_und = residual_gen.new_empty(0, residual_gen.shape[-1])
+                ln_out_gen = self.post_attention_layernorm_moe_gen(residual_gen)
 
             # UNPAD MLP INPUT (gen only)
             gen_len = pack_attn_out["_num_full_tokens"]
             ln_out_gen_unpadded = ln_out_gen[:gen_len]  # [N_gen_unpadded,hidden_size]
 
             # Run MLP (gen only)
-            mlp_out_gen_unpadded, lbl_metadata_gen = _run_mlp(self.mlp_moe_gen, ln_out_gen_unpadded)
+            with npu_mstx_scope(f"{scope_prefix}/06_mlp_gen"):
+                mlp_out_gen_unpadded, lbl_metadata_gen = _run_mlp(self.mlp_moe_gen, ln_out_gen_unpadded)
             # mlp_out_gen_unpadded: [N_gen_unpadded,hidden_size]
 
             # PAD MLP OUTPUT (gen only)
-            mlp_out_gen = torch.cat([mlp_out_gen_unpadded, ln_out_gen[gen_len:]], dim=0)  # [N_gen,hidden_size]
+            with npu_mstx_scope(f"{scope_prefix}/07_mlp_pad_residual"):
+                mlp_out_gen = torch.cat(
+                    [mlp_out_gen_unpadded, ln_out_gen[gen_len:]], dim=0
+                )  # [N_gen,hidden_size]
+                mlp_out_und_seq = residual_gen.new_empty(0, residual_gen.shape[-1])
+                mlp_out_gen_seq = residual_gen + mlp_out_gen
 
             # Build metadata dict (no und metadata in optimized path)
             if lbl_metadata_gen is not None:
                 lbl_metadata_dict["gen"] = lbl_metadata_gen
 
-            # Final output with residual (gen only)
-            mlp_out_und_seq = residual_gen.new_empty(0, residual_gen.shape[-1])
-            mlp_out_gen_seq = residual_gen + mlp_out_gen
         else:
             # STANDARD PATH: Process both und and gen tokens
-            ln_out_und = self.post_attention_layernorm(residual_und)  # [N_und,hidden_size]
-            ln_out_gen = self.post_attention_layernorm_moe_gen(residual_gen)  # [N_gen,hidden_size]
+            with npu_mstx_scope(f"{scope_prefix}/04_pre_mlp_norm"):
+                ln_out_und = self.post_attention_layernorm(residual_und)  # [N_und,hidden_size]
+                ln_out_gen = self.post_attention_layernorm_moe_gen(residual_gen)  # [N_gen,hidden_size]
 
             # UNPAD MLP INPUT ===============
             # NOTE: This is only need for the MoE auxiliary loss computation and to avoid
@@ -1188,24 +1205,32 @@ class MoTDecoderLayer(nn.Module):
             ln_out_und_unpadded = ln_out_und[:und_len]  # [N_und_unpadded,hidden_size]
             ln_out_gen_unpadded = ln_out_gen[:gen_len]  # [N_gen_unpadded,hidden_size]
 
-            mlp_out_und_unpadded, lbl_metadata_und = _run_mlp(self.mlp, ln_out_und_unpadded)
+            with npu_mstx_scope(f"{scope_prefix}/05_mlp_und"):
+                mlp_out_und_unpadded, lbl_metadata_und = _run_mlp(self.mlp, ln_out_und_unpadded)
             # mlp_out_und_unpadded: [N_und_unpadded,hidden_size]
-            mlp_out_gen_unpadded, lbl_metadata_gen = _run_mlp(self.mlp_moe_gen, ln_out_gen_unpadded)
+            with npu_mstx_scope(f"{scope_prefix}/06_mlp_gen"):
+                mlp_out_gen_unpadded, lbl_metadata_gen = _run_mlp(self.mlp_moe_gen, ln_out_gen_unpadded)
             # mlp_out_gen_unpadded: [N_gen_unpadded,hidden_size]
 
             # PAD MLP OUTPUT ===============
-            mlp_out_und = torch.cat([mlp_out_und_unpadded, ln_out_und[und_len:]], dim=0)  # [N_und,hidden_size]
-            mlp_out_gen = torch.cat([mlp_out_gen_unpadded, ln_out_gen[gen_len:]], dim=0)  # [N_gen,hidden_size]
+            with npu_mstx_scope(f"{scope_prefix}/07_mlp_pad_residual"):
+                mlp_out_und = torch.cat(
+                    [mlp_out_und_unpadded, ln_out_und[und_len:]], dim=0
+                )  # [N_und,hidden_size]
+                mlp_out_gen = torch.cat(
+                    [mlp_out_gen_unpadded, ln_out_gen[gen_len:]], dim=0
+                )  # [N_gen,hidden_size]
+                mlp_out_und_seq = residual_und + mlp_out_und  # [N_und,hidden_size]
+                mlp_out_gen_seq = residual_gen + mlp_out_gen  # [N_gen,hidden_size]
 
             if lbl_metadata_und is not None:
                 lbl_metadata_dict["und"] = lbl_metadata_und
             if lbl_metadata_gen is not None:
                 lbl_metadata_dict["gen"] = lbl_metadata_gen
 
-            mlp_out_und_seq = residual_und + mlp_out_und  # [N_und,hidden_size]
-            mlp_out_gen_seq = residual_gen + mlp_out_gen  # [N_gen,hidden_size]
-
-        return from_und_gen_splits(mlp_out_und_seq, mlp_out_gen_seq, input), lbl_metadata_dict, kv_to_store
+        with npu_mstx_scope(f"{scope_prefix}/08_pack_output"):
+            output = from_und_gen_splits(mlp_out_und_seq, mlp_out_gen_seq, input)
+        return output, lbl_metadata_dict, kv_to_store
 
     def reasoner_forward(
         self,

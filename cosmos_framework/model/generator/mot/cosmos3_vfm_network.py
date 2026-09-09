@@ -618,29 +618,40 @@ class Cosmos3VFMNetwork(PreTrainedModel):
 
         assert isinstance(vision.mse_loss_indexes, torch.Tensor)
 
-        packed_tokens_vision, original_latent_shapes = self.patchify_and_pack_latents(
-            vision.tokens, vision.token_shapes
-        )  # packed_tokens_vision: [total_vision_patches,patch_latent_dim]
-        packed_tokens_vision = self.vae2llm(packed_tokens_vision.to(target_dtype))  # [total_vision_patches,hidden_size]
+        with npu_mstx_scope("encode_vision/01_patchify_noisy_latents"):
+            packed_tokens_vision, original_latent_shapes = self.patchify_and_pack_latents(
+                vision.tokens, vision.token_shapes
+            )  # packed_tokens_vision: [total_vision_patches,patch_latent_dim]
+        with npu_mstx_scope("encode_vision/02_noisy_latents_to_target_dtype"):
+            packed_tokens_vision = packed_tokens_vision.to(target_dtype)
+        with npu_mstx_scope("encode_vision/03_project_noisy_latents"):
+            packed_tokens_vision = self.vae2llm(packed_tokens_vision)  # [total_vision_patches,hidden_size]
 
         if packed_seq.teacher_forcing is not None:
             teacher_forcing = packed_seq.teacher_forcing
-            packed_clean_tokens, clean_original_latent_shapes = self.patchify_and_pack_latents(
-                teacher_forcing.clean_vision_tokens,
-                vision.token_shapes,
-            )
+            with npu_mstx_scope("encode_vision/04_patchify_clean_latents"):
+                packed_clean_tokens, clean_original_latent_shapes = self.patchify_and_pack_latents(
+                    teacher_forcing.clean_vision_tokens,
+                    vision.token_shapes,
+                )
             if clean_original_latent_shapes != original_latent_shapes:
                 raise ValueError(
                     "teacher-forcing clean/noisy payloads must produce identical latent shapes, "
                     f"got {clean_original_latent_shapes} and {original_latent_shapes}"
                 )
-            packed_clean_tokens = self.vae2llm(packed_clean_tokens.to(target_dtype))
+            with npu_mstx_scope("encode_vision/05_clean_latents_to_target_dtype"):
+                packed_clean_tokens = packed_clean_tokens.to(target_dtype)
+            with npu_mstx_scope("encode_vision/06_project_clean_latents"):
+                packed_clean_tokens = self.vae2llm(packed_clean_tokens)
             clean_timesteps = torch.zeros(
                 packed_clean_tokens.shape[0],
                 device=packed_clean_tokens.device,
                 dtype=torch.float32,
             )
-            packed_clean_timestep_embeds = self._embed_packed_timesteps(clean_timesteps, packed_seq).to(target_dtype)
+            with npu_mstx_scope("encode_vision/07_embed_clean_timesteps"):
+                packed_clean_timestep_embeds = self._embed_packed_timesteps(clean_timesteps, packed_seq)
+            with npu_mstx_scope("encode_vision/08_clean_timestep_embed_to_target_dtype"):
+                packed_clean_timestep_embeds = packed_clean_timestep_embeds.to(target_dtype)
             packed_clean_tokens = packed_clean_tokens + packed_clean_timestep_embeds
             clean_sequence_indexes = teacher_forcing.layout.clean_token_indexes
             if clean_sequence_indexes.numel() != packed_clean_tokens.shape[0]:
@@ -648,30 +659,38 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                     "teacher-forcing clean sequence indexes must match patchified clean tokens, "
                     f"got {clean_sequence_indexes.numel()} and {packed_clean_tokens.shape[0]}"
                 )
-            packed_sequence[clean_sequence_indexes] = packed_clean_tokens
+            with npu_mstx_scope("encode_vision/09_scatter_clean_tokens"):
+                packed_sequence[clean_sequence_indexes] = packed_clean_tokens
 
         has_noisy_vision = vision.mse_loss_indexes.numel() > 0
 
         if has_noisy_vision:
-            timesteps_vision = vision.timesteps.to(dtype=torch.float32) * self.timestep_scale  # [N_noisy_frames_vision]
+            with npu_mstx_scope("encode_vision/10_noisy_timesteps_to_fp32"):
+                timesteps_vision = vision.timesteps.to(dtype=torch.float32)
+            with npu_mstx_scope("encode_vision/11_scale_noisy_timesteps"):
+                timesteps_vision = timesteps_vision * self.timestep_scale  # [N_noisy_frames_vision]
 
-            packed_timestep_embeds_vision = self._embed_packed_timesteps(
-                timesteps_vision, packed_seq
-            )  # [N_noisy_frames_vision,hidden_size]
-            packed_timestep_embeds_vision = packed_timestep_embeds_vision.to(
-                target_dtype
-            )  # [N_noisy_frames_vision,hidden_size]
+            with npu_mstx_scope("encode_vision/12_embed_noisy_timesteps"):
+                packed_timestep_embeds_vision = self._embed_packed_timesteps(
+                    timesteps_vision, packed_seq
+                )  # [N_noisy_frames_vision,hidden_size]
+            with npu_mstx_scope("encode_vision/13_noisy_timestep_embed_to_target_dtype"):
+                packed_timestep_embeds_vision = packed_timestep_embeds_vision.to(
+                    target_dtype
+                )  # [N_noisy_frames_vision,hidden_size]
 
-            packed_tokens_vision = _apply_timestep_embeds_to_noisy_tokens(
-                packed_tokens=packed_tokens_vision,
-                packed_timestep_embeds=packed_timestep_embeds_vision,
-                noisy_frame_indexes=vision.noisy_frame_indexes,
-                token_shapes=vision.token_shapes,
-            )  # [total_vision_patches,hidden_size]
+            with npu_mstx_scope("encode_vision/14_apply_noisy_timestep_embeds"):
+                packed_tokens_vision = _apply_timestep_embeds_to_noisy_tokens(
+                    packed_tokens=packed_tokens_vision,
+                    packed_timestep_embeds=packed_timestep_embeds_vision,
+                    noisy_frame_indexes=vision.noisy_frame_indexes,
+                    token_shapes=vision.token_shapes,
+                )  # [total_vision_patches,hidden_size]
 
-        packed_sequence[vision.sequence_indexes] = (
-            packed_tokens_vision  # [total_vision_patches,hidden_size] scattered into [N_total,hidden_size]
-        )
+        with npu_mstx_scope("encode_vision/15_scatter_noisy_tokens"):
+            packed_sequence[vision.sequence_indexes] = (
+                packed_tokens_vision  # [total_vision_patches,hidden_size] scattered into [N_total,hidden_size]
+            )
         return original_latent_shapes
 
     def _decode_vision(

@@ -446,6 +446,29 @@ Profiler 模式默认启用 `--mstx-forward`。它不依赖 `--with-stack` 或
 - `COSMOS::DENOISE/01_ENCODE_TEXT` 到 `COSMOS::DENOISE/11_DECODE_SOUND`：
   denoise 内部的模态编码、attention metadata、CP 输入/输出、Transformer 和模态解码。
 
+当 `aten::to` 集中在 vision encoding 或 Transformer 时，可继续展开以下范围：
+
+| 范围 | 对应 Python 位置 |
+| :--- | :--- |
+| `COSMOS::ENCODE_VISION/02_NOISY_LATENTS_TO_TARGET_DTYPE` | `Cosmos3VFMNetwork._encode_vision`: noisy latent `.to(target_dtype)` |
+| `COSMOS::ENCODE_VISION/05_CLEAN_LATENTS_TO_TARGET_DTYPE` | `Cosmos3VFMNetwork._encode_vision`: teacher-forcing clean latent `.to(target_dtype)` |
+| `COSMOS::ENCODE_VISION/08_CLEAN_TIMESTEP_EMBED_TO_TARGET_DTYPE` | clean timestep embedding dtype conversion |
+| `COSMOS::ENCODE_VISION/10_NOISY_TIMESTEPS_TO_FP32` | `vision.timesteps.to(torch.float32)` |
+| `COSMOS::ENCODE_VISION/13_NOISY_TIMESTEP_EMBED_TO_TARGET_DTYPE` | noisy timestep embedding dtype conversion |
+| `COSMOS::TRANSFORMER/LAYER_XX/01_PRE_ATTENTION_NORM` | decoder layer input RMSNorm |
+| `COSMOS::TRANSFORMER/LAYER_XX/02_SELF_ATTENTION` | decoder layer attention implementation |
+| `COSMOS::TRANSFORMER/LAYER_XX/04_PRE_MLP_NORM` | decoder layer post-attention RMSNorm |
+| `COSMOS::TRANSFORMER/LAYER_XX/05_MLP_UND` / `06_MLP_GEN` | understanding/generation MLP |
+| `COSMOS::RMSNORM/01_HIDDEN_STATES_TO_FP32` | `hidden_states.to(torch.float32)` |
+| `COSMOS::RMSNORM/03_WEIGHT_TO_FP32` | `self.weight.to(torch.float32)` |
+| `COSMOS::RMSNORM/04_OUTPUT_TO_INPUT_DTYPE` | normalized result `.to(input_dtype)` |
+| `COSMOS::ROTARY/01...05` | Nemotron RoPE 中各个 FP32/input-dtype conversion |
+
+`RMSNORM/*` 和 `ROTARY/*` 是行级范围，并嵌套在对应的
+`TRANSFORMER/LAYER_XX/*` 范围下，因此可以同时判断转换发生在哪一层、哪条
+Python dtype conversion 语句。标签使用函数和语句语义而不是硬编码行号，避免
+源码增删后行号漂移。
+
 因此，即使当前 torch_npu 组合开启调用栈会崩溃，也可以保持：
 
 ```bash
