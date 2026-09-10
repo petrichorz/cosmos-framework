@@ -660,21 +660,39 @@ def _validate_teacher_forcing_packed_sequence(
 def _build_source_to_stream_index(
     layout: TeacherForcingLayout,
     stream: TeacherForcingStream,
-) -> dict[int, int]:
+) -> torch.Tensor:
+    """Build a dense source-index -> expanded-index lookup tensor.
+
+    The previous dictionary implementation iterated over tens of thousands of
+    scalar tensors.  That expands into ``aten::unbind/select/item`` for every
+    token and makes FSDP ranks arrive at the next collective at different
+    times.  Source indexes are dense by construction, so a tensor lookup is
+    both simpler and vectorized.
+    """
     stream_indexes = torch.nonzero(layout.stream_ids == int(stream), as_tuple=True)[0]
-    return {int(layout.source_sequence_indexes[new_index]): int(new_index) for new_index in stream_indexes}
+    source_to_new = torch.full(
+        (layout.source_sequence_indexes.numel(),),
+        -1,
+        dtype=torch.long,
+        device=layout.source_sequence_indexes.device,
+    )
+    source_to_new[layout.source_sequence_indexes[stream_indexes]] = stream_indexes
+    return source_to_new
 
 
-def _remap_indexes(indexes: torch.Tensor | None, source_to_new: dict[int, int], name: str) -> torch.Tensor | None:
+def _remap_indexes(indexes: torch.Tensor | None, source_to_new: torch.Tensor, name: str) -> torch.Tensor | None:
     if indexes is None:
         return None
-    try:
-        remapped = [source_to_new[int(index)] for index in indexes]
-    except KeyError as error:
-        raise ValueError(
-            f"{name} contains an index outside the supported source stream: {int(error.args[0])}"
-        ) from error
-    return torch.tensor(remapped, dtype=torch.long)
+    if indexes.numel() == 0:
+        return indexes.to(device=source_to_new.device, dtype=torch.long)
+    lookup_indexes = indexes.to(device=source_to_new.device, dtype=torch.long)
+    if bool(((lookup_indexes < 0) | (lookup_indexes >= source_to_new.numel())).any()):
+        raise ValueError(f"{name} contains an index outside the source sequence")
+    remapped = source_to_new[lookup_indexes]
+    if bool((remapped < 0).any()):
+        missing = int(lookup_indexes[torch.nonzero(remapped < 0, as_tuple=True)[0][0]])
+        raise ValueError(f"{name} contains an index outside the supported source stream: {missing}")
+    return remapped
 
 
 def expand_packed_sequence_for_teacher_forcing(
@@ -739,12 +757,22 @@ def expand_packed_sequence_for_teacher_forcing(
 
     remapped_spans: list[ModalitySpan] = []
     for span in vision.spans:
-        span_indexes = [
-            source_to_noisy[index] for index in range(span.sequence_start, span.sequence_start + span.sequence_len)
-        ]
-        if span_indexes != list(range(span_indexes[0], span_indexes[0] + span.sequence_len)):
+        source_span = torch.arange(
+            span.sequence_start,
+            span.sequence_start + span.sequence_len,
+            dtype=torch.long,
+            device=source_to_noisy.device,
+        )
+        span_indexes = source_to_noisy[source_span]
+        expected_span = torch.arange(
+            span_indexes[0],
+            span_indexes[0] + span.sequence_len,
+            dtype=torch.long,
+            device=span_indexes.device,
+        )
+        if not torch.equal(span_indexes, expected_span):
             raise ValueError(f"vision span at source index {span.sequence_start} is not contiguous after remapping")
-        remapped_spans.append(replace(span, sequence_start=span_indexes[0]))
+        remapped_spans.append(replace(span, sequence_start=int(span_indexes[0])))
 
     expanded_vision = replace(
         vision,

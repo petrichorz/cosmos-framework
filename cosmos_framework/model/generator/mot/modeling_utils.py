@@ -63,8 +63,15 @@ class TimestepEmbedder(nn.Module):
         :return: an (N, D) Tensor of positional embeddings.
         """
         half = dim // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
-            device=t.device
+        # Construct directly on the consumer device.  Creating this tiny
+        # constant on CPU and calling ``.to(t.device)`` introduces a blocking
+        # H2D copy; on Ascend that copy becomes the first stream-sync point
+        # after FSDP's asynchronous root-parameter all-gather and is therefore
+        # incorrectly charged for the entire collective wait in profiler UI.
+        freqs = torch.exp(
+            -math.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device)
+            / half
         )
         args = t[:, None] * freqs[None]  # [N,D/2]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)  # [N,D]

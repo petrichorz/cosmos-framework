@@ -77,9 +77,12 @@ def _compute_mode_indices_and_offsets(
             next_offset += split_len
             offsets.append(next_offset)
         start += split_len
-    return torch.tensor(indices, dtype=torch.int32, device=device), torch.tensor(  # [N_mode_tokens], [N_mode_splits+1]
-        offsets, dtype=torch.int32, device=device
-    )
+    offset_tensor = torch.tensor(offsets, dtype=torch.int32, device=device)
+    # Ascend's fused-attention API consumes cumulative offsets as a Python
+    # list.  Preserve the list that is already available here so the backend
+    # never has to call synchronous ``NPU Tensor.tolist()`` in every layer.
+    offset_tensor._cosmos_actual_seq_lengths = tuple(offsets[1:])
+    return torch.tensor(indices, dtype=torch.int32, device=device), offset_tensor
 
 
 # Pad causal_seq and full_only_seq to have length 2048 if not already at that size
@@ -152,6 +155,12 @@ def init_sequence_pack(
 
     sample_lens_cu = torch.tensor([0] + sample_lens, device=device, dtype=torch.int32)  # [N_samples+1]
     _sample_offsets = torch.cumsum(sample_lens_cu, dim=0, dtype=torch.int32)  # [N_samples+1]
+    sample_actual_seq_lengths = []
+    sample_offset = 0
+    for sample_len in sample_lens:
+        sample_offset += sample_len
+        sample_actual_seq_lengths.append(sample_offset)
+    _sample_offsets._cosmos_actual_seq_lengths = tuple(sample_actual_seq_lengths)
 
     _causal_indices, _causal_seq_offsets = _compute_mode_indices_and_offsets(split_lens, attn_modes, "causal", device)
     _full_indices, _full_only_seq_offsets = _compute_mode_indices_and_offsets(split_lens, attn_modes, "full", device)
