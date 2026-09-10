@@ -272,10 +272,12 @@ def _build_lerobot_source(
     fps = float(meta.fps)
 
     video_key = _select_lerobot_video_key(meta, video_feature_key, video_feature_keywords)
-    # 用官方 LeRobotDatasetMetadata.shapes / .names 解析宽高（替换手写 feature 解析）。
-    # shape 是 [H, W, C]（或 [H, W]），names 通常是 ["height", "width", "channels"]。
-    shape = meta.shapes[video_key]
-    names = meta.names.get(video_key)
+    # 直接读该 video feature 的 shape/names（用 .get 兜底），避免用 meta.names / meta.shapes
+    # 这两个官方 property——它们用 ft["names"] / ft["shape"] 方括号遍历【所有】feature，
+    # 任一标量列（如 frame_index/timestamp）缺 names 字段就会整体 KeyError。
+    ft = meta.features[video_key]
+    shape = ft["shape"]  # [H, W, C]（或 [H, W]）
+    names = ft.get("names")  # 通常是 ["height", "width", "channels"]，可能为 None
     if names and "width" in names and "height" in names:
         width = shape[names.index("width")]
         height = shape[names.index("height")]
