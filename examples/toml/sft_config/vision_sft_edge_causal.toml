@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# Short causal continued-pretraining trial for Cosmos3-Edge.
+#
+# Optimizer settings follow the Cosmos 3 Generator pre-training recipe:
+# FusedAdamW, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.05,
+# gradient clipping at 1.0, and linear warmup/decay to 0.30x peak LR.
+# The paper does not disclose the exact warmup length. This 2k trial uses a
+# 50-step warmup, which is a local choice rather than a paper-reported value.
+# The vision_sft_edge experiment already applies 10% CFG caption dropout.
+
+[job]
+task         = "vfm"
+experiment   = "vision_sft_edge_lerobot3"
+project      = "cosmos3"
+group        = "mot_causal_fsdp"
+name         = "vision_causal_pretrain_edge_pyav"
+wandb_mode   = "offline"
+
+[model]
+precision                           = "bfloat16"
+joint_attn_implementation           = "teacher_forcing"
+causal_training_strategy            = "teacher_forcing"
+teacher_forcing_block_size_min      = 1
+teacher_forcing_block_size_max      = 4
+teacher_forcing_history_blocks_min  = 1
+teacher_forcing_history_blocks_max  = 64
+teacher_forcing_dense_mode          = "per_sample"
+teacher_forcing_visualize_sdpa_mask = false
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = -1
+data_parallel_replicate_degree = 1
+fsdp_mixed_precision_enabled   = true
+fsdp_master_dtype              = "float32"
+
+[model.compile]
+enabled         = false
+compile_dynamic = true
+
+[model.activation_checkpointing]
+mode               = "full"
+save_ops_regex     = ["fmha"]
+preserve_rng_state = true
+determinism_check  = "default"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas          = [0.9, 0.99]
+eps            = 1.0e-6
+fused          = true
+keys_to_select = [
+    "moe_gen",
+    "time_embedder",
+    "vae2llm",
+    "llm2vae",
+    "k_norm_und_for_gen",
+]
+lr           = 5.0e-5
+weight_decay = 0.05
+
+[scheduler]
+lr_scheduler_type = "LambdaLinear"
+cycle_lengths      = [5000]
+f_max              = [1.0]
+f_min              = [0.3]
+f_start            = [0.0]
+verbosity_interval = 0
+warm_up_steps      = [50]
+
+[trainer]
+distributed_parallelism = "fsdp"
+grad_accum_iter         = 1
+logging_iter            = 1
+max_iter                = 55000
+
+[trainer.callbacks.compile_tokenizer]
+compile_after_iterations = 3
+enabled                  = false
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 1.0
+force_finite = true
+
+[checkpoint]
+keys_to_skip_loading = ["net_ema."]
+load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter            = 1000
+
+[dataloader_train]
+max_sequence_length = 45056
+# Per-caption token cap before truncation. Structured-JSON captions run longer than
+# dense prose (measured max ~1790 tokens), so keep headroom; raise it for longer captions.
+max_caption_tokens = 2048
+# max_samples_per_batch omitted (None — PackingDataLoader doesn't cap by sample count)
+# seed omitted — PackingDataLoader has no seed ctor kwarg
+
+# 多分辨率训练开关：True 时在 256/480/720 随机（不上采样）
+use_multi_resolution = true
+# 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
+use_multi_fps = true
+# episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃
+min_frames = 33
+# episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃
+max_duration_s = 61
+# 视频解码时间戳容差（单位：秒）：命中帧真实 pts 与期望时间戳偏差超过它则跳过样本
+video_tolerance_s = 0.034
