@@ -70,6 +70,9 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_duration_s"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_duration_s",
         ),
+        ("dataloader_train", "video_tolerance_s"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "video_tolerance_s",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,

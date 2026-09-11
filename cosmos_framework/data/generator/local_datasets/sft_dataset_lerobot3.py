@@ -485,7 +485,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
-        tolerance_s: float = 0.034,
+        video_tolerance_s: float = 0.034,
         decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
     ):
         assert temporal_compression_factor >= 1, "temporal_compression_factor must be >= 1"
@@ -522,7 +522,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         # lerobot 默认 codec：torchcodec 可用则用 torchcodec，否则 pyav。
         # 注意：只有 torchcodec 才会用 _LRUVideoDecoderCache；pyav 每次重建 reader、不共享 decoder。
         self.video_backend = video_backend if video_backend else _vu.get_safe_default_codec()
-        self.tolerance_s = tolerance_s
+        self.video_tolerance_s = video_tolerance_s
 
         # They will be set by the RankPartitionedDataLoader
         self.shard_world_size = None
@@ -605,11 +605,11 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             raise FrameTimestampError(f"No frames decoded from video: {video_path}")
         distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
         minimum, closest_indices = distances.min(1)
-        within_tolerance = minimum < self.tolerance_s
+        within_tolerance = minimum < self.video_tolerance_s
         if not within_tolerance.all():
             raise FrameTimestampError(
                 "One or several query timestamps unexpectedly violate the tolerance "
-                f"({minimum[~within_tolerance]} > tolerance_s={self.tolerance_s})."
+                f"({minimum[~within_tolerance]} > video_tolerance_s={self.video_tolerance_s})."
                 f"\nqueried timestamps: {query_ts}"
                 f"\nloaded timestamps: {decoded_ts}"
                 f"\nvideo: {video_path}"
@@ -706,7 +706,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
                 resize_w,
             )
         except FrameTimestampError as e:
-            # 时间戳与视频 pts 偏差超过 tolerance_s 时抛 FrameTimestampError。
+            # 时间戳与视频 pts 偏差超过 video_tolerance_s 时抛 FrameTimestampError。
             # 打印其详细提示（哪些时间戳违反 tolerance、视频路径等），并跳过该样本，避免中断训练。
             log.warning(
                 f"FrameTimestampError decoding video for sample {uuid} "
@@ -925,7 +925,7 @@ def get_sft_dataset_from_lerobot(
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
     video_backend: str | None = None,
-    tolerance_s: float = 0.034,
+    video_tolerance_s: float = 0.034,
     decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
     **kwargs,
 ) -> LeRobotSFTDataset:
@@ -994,7 +994,7 @@ def get_sft_dataset_from_lerobot(
         conditioning_config=conditioning_config,
         temporal_compression_factor=temporal_compression_factor,
         video_backend=video_backend,
-        tolerance_s=tolerance_s,
+        video_tolerance_s=video_tolerance_s,
         decoder_cache_max_size=decoder_cache_max_size,
     )
     return dataset

@@ -240,7 +240,8 @@ vision_sft_edge_lerobot3 = LazyDict(
                             temporal_compression_factor=4,
                             use_system_prompt=False,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
-                            video_backend="pyav"
+                            video_backend="pyav",
+                            video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
                         ),
                     ),
                 ),
