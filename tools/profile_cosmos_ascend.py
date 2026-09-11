@@ -19,11 +19,10 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LAUNCH_SCRIPT = (
-    REPO_ROOT.parent
-    / "cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_profile_local.sh"
+    REPO_ROOT.parent / "cosmos/cookbooks/cosmos3/generator/audiovisual/finetune/launch_sft_vision_edge_profile_local.sh"
 )
-DEFAULT_DATASET = Path(os.environ.get("DATASET_DIR", "/data5T/Embodied-AI/datasets/Cosmos3-DROID/success"))
-DEFAULT_OUTPUT = Path("/data5T/zheng/cosmos-ascend-profile/cosmos-profile-logs")
+DEFAULT_DATASET = Path(os.environ.get("DATASET_DIR", "/mnt/sfs_turbo/public/datasets/Cosmos3-DROID/success"))
+DEFAULT_OUTPUT = Path("/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs")
 
 
 def _split_evenly(items: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
@@ -172,7 +171,7 @@ def _training_overrides(args: argparse.Namespace, mode: str) -> list[str]:
                 f"trainer.profiling.profile_warmup={args.profile_warmup}",
                 f"trainer.profiling.target_ranks={target_ranks}",
                 f"trainer.profiling.record_shape={str(args.record_shapes).lower()}",
-                "trainer.profiling.profile_memory=false",
+                f"trainer.profiling.profile_memory={str(args.profile_memory).lower()}",
                 f"trainer.profiling.with_stack={str(args.with_stack).lower()}",
                 f"trainer.profiling.with_modules={str(args.with_modules).lower()}",
             ]
@@ -192,10 +191,11 @@ def run_training(args: argparse.Namespace, mode: str, run_dir: Path) -> None:
             "COSMOS_NPU_PROFILER_LEVEL": args.profiler_level,
             "COSMOS_NPU_AIC_METRICS": args.aic_metrics,
             "COSMOS_NPU_EXPORT_DB": "0" if args.no_db else "1",
-            "COSMOS_NPU_ASYNC_ANALYSIS": "1",
+            "COSMOS_NPU_ASYNC_ANALYSIS": "0" if args.sync_analysis else "1",
             "COSMOS_NPU_PROFILE_ACTIVE_STEPS": str(args.profile_active_steps),
             "COSMOS_NPU_MSTX": "1" if args.mstx_forward and mode in {"npu", "distributed"} else "0",
             "COSMOS_PERF_SKIP_FINAL_CHECKPOINT": "1",
+            "COSMOS_PERF_RECORD_MEMORY": "1",
             "DATASET_DIR": str(args.dataset),
             "OUTPUT_ROOT": str(run_dir / "training_output"),
             "NPROC_PER_NODE": str(args.nproc_per_node),
@@ -253,6 +253,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiler-level", choices=("level0", "level1", "level2"), default="level0")
     parser.add_argument("--aic-metrics", choices=("none", "pipe", "arithmetic", "memory", "l2cache"), default="none")
     parser.add_argument("--record-shapes", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--profile-memory", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--sync-analysis",
+        action="store_true",
+        help="wait for Ascend trace analysis before summarizing outputs",
+    )
     parser.add_argument("--with-stack", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--with-modules", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(

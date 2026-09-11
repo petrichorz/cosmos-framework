@@ -35,8 +35,10 @@ from cosmos_framework.model.generator.mot.attention import (
     resolve_runtime_joint_attn_implementation,
 )
 from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
+    _ascend_teacher_forcing_fused_attention,
     teacher_forcing_dense_attention,
     teacher_forcing_per_sample_dense_attention,
+    use_ascend_teacher_forcing_fused_attention,
 )
 
 
@@ -186,6 +188,65 @@ def test_teacher_forcing_dense_attention_can_skip_redundant_mask_content_validat
     assert captured_backend_kwargs["validate_allowed_mask"] is False
 
 
+def test_ascend_teacher_forcing_fused_attention_is_opt_in_and_npu_only(monkeypatch):
+    monkeypatch.setenv("COSMOS_ASCEND_FUSED_TEACHER_FORCING_ATTENTION", "1")
+
+    assert not use_ascend_teacher_forcing_fused_attention(torch.device("cpu"))
+    assert use_ascend_teacher_forcing_fused_attention(torch.device("npu", 0))
+
+
+def test_ascend_teacher_forcing_fused_attention_rejects_invalid_switch(monkeypatch):
+    monkeypatch.setenv("COSMOS_ASCEND_FUSED_TEACHER_FORCING_ATTENTION", "sometimes")
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        use_ascend_teacher_forcing_fused_attention(torch.device("npu", 0))
+
+
+def test_ascend_teacher_forcing_fused_attention_uses_bsnd_gqa_all_mask(monkeypatch):
+    query, key, value, allowed_mask = _make_inputs(torch.float32)
+    blocked_mask = torch.logical_not(allowed_mask)
+    captured: dict[str, object] = {}
+
+    def fake_npu_fusion_attention(q, k, v, **kwargs):
+        captured.update(q=q, k=k, v=v, **kwargs)
+        return (torch.zeros((1, query.shape[0], query.shape[1], value.shape[2])),)
+
+    torch_npu_stub = ModuleType("torch_npu")
+    torch_npu_stub.npu_fusion_attention = fake_npu_fusion_attention
+    monkeypatch.setitem(sys.modules, "torch_npu", torch_npu_stub)
+
+    output = _ascend_teacher_forcing_fused_attention(
+        query,
+        key,
+        value,
+        blocked_mask,
+        scale=0.7,
+    )
+
+    assert output.shape == query.shape
+    assert captured["input_layout"] == "BSND"
+    assert captured["sparse_mode"] == 1
+    assert captured["head_num"] == query.shape[1]
+    assert captured["atten_mask"] is blocked_mask
+    assert captured["q"].shape == (1, 5, 4, 3)
+    assert captured["k"].shape == (1, 7, 2, 3)
+    assert captured["v"].shape == (1, 7, 2, 3)
+
+
+def test_build_packed_sequence_precomputes_blocked_mask_for_ascend_fa(monkeypatch):
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.use_ascend_teacher_forcing_fused_attention",
+        lambda device: True,
+    )
+    layout, _, _, _, _, _, _, attention_meta, _ = _make_teacher_forcing_packs()
+
+    assert attention_meta.masks_are_blocked
+    torch.testing.assert_close(
+        attention_meta.dense_gen_mask,
+        torch.logical_not(build_dense_teacher_forcing_gen_mask(layout)),
+    )
+
+
 def _geometry(block_size: int, history_blocks: int, num_samples: int = 1) -> TeacherForcingGeometry:
     return TeacherForcingGeometry(
         block_sizes=(block_size,) * num_samples,
@@ -270,9 +331,7 @@ def test_per_sample_masks_match_global_mask_diagonal_blocks():
 
     query_offset = 0
     key_offset = 0
-    for sample_mask, sample_len, gen_len in zip(
-        sample_masks, layout.sample_lens, layout.split_lens[1::2], strict=True
-    ):
+    for sample_mask, sample_len, gen_len in zip(sample_masks, layout.sample_lens, layout.split_lens[1::2], strict=True):
         torch.testing.assert_close(
             sample_mask,
             global_mask[
@@ -381,9 +440,7 @@ def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention(
 
 
 def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen_attention():
-    layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs(
-        "per_sample"
-    )
+    layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs("per_sample")
 
     output_pack, kv_to_store = dispatch_attention(query_pack, key_pack, value_pack, attention_meta)
     expected_gen = teacher_forcing_dense_attention(

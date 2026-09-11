@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import functools
+import os
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,46 @@ from cosmos_framework.model.generator.reasoner.nemotron_3_dense_vl.configuration
     Nemotron3DenseVLTextConfig,
 )
 from cosmos_framework.utils.performance import npu_mstx_scope
+
+_FUSED_ROPE_ENV = "COSMOS_ASCEND_FUSED_ROPE"
+_FUSED_RMSNORM_ENV = "COSMOS_ASCEND_FUSED_RMSNORM"
+
+
+def _ascend_fusion_enabled(name: str, tensor: torch.Tensor) -> bool:
+    return tensor.device.type == "npu" and os.getenv(name, "0").lower() in {"1", "true", "yes", "on"}
+
+
+@functools.lru_cache(maxsize=None)
+def _get_torch_npu_api(name: str):
+    try:
+        import torch_npu
+    except ImportError:
+        return None
+    return getattr(torch_npu, name, None)
+
+
+def _apply_npu_rotary_mul(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor | None:
+    """Apply fused half-RoPE for supported 3D/4D layouts, or return ``None`` for a safe fallback."""
+    npu_rotary_mul = _get_torch_npu_api("npu_rotary_mul")
+    if npu_rotary_mul is None or x.ndim not in (3, 4):
+        return None
+
+    # The training path commonly uses [S, N, D].  Add a singleton batch so the
+    # NPU operator sees BSND and its rotary inputs see 1S1D.
+    added_batch_dim = x.ndim == 3
+    if added_batch_dim:
+        x = x.unsqueeze(0)
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
+    if cos.ndim != 4 or sin.ndim != 4:
+        return None
+
+    output = npu_rotary_mul(x, cos, sin, "half")
+    return output.squeeze(0) if added_batch_dim else output
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -42,8 +83,16 @@ def apply_rotary_pos_emb_partial(
     rot_dim = cos.shape[-1]
     q_rot, q_pass = q[..., :rot_dim], q[..., rot_dim:]
     k_rot, k_pass = k[..., :rot_dim], k[..., rot_dim:]
-    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
-    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    q_embed = None
+    k_embed = None
+    if _ascend_fusion_enabled(_FUSED_ROPE_ENV, q):
+        with npu_mstx_scope("rope/npu_rotary_mul_q"):
+            q_embed = _apply_npu_rotary_mul(q_rot, cos, sin)
+        with npu_mstx_scope("rope/npu_rotary_mul_k"):
+            k_embed = _apply_npu_rotary_mul(k_rot, cos, sin)
+    if q_embed is None or k_embed is None:
+        q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
     return torch.cat((q_embed, q_pass), dim=-1), torch.cat((k_embed, k_pass), dim=-1)
 
 
@@ -54,6 +103,17 @@ class Nemotron3DenseVLRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if _ascend_fusion_enabled(_FUSED_RMSNORM_ENV, hidden_states):
+            npu_rms_norm = _get_torch_npu_api("npu_rms_norm")
+            if npu_rms_norm is not None:
+                with npu_mstx_scope("rmsnorm/npu_rms_norm"):
+                    output, _ = npu_rms_norm(
+                        hidden_states,
+                        self.weight.to(dtype=hidden_states.dtype),
+                        epsilon=self.variance_epsilon,
+                    )
+                return output
+
         input_dtype = hidden_states.dtype
         with npu_mstx_scope("rmsnorm/01_hidden_states_to_fp32"):
             hidden_states = hidden_states.to(torch.float32)

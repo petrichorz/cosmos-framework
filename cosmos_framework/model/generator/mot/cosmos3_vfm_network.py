@@ -93,8 +93,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.video_temporal_causal = video_temporal_causal
         if teacher_forcing_dense_mode not in {"global", "per_sample"}:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-                f"got {teacher_forcing_dense_mode!r}"
+                f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {teacher_forcing_dense_mode!r}"
             )
         self.teacher_forcing_dense_mode = teacher_forcing_dense_mode
         self.teacher_forcing_visualize_sdpa_mask = teacher_forcing_visualize_sdpa_mask
@@ -1119,6 +1118,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                     visualization_mask = attention_meta.dense_gen_mask
                     if visualization_mask is None:
                         visualization_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout)
+                    elif getattr(attention_meta, "masks_are_blocked", False):
+                        visualization_mask = torch.logical_not(visualization_mask)
                     saved_path = visualize_dense_teacher_forcing_gen_mask(
                         visualization_mask,
                         teacher_forcing_layout,

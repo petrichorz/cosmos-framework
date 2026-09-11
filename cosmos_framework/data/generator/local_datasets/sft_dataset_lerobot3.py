@@ -41,6 +41,8 @@ from cosmos_framework.utils import log
 from cosmos_framework.utils.flags import INTERNAL
 from cosmos_framework.utils.performance import performance_scope, record_performance_event
 
+_SUPPORTED_LONG_VIDEO_POLICIES = {"drop", "split"}
+
 # ============================================================================
 # 1. video 字段选择 + metadata 加载
 # ============================================================================
@@ -112,6 +114,59 @@ def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
     return dataset_roots
 
 
+def _build_balanced_video_windows(
+    start_frame: int,
+    end_frame: int,
+    fps: float,
+    max_video_duration_s: float,
+    video_window_overlap_s: float,
+) -> list[tuple[int, int]]:
+    """Split an inclusive frame range into balanced, continuous overlapping windows."""
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}")
+    if end_frame < start_frame:
+        raise ValueError(f"end_frame must be >= start_frame, got [{start_frame}, {end_frame}]")
+    if max_video_duration_s <= 0:
+        return [(start_frame, end_frame)]
+    if video_window_overlap_s < 0 or video_window_overlap_s >= max_video_duration_s:
+        raise ValueError(
+            "video_window_overlap_s must satisfy 0 <= overlap < max_video_duration_s, "
+            f"got overlap={video_window_overlap_s}, max={max_video_duration_s}"
+        )
+
+    max_frames = math.floor(max_video_duration_s * fps)
+    overlap_frames = math.floor(video_window_overlap_s * fps)
+    if max_frames < 1:
+        raise ValueError(
+            f"max_video_duration_s={max_video_duration_s} is shorter than one frame at fps={fps}"
+        )
+    if overlap_frames >= max_frames:
+        raise ValueError(
+            f"Rounded overlap_frames={overlap_frames} must be smaller than max_frames={max_frames}"
+        )
+
+    source_frames = end_frame - start_frame + 1
+    if source_frames <= max_frames:
+        return [(start_frame, end_frame)]
+
+    stride_capacity = max_frames - overlap_frames
+    num_windows = math.ceil((source_frames - overlap_frames) / stride_capacity)
+    materialized_frames = source_frames + (num_windows - 1) * overlap_frames
+    base_size, extra = divmod(materialized_frames, num_windows)
+
+    windows: list[tuple[int, int]] = []
+    cursor = start_frame
+    for clip_index in range(num_windows):
+        clip_size = base_size + int(clip_index < extra)
+        clip_end = cursor + clip_size - 1
+        windows.append((cursor, clip_end))
+        cursor = clip_end + 1 - overlap_frames
+
+    assert windows[-1][1] == end_frame
+    assert all(window_end - window_start + 1 <= max_frames for window_start, window_end in windows)
+    return windows
+
+
 def _load_single_lerobot_metadata(
     lerobot_root: str,
     min_frames: int,
@@ -120,6 +175,8 @@ def _load_single_lerobot_metadata(
     video_feature_key: str | None,
     caption_key: str,
     video_feature_keywords: list[str] | None = None,
+    long_video_policy: str = "drop",
+    video_window_overlap_s: float = 0.0,
 ) -> list[dict]:
     """读【单个】LeRobot 数据集，产出 metadata list。
 
@@ -132,6 +189,18 @@ def _load_single_lerobot_metadata(
     root = Path(lerobot_root)
     info = json.loads((root / "meta" / "info.json").read_text())
     fps = float(info["fps"])
+    if long_video_policy not in _SUPPORTED_LONG_VIDEO_POLICIES:
+        raise ValueError(
+            f"Unsupported long_video_policy={long_video_policy!r}; "
+            f"expected one of {sorted(_SUPPORTED_LONG_VIDEO_POLICIES)}"
+        )
+    if video_window_overlap_s < 0:
+        raise ValueError(f"video_window_overlap_s must be non-negative, got {video_window_overlap_s}")
+    if max_video_duration_s > 0 and video_window_overlap_s >= max_video_duration_s:
+        raise ValueError(
+            "video_window_overlap_s must be smaller than max_video_duration_s when the cap is enabled, "
+            f"got overlap={video_window_overlap_s}, max={max_video_duration_s}"
+        )
 
     video_key = _select_lerobot_video_key(info, video_feature_key, video_feature_keywords)
     width, height = _get_lerobot_video_width_height(info, video_key)
@@ -143,6 +212,9 @@ def _load_single_lerobot_metadata(
     episodes_df = pd.concat([pd.read_parquet(p) for p in episodes_files], ignore_index=True)
 
     metadata_list: list[dict] = []
+    source_episodes = 0
+    split_episodes = 0
+    structured_caption_warning_emitted = False
     for row in episodes_df.to_dict("records"):
         episode_index = int(row["episode_index"])
 
@@ -173,11 +245,11 @@ def _load_single_lerobot_metadata(
         if isinstance(caption, (list, tuple, np.ndarray)):
             caption = next((str(item).strip() for item in caption if str(item).strip()), None)
 
-        length = int(row.get("length", end_frame - start_frame + 1))
         duration = to_ts - from_ts
 
+        source_episodes += 1
         # 过滤（默认值对齐 sft_dataset._load_sft_metadata_from_s3；LeRobot 路径可配置）
-        if max_video_duration_s > 0 and duration > max_video_duration_s:
+        if max_video_duration_s > 0 and duration > max_video_duration_s and long_video_policy == "drop":
             continue
         if min_short_edge > 0 and min(width, height) < min_short_edge:
             continue
@@ -199,27 +271,64 @@ def _load_single_lerobot_metadata(
             )
         )
 
-        window = {
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "temporal_interval": 1,
-        }
-        # caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过该样本
-        if caption:
-            window["caption"] = caption
+        clip_ranges = [(start_frame, end_frame)]
+        if long_video_policy == "split":
+            clip_ranges = _build_balanced_video_windows(
+                start_frame,
+                end_frame,
+                fps,
+                max_video_duration_s,
+                video_window_overlap_s,
+            )
+        num_clips = len(clip_ranges)
+        if num_clips > 1:
+            split_episodes += 1
+            if (isinstance(caption, dict) or caption_key == "caption_json") and not structured_caption_warning_emitted:
+                log.warning(
+                    "Splitting long LeRobot episodes while preserving structured JSON captions unchanged. "
+                    "Embedded duration/FPS/timestamps may describe the source episode instead of each clip. "
+                    f"dataset={root}, caption_key={caption_key!r}"
+                )
+                structured_caption_warning_emitted = True
 
-        metadata_list.append(
-            {
-                "uuid": uuid,
-                "vision_path": vision_path,
-                "width": width,
-                "height": height,
-                "nb_frames": length,
-                "framerate": fps,
-                "aspect_ratio": get_aspect_ratio(width, height),
-                "t2w_windows": [window],
-            }
-        )
+        overlap_frames = math.floor(video_window_overlap_s * fps) if num_clips > 1 else 0
+        for clip_index, (clip_start, clip_end) in enumerate(clip_ranges):
+            clip_frames = clip_end - clip_start + 1
+            if clip_frames < min_frames:
+                raise ValueError(
+                    "Balanced long-video split produced a clip shorter than min_frames; "
+                    f"uuid={uuid}, clip={clip_index + 1}/{num_clips}, frames={clip_frames}, min_frames={min_frames}"
+                )
+            window = {"start_frame": clip_start, "end_frame": clip_end, "temporal_interval": 1}
+            # caption 为空时不写 caption key，让下游 _select_caption 找不到 key → 返回 None → 优雅跳过该样本
+            if caption:
+                window["caption"] = caption
+
+            clip_uuid = uuid if num_clips == 1 else f"{uuid}_clip_{clip_index:03d}_of_{num_clips:03d}"
+            metadata_list.append(
+                {
+                    "uuid": clip_uuid,
+                    "source_episode_uuid": uuid,
+                    "source_start_frame": start_frame,
+                    "source_end_frame": end_frame,
+                    "clip_index": clip_index,
+                    "num_clips": num_clips,
+                    "overlap_frames": overlap_frames,
+                    "vision_path": vision_path,
+                    "width": width,
+                    "height": height,
+                    "nb_frames": clip_frames,
+                    "framerate": fps,
+                    "aspect_ratio": get_aspect_ratio(width, height),
+                    "t2w_windows": [window],
+                }
+            )
+
+    log.info(
+        f"LeRobot metadata loaded: root={root}, source_episodes={source_episodes}, "
+        f"split_episodes={split_episodes}, output_samples={len(metadata_list)}, "
+        f"long_video_policy={long_video_policy}, overlap_s={video_window_overlap_s}"
+    )
 
     return metadata_list
 
@@ -232,6 +341,8 @@ def _load_lerobot_metadata(
     video_feature_key: str | None = None,
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
+    long_video_policy: str = "drop",
+    video_window_overlap_s: float = 0.0,
 ) -> list[dict]:
     """读 LeRobot 数据集（单个根或父目录），产出 metadata list。
 
@@ -255,6 +366,8 @@ def _load_lerobot_metadata(
                 video_feature_key=video_feature_key,
                 caption_key=caption_key,
                 video_feature_keywords=video_feature_keywords,
+                long_video_policy=long_video_policy,
+                video_window_overlap_s=video_window_overlap_s,
             )
         )
     return metadata_list
@@ -634,6 +747,19 @@ class LeRobotSFTDataset(SFTDataset):
             self.max_video_fps,
         )
 
+        if self.num_video_frames == -1:
+            # Keep every split window on the source episode's original downsampling phase.
+            # Thus an overlapped source frame is either selected by both clips or by neither.
+            source_start_frame = int(metadata.get("source_start_frame", window_start))
+            phase_offset = (source_start_frame - window_start) % temporal_interval
+            start_frame = window_start + phase_offset
+            if start_frame > actual_end:
+                log.warning(
+                    f"FPS phase alignment leaves no frame in window: {metadata['uuid']}, "
+                    f"window=[{window_start}, {actual_end}], temporal_interval={temporal_interval}"
+                )
+                return None
+
         if self.num_video_frames != -1:
             num_frames_before_downsample = (self.num_video_frames - 1) * temporal_interval + 1
             if num_frames_before_downsample > frames_in_window:
@@ -808,6 +934,8 @@ def get_sft_dataset_from_lerobot(
     num_video_frames: int = -1,  # LeRobot 场景默认 -1（native chunk mode，直接用 t2w_windows 里的帧区间）
     min_video_frames: int = 61,
     max_video_duration_s: float = 61.0,
+    long_video_policy: str = "drop",
+    video_window_overlap_s: float = 0.0,
     temporal_interval_mode: str = "entire_chunk",
     frame_selection_mode: str = "center",
     tokenizer_config: Optional[Any] = None,
@@ -849,6 +977,18 @@ def get_sft_dataset_from_lerobot(
         raise ValueError(f"min_video_frames must be at least 1, got {min_video_frames}")
     if max_video_duration_s < 0:
         raise ValueError(f"max_video_duration_s must be non-negative, got {max_video_duration_s}")
+    if long_video_policy not in _SUPPORTED_LONG_VIDEO_POLICIES:
+        raise ValueError(
+            f"Unsupported long_video_policy={long_video_policy!r}; "
+            f"expected one of {sorted(_SUPPORTED_LONG_VIDEO_POLICIES)}"
+        )
+    if video_window_overlap_s < 0:
+        raise ValueError(f"video_window_overlap_s must be non-negative, got {video_window_overlap_s}")
+    if max_video_duration_s > 0 and video_window_overlap_s >= max_video_duration_s:
+        raise ValueError(
+            "video_window_overlap_s must be smaller than max_video_duration_s when the cap is enabled, "
+            f"got overlap={video_window_overlap_s}, max={max_video_duration_s}"
+        )
     if max_video_fps < 0:
         raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
 
@@ -867,6 +1007,8 @@ def get_sft_dataset_from_lerobot(
         video_feature_key=video_feature_key,
         caption_key=caption_key,
         video_feature_keywords=video_feature_keywords,
+        long_video_policy=long_video_policy,
+        video_window_overlap_s=video_window_overlap_s,
     )
 
     total_windows = sum(len(m["t2w_windows"]) for m in metadata_list)

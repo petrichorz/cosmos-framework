@@ -251,6 +251,16 @@ class ImaginaireTrainer:
             torch._C._set_sm_carveout_experimental(sm_carveout)
             log.info(f"Set SM carveout to {sm_carveout}")
         self.callbacks.on_train_start(model, iteration=iteration)
+        if os.environ.get("COSMOS_PERF_RECORD_MEMORY", "0") == "1":
+            try:
+                accelerator = (
+                    torch.npu
+                    if os.environ.get("COSMOS_DEVICE", "").lower() == "npu" and hasattr(torch, "npu")
+                    else torch.cuda
+                )
+                accelerator.reset_peak_memory_stats()
+            except (AttributeError, RuntimeError):
+                pass
         # Initial validation.
         if self.config.trainer.run_validation and iteration == 0 and self.config.trainer.run_validation_on_start:
             self.validate(model, dataloader_val, iteration=iteration)
@@ -335,10 +345,28 @@ class ImaginaireTrainer:
                         continue
                     # Do the following when an actual optimizer (update) step has been made.
                     iteration += 1
+                    memory_metadata = {}
+                    if os.environ.get("COSMOS_PERF_RECORD_MEMORY", "0") == "1":
+                        # Reading allocator statistics does not synchronize the device and lets
+                        # performance-only runs compare peak memory without enabling the
+                        # profiler's substantially heavier memory timeline.
+                        try:
+                            accelerator = (
+                                torch.npu
+                                if os.environ.get("COSMOS_DEVICE", "").lower() == "npu" and hasattr(torch, "npu")
+                                else torch.cuda
+                            )
+                            memory_metadata = {
+                                "max_memory_allocated_bytes": accelerator.max_memory_allocated(),
+                                "max_memory_reserved_bytes": accelerator.max_memory_reserved(),
+                            }
+                        except (AttributeError, RuntimeError):
+                            memory_metadata = {}
                     record_performance_event(
                         "iteration_core",
                         duration_ms=(time.perf_counter_ns() - iteration_start_ns) / 1_000_000,
                         iteration=iteration,
+                        **memory_metadata,
                     )
                     # Save checkpoint.
                     if iteration % self.config.checkpoint.save_iter == 0:

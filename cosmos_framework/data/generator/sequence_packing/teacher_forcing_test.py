@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 import torch
 
+from cosmos_framework.data.generator.sequence_packing import teacher_forcing
 from cosmos_framework.data.generator.sequence_packing.modality import ModalityData, ModalitySpan
 from cosmos_framework.data.generator.sequence_packing.sequence import PackedSequence
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
@@ -448,6 +449,40 @@ def test_expand_packed_sequence_preserves_noisy_contract_and_duplicates_rope():
     assert packed.sample_lens == [5, 5]
     assert packed.vision.sequence_indexes.tolist() == [2, 3, 4, 6, 7, 8, 9]
     assert packed.teacher_forcing is None
+
+
+def test_disabled_tolist_optimization_restores_scalar_remap(monkeypatch):
+    packed = _make_packed_video_sequence()
+    clean_tokens = [torch.full_like(packed.vision.tokens[0], 1.0), torch.full_like(packed.vision.tokens[1], 2.0)]
+    geometry = _geometry(2, 3, num_samples=2)
+
+    monkeypatch.delenv("COSMOS_ASCEND_SEQUENCE_PACKING_TOLIST_OPT", raising=False)
+    optimized = expand_packed_sequence_for_teacher_forcing(
+        packed,
+        clean_vision_tokens=clean_tokens,
+        geometry=geometry,
+    )
+
+    monkeypatch.setenv("COSMOS_ASCEND_SEQUENCE_PACKING_TOLIST_OPT", "0")
+    legacy = expand_packed_sequence_for_teacher_forcing(
+        packed,
+        clean_vision_tokens=clean_tokens,
+        geometry=geometry,
+    )
+    assert legacy.teacher_forcing is not None
+    source_to_noisy = teacher_forcing._build_source_to_stream_index(
+        legacy.teacher_forcing.layout,
+        TeacherForcingStream.NOISY,
+    )
+
+    assert isinstance(source_to_noisy, dict)
+    assert torch.equal(legacy.text_indexes, optimized.text_indexes)
+    assert torch.equal(legacy.ce_loss_indexes, optimized.ce_loss_indexes)
+    assert torch.equal(legacy.vision.sequence_indexes, optimized.vision.sequence_indexes)
+    assert torch.equal(legacy.vision.mse_loss_indexes, optimized.vision.mse_loss_indexes)
+    assert [span.sequence_start for span in legacy.vision.spans] == [
+        span.sequence_start for span in optimized.vision.spans
+    ]
 
 
 @pytest.mark.parametrize(

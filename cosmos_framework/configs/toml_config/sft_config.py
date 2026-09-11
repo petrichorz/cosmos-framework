@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import tomllib
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cosmos_framework.configs.toml_config.toml_config_helper import (
     TASK_TO_BASE_CONFIG,
@@ -749,6 +749,21 @@ class DataloaderTrainConfig(BaseModel):
             "Set 0 to disable the duration cap. Remapped to the nested SFT dataset and skipped on VLM."
         ),
     )
+    long_video_policy: Literal["drop", "split"] = Field(
+        default="drop",
+        description=(
+            "VFM LeRobot only. Drop episodes above max_video_duration_s, or expand each long episode "
+            "into balanced independent clips. Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
+    video_window_overlap_s: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "VFM LeRobot only. Overlap in seconds between adjacent clips when long_video_policy='split'. "
+            "Must be smaller than max_video_duration_s when the duration cap is enabled."
+        ),
+    )
     max_video_fps: float = Field(
         default=30.0,
         ge=0,
@@ -783,6 +798,12 @@ class DataloaderTrainConfig(BaseModel):
         default=42,
         description=("Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has no seed ctor kwarg there)."),
     )
+
+    @model_validator(mode="after")
+    def validate_video_window_overlap(self) -> "DataloaderTrainConfig":
+        if self.max_video_duration_s > 0 and self.video_window_overlap_s >= self.max_video_duration_s:
+            raise ValueError("video_window_overlap_s must be smaller than max_video_duration_s")
+        return self
 
 
 # ---------------------------------------------------------------- top

@@ -1,6 +1,9 @@
-# Cosmos3 Ascend NPU 四阶段性能采集与分析教程
+# Cosmos3 Ascend NPU 性能采集与实验报告
 
-本文说明如何使用 `tools/profile_cosmos_ascend.py` 对 Cosmos3 视觉 SFT 任务进行端到端性能分析，覆盖数据读取、正常训练基线、单 rank 算子分析和多 rank 通信分析。
+本文是 Cosmos3 视觉 SFT 在 Ascend NPU 上的统一性能文档，既说明如何使用
+`tools/profile_cosmos_ascend.py` 完成端到端分析，也集中记录已经完成的优化实验。内容覆盖
+数据读取、正常训练基线、单 rank 算子、多 rank 通信，以及 EgoSuite 融合算子、
+`max_video_duration_s` 和超长 Episode 均衡重叠切片的 A/B 结果。
 
 分析应始终按以下顺序进行：
 
@@ -685,6 +688,308 @@ cache 是每个 DataLoader worker 独立持有的。当单个 worker 分到的�
 3.
 ```
 
-## 14. 已完成案例
+## 14. 已完成实验总览
 
-仓库根目录的 `PERFORMANCE_ANALYSIS_20260908.md` 是一份使用 Cosmos3-DROID `success` 数据集完成的实际四阶段报告，可作为阅读顺序、指标计算和结论表述的参考。
+本节是 Ascend 性能实验的唯一汇总入口。原始 JSON、CSV、数据库和 trace 仍保存在各实验目录；
+实验背景、实现决策、关键数据和结论统一维护在本文，不再为每个实验单独维护 Markdown。
+
+| 案例 | 卡数 | 核心问题 | 结果 |
+| :--- | ---: | :--- | :--- |
+| `aten::to` 根因修复 | 4 | Host 标量循环和隐式同步 | step time `-20.6%` |
+| EgoSuite 融合算子矩阵 | 8 | `to_list`、Attention、RoPE、RMSNorm | 最优组合 `+6.57%`，allocated `-3.399 GiB/卡` |
+| 当前分片设计 GQA 复测 | 4 | `masked_sdpa` 对比原生 GQA FA | allocated `-3.227 GiB`，但 step time `+2.97%` |
+| `max_video_duration_s` 影响 | 4 | 长 episode 的二次 attention 成本 | 91s 相对 61s 慢 `44.27%` |
+| 均衡重叠切片 | 4 | 保留全部 episode，同时限制单窗口长度 | step time P50 `-26.1%` |
+
+## 15. 案例一：`aten::to` 超长耗时根因与修复
+
+### 15.1 根因
+
+trace 中多秒级 `aten::to` 不是小 Tensor 搬运本身需要数秒，而是同步点替前序异步 NPU 工作
+结算时间。根因包括：
+
+1. teacher-forcing packing 使用 Python dict/list 和 `int(Tensor)` 逐元素 remap；
+2. FA 每层对 NPU cumulative lengths 调用 `.tolist()`；
+3. timestep embedding 先在 CPU 创建 frequency Tensor，再 `.to(device)`；
+4. rank 到达 collective 的时间不同，使 FSDP AllGather 表面耗时被放大。
+
+修复后保留 host actual sequence lengths，并使用 Tensor lookup/indexing；frequency `arange`
+直接创建在目标设备。CPU 微基准从 `661.538 ms` 降至 `7.322 ms`，加速 `90.3×`，输出完全一致。
+
+### 15.2 四卡验证
+
+| 指标 | 基线 | 修复后 | 变化 |
+| :--- | ---: | ---: | ---: |
+| step wall time | 45.272s | 35.944s | `-20.6%` |
+| `POST_NOISE_PACK` rank1 | 9793.775ms | 290.666ms | `-97.0%` |
+| root AllGather 最大事件 | 6744.667ms | 562.567ms | `-91.7%` |
+| `EMBED_CLEAN_TIMESTEPS` | 6322.790ms | 1.272ms | 近乎消除 |
+| Transformer host range | 约 6753.6ms | 约 5339.1ms | `-20.9%` |
+
+`aten::item` 从 266,130 次降至 2,630 次，`aten::select` 从 212,912 次降至 2,634 次。
+验收测试为 `77 passed`，静态检查通过。原始结果位于：
+
+```text
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/aten_to_fix_validation/
+ascend_profile_20260909_190247
+```
+
+数据库核验时必须展开 `PYTORCH_API`、`CANN_API` 和 `COMMUNICATION_OP` 时间线；不能把
+PyTorch API 的墙钟时间直接等价为 API 自身的计算或搬运时间。
+
+## 16. 案例二：EgoSuite 融合算子 A/B
+
+### 16.1 冻结条件
+
+- 数据集：`/mnt/sfs_turbo/public/datasets/egosuite_demo_v1`；
+- 8 张 Ascend 910B3，`max_sequence_length=45056`；
+- 每组丢弃前 2 步，统计 5 个稳定步；
+- 主指标为每步跨 rank 最大 `iteration_core`；
+- profiler 使用 Level1 + PipeUtilization、2 个 active step、record shapes 和 profile memory。
+
+### 16.2 计时结果
+
+| 实验 | 配置 | 迭代均值 | 相对 E0 | Peak allocated |
+| :--- | :--- | ---: | ---: | ---: |
+| E0 | 原始路径 | 55.888s | 基线 | 46.240 GiB |
+| E1 | host lengths + Tensor remap | 55.195s | `+1.24%` | 46.240 GiB |
+| E2 | E1 + 显式 Attention | 57.201s | `-2.35%` | 40.627 GiB |
+| E3 | E1 + RoPE | 54.299s | `+2.84%` | 46.751 GiB |
+| E4 | E1 + RMSNorm | 53.187s | `+4.83%` | 42.331 GiB |
+| E5 | E1 + RoPE + RMSNorm | 52.217s | `+6.57%` | 42.841 GiB |
+
+关键结论：
+
+- `to_list` 路径移除了 98.06% 的 `aten::item`，但异步工作会移动到后续同步点，端到端净收益
+  为 1.24%；
+- 显式 Attention 通过原生 GQA 每卡节省 5.613 GiB allocated，但当前 dense allMask FA
+  端到端回退 3.63%，只建议在显存受限时显式启用；
+- RoPE 命中融合算子并减少 cat/add/mul，较 E1 提升 1.62%；
+- RMSNorm 移除 FP32 pow/mean/rsqrt 链，较 E1 提升 3.64%，每卡节省 3.909 GiB；
+- 最快组合为 E1 + RoPE + RMSNorm，显式 Attention 保持关闭。
+
+推荐开关：
+
+```bash
+export COSMOS_ASCEND_SEQUENCE_PACKING_TOLIST_OPT=1
+export COSMOS_ASCEND_FUSED_ROPE=1
+export COSMOS_ASCEND_FUSED_RMSNORM=1
+export COSMOS_ASCEND_FUSED_TEACHER_FORCING_ATTENTION=0
+```
+
+原始计时和 profiler 结果分别位于：
+
+```text
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/egosuite_fusion_ab/20260910_174026
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/egosuite_fusion_ab/20260910_184004
+```
+
+### 16.3 当前分片设计下的四卡 GQA 复测
+
+在均衡重叠分片实现完成后，重新进行了严格单变量 A/B。两组均使用 EgoSuite、4 张 NPU、
+同一 DCP checkpoint 和随机种子，`max_video_duration_s=61`、`long_video_policy=split`、
+`video_window_overlap_s=5`、`max_sequence_length=45056`、PyAV `decode_transform`，每个 rank
+使用 8 个 DataLoader worker。每组运行 15 轮，丢弃前 5 轮，统计第 6--15 轮；两组均启用
+`to_list`、融合 RoPE 和融合 RMSNorm，唯一变量为是否启用
+`COSMOS_ASCEND_FUSED_TEACHER_FORCING_ATTENTION`。
+
+| 后端 | 稳定轮数 | iteration 均值 | iteration 中位数 | Peak allocated | Peak reserved |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `masked_sdpa` | 10 | 32.862s | 32.898s | 42.425 GiB | 58.916 GiB |
+| `npu_fusion_attention` 原生 GQA | 10 | 33.837s | 33.891s | 39.197 GiB | 58.553 GiB |
+| GQA 变化 | - | `+0.975s`（`+2.97%`） | `+0.993s`（`+3.02%`） | `-3.227 GiB`（`-7.61%`） | `-0.363 GiB`（`-0.62%`） |
+
+GQA 在全部 10 个配对迭代中都更慢，单步回退为 0.503--1.691s，有效吞吐下降 2.88%。
+因此当前 61 秒任意 blocked mask 分片负载再次验证了此前结论：原生 GQA 有稳定显存收益，
+但没有训练吞吐收益；追求速度时保持关闭，仅在显存约束成为主要矛盾时启用。
+
+#### Peak allocated 与 Peak reserved 分别表示什么
+
+- `max_memory_allocated` 是活跃 Tensor 实际占用显存的历史峰值，用于判断模型和算子是否
+  真正减少了张量显存。
+- `max_memory_reserved` 是 PyTorch NPU 缓存分配器向设备申请并持有的显存历史峰值，既包含
+  allocated，也包含已经空闲但仍留在分配器中等待复用的缓存块，因此通常有
+  `reserved >= allocated`。
+
+| 后端 | Peak allocated | Peak reserved | `reserved - allocated` 缓存余量 |
+| :--- | ---: | ---: | ---: |
+| `masked_sdpa` | 42.425 GiB | 58.916 GiB | 16.491 GiB |
+| 原生 GQA | 39.197 GiB | 58.553 GiB | 19.355 GiB |
+
+`masked_sdpa` 会用 `repeat_interleave` 将 K/V heads 物化展开到与 Q heads 相同；原生 GQA
+直接消费较少的 K/V heads，因此避免大型临时 K/V Tensor，使 allocated 峰值下降
+3.227 GiB。该下降在 4 个 rank 上均可复现，每个 rank 约减少 2.7--3.2 GiB，不是单卡
+采样异常。
+
+reserved 没有同比下降，是因为模型初始化、VAE、FSDP AllGather、优化器和其他临时计算
+已经使缓存分配器申请了较大的内存 segment。临时 Tensor 释放后，分配器会保留这些块供
+后续迭代复用，而不是立即归还 NPU 驱动；减少部分活跃占用也不一定能释放一个完整 segment。
+所以 GQA 节省的显存主要转化为 allocator 内部可复用余量，`npu-smi` 显示的进程占用可能
+不会明显下降。
+
+判断算子显存收益应优先看 allocated；判断进程向设备保留的总量和其他进程可用空间，则更
+关注 reserved。`empty_cache()` 只能归还未被活跃 Tensor 使用的缓存块，不能降低仍在使用的
+allocated；训练热路径频繁调用还会引入重复申请开销，不作为常规优化手段。
+
+本次未启用重型算子 profiler，以免污染端到端计时；显存来自每个 rank 的 NPU allocator
+高水位记录。原始事件、逐轮数据及机器可读汇总位于：
+
+```text
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/gqa_split_ab/20260911_064836
+```
+
+## 17. 案例三：`max_video_duration_s` 的性能影响
+
+### 17.1 原行为与问题
+
+原 LeRobot loader 把 `max_video_duration_s` 当作整条 episode 的过滤阈值，而不是裁剪长度。
+61s 配置只保留 78 条 episode，91s 配置保留 122 条；后者平均 episode 时长从 26.652s
+增加到 42.904s。
+
+在 packed token 总量接近时，attention 仍按每个独立样本计算近似二次成本：
+
+```text
+cost = sum_i(s_und_i^2 + s_gen_i * (s_und_i + s_gen_i))
+```
+
+因此少量长窗口会显著提高 FLOPs，不能只用 packed token 总数预测 step time。
+
+### 17.2 四卡结果
+
+固定 PyAV、`decode_transform`、8 workers/rank、15 FPS、45,056 token 和 seed 42：
+
+| 指标 | D61 | D91 | D91 相对 D61 |
+| :--- | ---: | ---: | ---: |
+| 临界 `iteration_core` 均值 | 30.607s | 44.156s | `+44.27%` |
+| forward 临界均值 | 13.773s | 18.576s | `+34.87%` |
+| backward + optimizer | 17.130s | 26.046s | `+52.05%` |
+| data wait | 5.437ms | 5.738ms | 基本不变 |
+| Peak allocated | 41.095 GiB | 45.287 GiB | `+4.193 GiB` |
+| 总 FLOPs/step | 3.009 PFLOPs | 4.242 PFLOPs | `+40.95%` |
+| 非 VAE FLOPs/step | 2.390 PFLOPs | 3.623 PFLOPs | `+51.57%` |
+
+总 FLOPs 增长 40.95% 可以解释大部分 44.27% 的 step 增长；VAE FLOPs、稳定期数据等待和
+rank 不均衡均不是一阶根因。原始结果位于：
+
+```text
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/max_video_duration_ab/20260911_0256
+```
+
+## 18. 案例四：超长 Episode 均衡重叠切片
+
+### 18.1 配置与行为
+
+新增配置：
+
+```toml
+max_video_duration_s   = 61.0
+long_video_policy      = "split"
+video_window_overlap_s = 5.0
+```
+
+默认仍为 `drop + overlap=0`，兼容旧行为；目标 Vision Edge recipe 显式启用
+`split + overlap=5`。约束仅为 `0 <= overlap < max_video_duration_s`，不设置四分之一上限。
+`max_video_duration_s=0` 继续表示关闭时长上限。
+
+切片发生在 parquet metadata 展开阶段，不创建新视频文件。每个 clip 是独立、等概率样本，
+因此长 episode 会因产生多个窗口获得更高采样权重，且不依赖 `sample_by_window`。
+
+### 18.2 帧级均衡算法
+
+设源区间为半开区间 `[source_start, source_stop)`，源帧数为 `N`，最大帧数为 `M`，重叠帧数
+为 `O`：
+
+```text
+n = ceil((N - O) / (M - O))
+materialized = N + (n - 1) * O
+base, remainder = divmod(materialized, n)
+```
+
+前 `remainder` 个窗口长度为 `base+1`，其余为 `base`；相邻窗口精确重叠 `O` 帧，首尾覆盖
+源区间且每个窗口不超过上限。例如 91s、30 FPS、61s 上限和 5s overlap 生成两个 48s 窗口：
+
+```text
+[0, 1440) 和 [1290, 2730)，重叠 150 帧
+```
+
+metadata 记录 `source_episode_uuid`、源帧边界、clip index/count 和 overlap frames，并生成稳定
+clip UUID。FPS 下采样以源 episode 起点作为共享相位，保证 overlap 中同一个源帧不会因窗口
+边界改变而在两个 clip 中错位。
+
+structured JSON caption 第一版原样复制并输出 warning，因为其中嵌入的 duration、FPS 或
+timestamp 可能仍描述源 episode；普通 EgoSuite `tasks` caption 不受影响。
+
+### 18.3 正确性与数据覆盖
+
+- 数据集单测：`26 passed`；
+- 静态检查：Ruff 通过；
+- 真实 PyAV `decode_transform` 冒烟：4/4 个长视频切片成功；
+- EgoSuite 126 个源 episode 全部覆盖，展开为 175 个独立样本；
+- 完整源数据为 169,921 帧，5s overlap 后为 177,271 帧，仅增加 4.33%。
+
+### 18.4 四卡无 profiler 计时
+
+两桶保持数据集、15 FPS、45,056 token、PyAV、workers 和 seed 相同：
+
+| 桶 | 策略 | 稳定步最慢 rank P50 |
+| :--- | :--- | ---: |
+| A | 完整 episode，不设时长上限 | 47.98s |
+| B | 61s 均衡切片 + 5s overlap | 35.23s |
+
+B 桶 step time 下降 `26.6%`。事件汇总中 training step、forward、backward 和 optimizer 的
+均值分别下降约 22.3%、18.9%、23.7% 和 25.7%。切片桶处理更多预取样本且保留全部源数据，
+因此收益不是通过丢弃长 episode 获得。
+
+计时结果：
+
+```text
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/max_video_duration_split_ab/
+20260911_053437
+```
+
+### 18.5 四卡 Level1 + PipeUtilization
+
+A/B 均采集 4 个 rank、2 个 active step，开启 record shapes 和 profile memory；每桶均生成
+4 份 `kernel_details.csv` 和 4 份 `trace_view.json`。
+
+| 指标 P50 | A 完整 episode | B 61s + 5s | 变化 |
+| :--- | ---: | ---: | ---: |
+| training step | 48.875s | 36.123s | `-26.1%` |
+| forward | 19.925s | 14.077s | `-29.4%` |
+| backward | 16.429s | 12.510s | `-23.9%` |
+| optimizer | 11.703s | 8.790s | `-24.9%` |
+
+算子聚合进一步显示：FlashAttention 正向 kernel 总时间下降约 33.7%，反向下降约 34.7%；
+HCCL ReduceScatter 和 AllGather 聚合时间分别下降约 46.9% 和 54.6%。虽然 B 桶因 packing
+包含更多短样本而产生更多 FA 调用，但单次 attention 的长度和二次成本显著降低。
+
+A/B profile 结果：
+
+```text
+# A 桶
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/max_video_duration_split_ab/
+20260911_055014/A_full_episode/profile/ascend_profile_20260911_055015
+
+# B 桶
+/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/max_video_duration_split_ab/
+20260911_060844/B_split_61s_overlap_5s/profile/ascend_profile_20260911_060846
+```
+
+### 18.6 验收结论
+
+均衡重叠切片已同时通过覆盖率、解码、训练和 profiler 验证。它在保留全部长视频语义覆盖、
+支付 4.33% overlap 数据增量的前提下，将 4 卡训练 step time 降低约 26%。收益来自缩短独立
+attention window，并同步降低 FA 和 FSDP 通信等待，而不是 DataLoader 偶然波动。
+
+## 19. 当前建议与后续工作
+
+1. Vision Edge LeRobot 训练采用 `split + 61s + 5s overlap` 作为目标 recipe；通用默认仍保持
+   `drop + overlap=0`，避免无意改变其他任务的数据权重。
+2. 性能选择必须同时报告 step time、源视频覆盖、物化视频帧/秒、有效 token、FLOPs 和峰值
+   allocated memory；不能只比较每步耗时。
+3. 继续探索 attention-cost-aware packing，使 sampler 显式平衡平方成本，而不只限制 packed
+   token 总数。
+4. structured JSON 数据集在正式使用切片前，应决定是否按 clip 重写 duration/FPS/timestamps；
+   当前 warning 策略只保证不静默产生错误假设。
+5. 若启用融合优化，优先使用 `to_list + RoPE + RMSNorm`；显式 Attention 仅在显存压力优先于
+   吞吐时使用，并在目标数据集重新 A/B。

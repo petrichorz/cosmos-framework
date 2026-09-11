@@ -13,10 +13,29 @@ import torch
 
 from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
     LeRobotSFTDataset,
+    _build_balanced_video_windows,
     _LeRobotVideoDecoderCache,
     _limit_temporal_interval_by_fps,
     _load_single_lerobot_metadata,
 )
+
+
+def test_balanced_video_windows_cover_source_with_exact_overlap():
+    windows = _build_balanced_video_windows(
+        start_frame=0,
+        end_frame=2729,
+        fps=30.0,
+        max_video_duration_s=61.0,
+        video_window_overlap_s=5.0,
+    )
+
+    assert windows == [(0, 1439), (1290, 2729)]
+    assert windows[0][1] - windows[1][0] + 1 == 150
+
+
+def test_balanced_video_windows_validate_overlap():
+    with pytest.raises(ValueError, match="0 <= overlap < max_video_duration_s"):
+        _build_balanced_video_windows(0, 100, 30.0, 5.0, 5.0)
 
 
 def test_rejects_unknown_video_backend():
@@ -85,6 +104,49 @@ def test_lerobot_metadata_duration_and_frame_filters_are_configurable(tmp_path, 
         caption_key="caption",
     )
     assert len(custom_filtered) == 3
+
+
+def test_lerobot_metadata_split_creates_independent_balanced_samples(tmp_path, monkeypatch):
+    video_key = "observation.images.top"
+    info = {
+        "fps": 30,
+        "features": {video_key: {"dtype": "video", "shape": [8, 8, 3]}},
+        "video_path": "videos/{video_key}/chunk-{chunk_index}/file-{file_index}.mp4",
+    }
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta" / "info.json").write_text(json.dumps(info))
+    episodes_dir = tmp_path / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    (episodes_dir / "file-000.parquet").touch()
+    rows = [
+        {
+            "episode_index": 7,
+            f"videos/{video_key}/from_timestamp": 0.0,
+            f"videos/{video_key}/to_timestamp": 91.0,
+            "tasks": ["long task"],
+        }
+    ]
+    monkeypatch.setattr(pd, "read_parquet", lambda _: pd.DataFrame(rows))
+
+    metadata = _load_single_lerobot_metadata(
+        str(tmp_path),
+        min_frames=61,
+        max_video_duration_s=61.0,
+        min_short_edge=0,
+        video_feature_key=video_key,
+        caption_key="caption",
+        long_video_policy="split",
+        video_window_overlap_s=5.0,
+    )
+
+    assert len(metadata) == 2
+    assert [item["nb_frames"] for item in metadata] == [1440, 1440]
+    assert [item["t2w_windows"][0]["start_frame"] for item in metadata] == [0, 1290]
+    assert [item["t2w_windows"][0]["end_frame"] for item in metadata] == [1439, 2729]
+    assert all(item["source_episode_uuid"].endswith("episode_7") for item in metadata)
+    assert all(item["overlap_frames"] == 150 for item in metadata)
+    assert metadata[0]["uuid"].endswith("clip_000_of_002")
+    assert metadata[1]["uuid"].endswith("clip_001_of_002")
 
 
 @pytest.mark.parametrize(
@@ -174,6 +236,37 @@ def test_native_chunk_applies_max_video_fps(monkeypatch):
     assert sample["conditioning_fps"] == 30.0
     assert sample["num_multiplier"] == 2
     assert sample["num_frames"] == 29
+
+
+def test_native_chunk_preserves_source_episode_downsample_phase(monkeypatch):
+    dataset = _native_fps_dataset()
+    calls = []
+    monkeypatch.setattr(
+        "cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3.get_video_metadata",
+        lambda path: {"fps": 60.0, "total_frames": 100},
+    )
+
+    def fake_decode(**kwargs):
+        calls.append(kwargs)
+        count = (kwargs["end_frame"] - kwargs["start_frame"]) // kwargs["temporal_interval"] + 1
+        return [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(count)]
+
+    dataset._decode_video_frames = fake_decode
+    metadata = {
+        "uuid": "episode-1-clip-1",
+        "source_start_frame": 0,
+        "vision_path": "video.mp4",
+        "width": 8,
+        "height": 8,
+        "aspect_ratio": "1,1",
+        "t2w_windows": [{"start_frame": 3, "end_frame": 20, "temporal_interval": 1, "caption": "task"}],
+    }
+
+    sample = dataset.process_one_sample(metadata)
+
+    assert calls[0]["start_frame"] == 4
+    assert calls[0]["temporal_interval"] == 2
+    assert sample is not None
 
 
 def test_fixed_frame_request_is_skipped_when_fps_cap_makes_window_too_short(monkeypatch):

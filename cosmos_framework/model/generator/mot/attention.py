@@ -17,6 +17,7 @@ from cosmos_framework.model.attention.masks import CausalType
 from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
     teacher_forcing_dense_attention,
     teacher_forcing_per_sample_dense_attention,
+    use_ascend_teacher_forcing_fused_attention,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
@@ -84,6 +85,7 @@ class TeacherForcingAttentionInfo(SplitInfo):
         dense_mode: str,
         dense_gen_mask: torch.BoolTensor | None,
         sample_gen_masks: tuple[torch.BoolTensor, ...],
+        masks_are_blocked: bool,
         split_lens: list[int],
         attn_modes: list[str],
         sample_lens: list[int],
@@ -100,6 +102,7 @@ class TeacherForcingAttentionInfo(SplitInfo):
         self.dense_mode = dense_mode
         self.dense_gen_mask = dense_gen_mask
         self.sample_gen_masks = sample_gen_masks
+        self.masks_are_blocked = masks_are_blocked
 
 
 AttentionMaskType = SplitInfo
@@ -312,7 +315,8 @@ def teacher_forcing_attention(
             full_q[:num_gen_queries],
             get_all_seq(key_pack_for_gen),
             get_all_seq(packed_value_states),
-            attention_meta.dense_gen_mask,
+            None if attention_meta.masks_are_blocked else attention_meta.dense_gen_mask,
+            blocked_mask=attention_meta.dense_gen_mask if attention_meta.masks_are_blocked else None,
             mask_is_prevalidated=True,
         )
     elif attention_meta.dense_mode == "per_sample":
@@ -320,7 +324,8 @@ def teacher_forcing_attention(
             full_q[:num_gen_queries],
             get_all_seq(key_pack_for_gen),
             get_all_seq(packed_value_states),
-            attention_meta.sample_gen_masks,
+            None if attention_meta.masks_are_blocked else attention_meta.sample_gen_masks,
+            blocked_masks=attention_meta.sample_gen_masks if attention_meta.masks_are_blocked else None,
             sample_lens=attention_meta.layout.sample_lens,
             gen_sample_lens=gen_sample_lens,
             masks_are_prevalidated=True,
@@ -730,25 +735,30 @@ def build_packed_sequence(
             or tuple(attn_modes) != teacher_forcing_layout.attn_modes
         ):
             raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
+        masks_are_blocked = use_ascend_teacher_forcing_fused_attention(device)
         if teacher_forcing_dense_mode == "global":
             dense_gen_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout).to(device=device)
+            if masks_are_blocked:
+                dense_gen_mask.logical_not_()
             sample_gen_masks: tuple[torch.BoolTensor, ...] = ()
         elif teacher_forcing_dense_mode == "per_sample":
             dense_gen_mask = None
             sample_gen_masks = tuple(
-                mask.to(device=device)
-                for mask in build_per_sample_teacher_forcing_gen_masks(teacher_forcing_layout)
+                mask.to(device=device) for mask in build_per_sample_teacher_forcing_gen_masks(teacher_forcing_layout)
             )
+            if masks_are_blocked:
+                for mask in sample_gen_masks:
+                    mask.logical_not_()
         else:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-                f"got {teacher_forcing_dense_mode!r}"
+                f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {teacher_forcing_dense_mode!r}"
             )
         attention_meta = TeacherForcingAttentionInfo(
             layout=teacher_forcing_layout,
             dense_mode=teacher_forcing_dense_mode,
             dense_gen_mask=dense_gen_mask,
             sample_gen_masks=sample_gen_masks,
+            masks_are_blocked=masks_are_blocked,
             split_lens=split_lens,
             attn_modes=attn_modes,
             sample_lens=sample_lens,

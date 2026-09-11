@@ -10,22 +10,21 @@ from functools import lru_cache
 import torch
 from torch import Tensor
 
+from cosmos_framework.data.generator.sequence_packing.runtime import sequence_packing_tolist_optimization_enabled
 from cosmos_framework.model.attention.checks import assert_universal_tensor_checks
 from cosmos_framework.model.attention.masks import CausalType
 
 _COMPRESSED_CAUSAL_MASK_SIZE = 2048
 _ACTUAL_SEQ_LENGTHS_CACHE_MAXSIZE = 64
-_actual_seq_lengths_cache: OrderedDict[
-    int, tuple[weakref.ReferenceType[Tensor], int | None, tuple[int, ...]]
-] = OrderedDict()
+_actual_seq_lengths_cache: OrderedDict[int, tuple[weakref.ReferenceType[Tensor], int | None, tuple[int, ...]]] = (
+    OrderedDict()
+)
 
 
 @lru_cache(maxsize=None)
 def _compressed_causal_mask(device_type: str, device_index: int | None) -> Tensor:
     """Create Ascend's reusable 2048x2048 left-up causal compressed mask."""
-    device = (
-        torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
-    )
+    device = torch.device(device_type, device_index) if device_index is not None else torch.device(device_type)
     return torch.triu(
         torch.ones(
             (_COMPRESSED_CAUSAL_MASK_SIZE, _COMPRESSED_CAUSAL_MASK_SIZE),
@@ -38,29 +37,32 @@ def _compressed_causal_mask(device_type: str, device_index: int | None) -> Tenso
 
 def _ascend_actual_seq_lengths(cumulative_seqlen: Tensor) -> list[int]:
     """Convert Cosmos ``[0, ...]`` cumulative offsets to Ascend's ``[...]`` list."""
-    precomputed = getattr(cumulative_seqlen, "_cosmos_actual_seq_lengths", None)
-    if precomputed is not None:
-        # Sequence packing constructs both the device tensor and this immutable
-        # host tuple from the same Python offsets.  This is the normal Cosmos
-        # hot path and avoids any NPU -> host synchronization.
-        return list(precomputed)
+    optimization_enabled = sequence_packing_tolist_optimization_enabled()
+    if optimization_enabled:
+        precomputed = getattr(cumulative_seqlen, "_cosmos_actual_seq_lengths", None)
+        if precomputed is not None:
+            # Sequence packing constructs both the device tensor and this immutable
+            # host tuple from the same Python offsets.  This is the normal Cosmos
+            # hot path and avoids any NPU -> host synchronization.
+            return list(precomputed)
 
     # The same immutable sequence-pack metadata tensor is reused by every
     # Transformer layer.  ``Tensor.tolist()`` on NPU is synchronous, so doing
     # it twice per layer creates a pair of aten::to operations and drains the
     # compute stream 56 times in a 28-layer model.  Cache by object identity and
     # Tensor mutation version; the weak reference prevents an id-reuse hit.
-    cache_key = id(cumulative_seqlen)
-    try:
-        version = cumulative_seqlen._version
-    except RuntimeError:
-        # Inference tensors do not expose a version counter. Sequence offsets
-        # are immutable metadata, and object identity still makes reuse safe.
-        version = None
-    cached = _actual_seq_lengths_cache.get(cache_key)
-    if cached is not None and cached[0]() is cumulative_seqlen and cached[1] == version:
-        _actual_seq_lengths_cache.move_to_end(cache_key)
-        return list(cached[2])
+    if optimization_enabled:
+        cache_key = id(cumulative_seqlen)
+        try:
+            version = cumulative_seqlen._version
+        except RuntimeError:
+            # Inference tensors do not expose a version counter. Sequence offsets
+            # are immutable metadata, and object identity still makes reuse safe.
+            version = None
+        cached = _actual_seq_lengths_cache.get(cache_key)
+        if cached is not None and cached[0]() is cumulative_seqlen and cached[1] == version:
+            _actual_seq_lengths_cache.move_to_end(cache_key)
+            return list(cached[2])
 
     values = cumulative_seqlen.tolist()
     if not values or values[0] != 0:
@@ -77,14 +79,15 @@ def _ascend_actual_seq_lengths(cumulative_seqlen: Tensor) -> list[int]:
     if len(actual_seq_lengths) > 1024:
         raise ValueError("npu_fusion_attention TND supports at most 1024 packed sequences")
 
-    _actual_seq_lengths_cache[cache_key] = (
-        weakref.ref(cumulative_seqlen),
-        version,
-        tuple(actual_seq_lengths),
-    )
-    _actual_seq_lengths_cache.move_to_end(cache_key)
-    while len(_actual_seq_lengths_cache) > _ACTUAL_SEQ_LENGTHS_CACHE_MAXSIZE:
-        _actual_seq_lengths_cache.popitem(last=False)
+    if optimization_enabled:
+        _actual_seq_lengths_cache[cache_key] = (
+            weakref.ref(cumulative_seqlen),
+            version,
+            tuple(actual_seq_lengths),
+        )
+        _actual_seq_lengths_cache.move_to_end(cache_key)
+        while len(_actual_seq_lengths_cache) > _ACTUAL_SEQ_LENGTHS_CACHE_MAXSIZE:
+            _actual_seq_lengths_cache.popitem(last=False)
     return actual_seq_lengths
 
 
