@@ -9,6 +9,7 @@ import functools
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from torch import nn
 from transformers.activations import ACT2FN
 
@@ -53,6 +54,14 @@ class Nemotron3DenseVLRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.device.type == "npu":
+            output, _ = torch_npu.npu_rms_norm(
+                hidden_states,
+                self.weight.to(dtype=hidden_states.dtype),
+                epsilon=self.variance_epsilon,
+            )
+            return output
+
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
