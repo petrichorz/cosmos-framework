@@ -29,6 +29,12 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _apply_npu_rotary_mul(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    if x.ndim == 3:
+        return torch_npu.npu_rotary_mul(x.unsqueeze(0), cos.unsqueeze(0), sin.unsqueeze(0), "half").squeeze(0)
+    return torch_npu.npu_rotary_mul(x, cos, sin, "half")
+
+
 def apply_rotary_pos_emb_partial(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -42,8 +48,12 @@ def apply_rotary_pos_emb_partial(
     rot_dim = cos.shape[-1]
     q_rot, q_pass = q[..., :rot_dim], q[..., rot_dim:]
     k_rot, k_pass = k[..., :rot_dim], k[..., rot_dim:]
-    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
-    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    if q.device.type == "npu":
+        q_embed = _apply_npu_rotary_mul(q_rot, cos, sin)
+        k_embed = _apply_npu_rotary_mul(k_rot, cos, sin)
+    else:
+        q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
     return torch.cat((q_embed, q_pass), dim=-1), torch.cat((k_embed, k_pass), dim=-1)
 
 
