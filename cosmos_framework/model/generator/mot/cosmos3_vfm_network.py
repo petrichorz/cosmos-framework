@@ -1094,6 +1094,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                     visualization_mask = attention_meta.dense_gen_mask
                     if visualization_mask is None:
                         visualization_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout)
+                    else:
+                        visualization_mask = torch.logical_not(visualization_mask)
                     saved_path = visualize_dense_teacher_forcing_gen_mask(
                         visualization_mask,
                         teacher_forcing_layout,
