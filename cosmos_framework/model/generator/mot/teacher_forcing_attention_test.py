@@ -28,6 +28,7 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
 )
 from cosmos_framework.model.attention.backends import BACKEND_CHECK_MAP
 from cosmos_framework.model.attention.frontend import BACKEND_MAP, attention
+from cosmos_framework.model.attention.npu_fusion_attention.functions import _ascend_actual_seq_lengths
 from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
     build_packed_sequence,
@@ -78,6 +79,14 @@ def _make_inputs(dtype: torch.dtype = torch.float64):
 def test_masked_sdpa_is_registered_by_key():
     assert BACKEND_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention"
     assert BACKEND_CHECK_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention_check"
+
+
+def test_sequence_pack_offsets_keep_host_lengths():
+    *_, query_pack, _, _, _, _ = _make_teacher_forcing_packs()
+
+    assert query_pack["sample_offsets"]._cosmos_actual_seq_lengths == (5, 11)
+    assert query_pack["_causal_seq_offsets"]._cosmos_actual_seq_lengths == (1, 3)
+    assert _ascend_actual_seq_lengths(query_pack["sample_offsets"]) == [5, 11]
 
 
 @pytest.fixture
