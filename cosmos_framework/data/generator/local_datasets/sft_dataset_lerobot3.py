@@ -7,7 +7,7 @@
 # 承载 LeRobot 数据加载逻辑，原 sft_dataset.py（JSONL / S3 流程）保持一行不改。
 #
 # 与 sft_dataset.py 的关系（只 import 纯函数，不继承 SFTDataset）：
-#   - 复用 _select_caption / _DURATION_TEMPLATE / _RESOLUTION_TEMPLATE /
+#   - 复用 _select_caption / _CAUSAL_DURATION_TEMPLATE / _RESOLUTION_TEMPLATE /
 #     _MAX_CAPTION_TOKENS（import）
 #   - metadata 与视频加载都基于 lerobot 官方 package（参考 action 侧 cosmos3_action_lerobot）：
 #     LeRobotDatasetMetadata 读 info/episodes（自动 drop stats 列、保留 caption），
@@ -35,7 +35,6 @@ from cosmos_framework.data.generator.local_datasets.helper import (
     get_aspect_ratio,
 )
 from cosmos_framework.data.generator.local_datasets.sft_dataset import (
-    _DURATION_TEMPLATE,
     _MAX_CAPTION_TOKENS,
     _RESOLUTION_TEMPLATE,
     _select_caption,
@@ -52,6 +51,9 @@ from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
 _MULTI_RESOLUTION_TIERS = ("256", "480")
 # 多 fps 训练：候选 temporal_interval（保留 1/2、1/3、1/4）。
 _MULTI_FPS_INTERVALS = (2, 3, 4)
+
+# causal 训练：caption 只追加 FPS，不再追加时长（时长信息由帧数/时序隐式表达）。
+_CAUSAL_DURATION_TEMPLATE = "The video is of {fps:.0f} FPS."
 
 # lerobot 解码器 LRU 缓存容量（替换 lerobot 自带的「无界 dict」缓存，防止 worker 内存无界增长）。
 # ⚠️ 仅 torchcodec 后端生效：lerobot 的 pyav 路径（decode_video_frames_torchvision）每次新建
@@ -461,7 +463,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         ``decode_video_frames``），而非 S3 JSONL + ffmpeg。
       - 接口对齐：保持 IterableDataset 约定（``__iter__`` + ``shard_*`` 属性），
         供 ``RankPartitionedDataLoader`` 消费；返回 dict 结构与 ``SFTDataset`` 一致。
-      - 复用纯函数：``_select_caption`` / ``_DURATION_TEMPLATE`` /
+      - 复用纯函数：``_select_caption`` / ``_CAUSAL_DURATION_TEMPLATE`` /
         ``_RESOLUTION_TEMPLATE`` / ``_MAX_CAPTION_TOKENS``。
     """
 
@@ -754,7 +756,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             return None
         caption_key, caption, used_structured_json = selected
 
-        num_decoded_frames = video.shape[1]
         cond_fps = fps if self.conditioning_fps < 0 else self.conditioning_fps
         if self.conditioning_fps_noise_std > 0:
             noise_factor = np.exp(np.random.randn() * self.conditioning_fps_noise_std)
@@ -774,8 +775,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         # JSON, so skip the natural-language metadata suffixes for them. This also
         # makes the training prompt byte-match the inference prompt.
         if self.append_duration_fps_timestamps and not used_structured_json:
-            duration = num_decoded_frames / cond_fps
-            suffix = _DURATION_TEMPLATE.format(duration=duration, fps=cond_fps)
+            suffix = _CAUSAL_DURATION_TEMPLATE.format(fps=cond_fps)
             caption = caption + " " + suffix
         if self.append_resolution_info and not used_structured_json:
             suffix = _RESOLUTION_TEMPLATE.format(height=target_h, width=target_w)
