@@ -232,7 +232,9 @@ vision_sft_edge_lerobot3 = LazyDict(
                             video_feature_keywords=["top", "head"],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
                             caption_key="task",                   # episodes 表里的 caption 列名
                             min_frames=61,                        # 下界：episode 帧数少于 61 帧丢弃
-                            max_duration_s=61.0,                  # 上界：episode 时长超过 61 秒丢弃
+                            max_duration_s=61.0,                  # 上界：episode 时长超过 61 秒丢弃（0 关闭上限）
+                            long_video_policy="drop",             # 超长 episode 策略：drop 丢弃 / split 切分
+                            video_window_overlap_s=0.0,           # split 时相邻窗口重叠秒数
                             min_short_edge=0,
                             resolution="256",
                             use_multi_resolution=False,  # 多分辨率训练开关（256/480 随机，不上采样）
@@ -241,7 +243,9 @@ vision_sft_edge_lerobot3 = LazyDict(
                             use_system_prompt=False,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
                             video_backend="pyav",
+                            video_resize_mode="decode_transform",  # decode_transform 解码时 resize / post_decode 解码后 resize
                             video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
+                            max_video_fps=30.0,       # 超过此 fps 用整数 stride 下采样（0 关闭）
                         ),
                     ),
                 ),

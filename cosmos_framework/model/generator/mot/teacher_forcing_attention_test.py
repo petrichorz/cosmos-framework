@@ -27,7 +27,8 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     visualize_dense_teacher_forcing_gen_mask,
 )
 from cosmos_framework.model.attention.backends import BACKEND_CHECK_MAP
-from cosmos_framework.model.attention.frontend import BACKEND_MAP
+from cosmos_framework.model.attention.frontend import BACKEND_MAP, attention
+from cosmos_framework.model.attention.npu_fusion_attention.functions import _ascend_actual_seq_lengths
 from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
     build_packed_sequence,
@@ -80,6 +81,23 @@ def test_masked_sdpa_is_registered_by_key():
     assert BACKEND_CHECK_MAP["masked_sdpa"].__name__ == "masked_sdpa_attention_check"
 
 
+def test_sequence_pack_offsets_keep_host_lengths():
+    *_, query_pack, _, _, _, _ = _make_teacher_forcing_packs()
+
+    assert query_pack["sample_offsets"]._cosmos_actual_seq_lengths == (5, 11)
+    assert query_pack["_causal_seq_offsets"]._cosmos_actual_seq_lengths == (1, 3)
+    assert _ascend_actual_seq_lengths(query_pack["sample_offsets"]) == [5, 11]
+
+
+@pytest.fixture
+def cpu_attention(monkeypatch):
+    def run_on_cpu(*args, backend, **kwargs):
+        assert backend == "npu_fusion_attention"
+        return attention(*args, backend="sdpa", **kwargs)
+
+    monkeypatch.setattr("cosmos_framework.model.generator.mot.attention.attention", run_on_cpu)
+
+
 @pytest.mark.parametrize(
     ("configured", "has_layout", "expected"),
     [
@@ -107,7 +125,7 @@ def test_resolve_runtime_joint_attention_topology_rejects_unknown_value():
 def test_teacher_forcing_dense_attention_matches_independent_gqa_reference():
     query, key, value, allowed_mask = _make_inputs()
 
-    actual = teacher_forcing_dense_attention(query, key, value, allowed_mask)
+    actual = teacher_forcing_dense_attention(query, key, value, torch.logical_not(allowed_mask))
     expected = _explicit_attention_reference(query, key, value, allowed_mask)
 
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
@@ -119,7 +137,7 @@ def test_teacher_forcing_dense_attention_gradients_match_independent_reference()
     expected_inputs = [tensor.detach().clone().requires_grad_() for tensor in (query, key, value)]
     output_weight = torch.linspace(0.1, 1.0, query.numel(), dtype=query.dtype).reshape_as(query)
 
-    actual = teacher_forcing_dense_attention(*actual_inputs, allowed_mask, scale=0.7)
+    actual = teacher_forcing_dense_attention(*actual_inputs, torch.logical_not(allowed_mask), scale=0.7)
     expected = _explicit_attention_reference(*expected_inputs, allowed_mask, scale=0.7)
     (actual * output_weight).sum().backward()
     (expected * output_weight).sum().backward()
@@ -131,11 +149,12 @@ def test_teacher_forcing_dense_attention_gradients_match_independent_reference()
 
 def test_teacher_forcing_dense_attention_ignores_masked_values():
     query, key, value, allowed_mask = _make_inputs(torch.float32)
-    baseline = teacher_forcing_dense_attention(query, key, value, allowed_mask)
+    blocked_mask = torch.logical_not(allowed_mask)
+    baseline = teacher_forcing_dense_attention(query, key, value, blocked_mask)
     modified_value = value.clone()
     modified_value[-1] += 100_000
 
-    unchanged = teacher_forcing_dense_attention(query, key, modified_value, allowed_mask)
+    unchanged = teacher_forcing_dense_attention(query, key, modified_value, blocked_mask)
 
     torch.testing.assert_close(unchanged, baseline)
 
@@ -145,21 +164,22 @@ def test_teacher_forcing_dense_attention_ignores_masked_values():
     [
         (lambda q, k, v, m: (q, k, v, m.float()), "bool"),
         (lambda q, k, v, m: (q, k, v, m[:-1]), "shape"),
-        (lambda q, k, v, m: (q, k, v, m.index_fill(1, torch.arange(m.shape[1]), False)), "visible key"),
         (lambda q, k, v, m: (q[:, :3], k, v, m), "evenly divide"),
         (lambda q, k, v, m: (q, k[:, :, :2], v, m), "head dims"),
     ],
 )
 def test_teacher_forcing_dense_attention_rejects_invalid_inputs(mutate, error: str):
     query, key, value, allowed_mask = _make_inputs(torch.float32)
-    query, key, value, allowed_mask = mutate(query, key, value, allowed_mask)
+    blocked_mask = torch.logical_not(allowed_mask)
+    query, key, value, blocked_mask = mutate(query, key, value, blocked_mask)
 
     with pytest.raises((TypeError, ValueError), match=error):
-        teacher_forcing_dense_attention(query, key, value, allowed_mask)
+        teacher_forcing_dense_attention(query, key, value, blocked_mask)
 
 
-def test_teacher_forcing_dense_attention_can_skip_redundant_mask_content_validation(monkeypatch):
+def test_teacher_forcing_dense_attention_selects_masked_sdpa(monkeypatch):
     query, key, value, allowed_mask = _make_inputs(torch.float32)
+    blocked_mask = torch.logical_not(allowed_mask)
     captured_backend_kwargs = None
 
     def fake_attention(query, key, value, *, backend, backend_kwargs, scale):
@@ -173,17 +193,10 @@ def test_teacher_forcing_dense_attention_can_skip_redundant_mask_content_validat
         fake_attention,
     )
 
-    teacher_forcing_dense_attention(
-        query,
-        key,
-        value,
-        allowed_mask,
-        mask_is_prevalidated=True,
-    )
+    teacher_forcing_dense_attention(query, key, value, blocked_mask)
 
     assert captured_backend_kwargs is not None
-    assert captured_backend_kwargs["allowed_mask"] is allowed_mask
-    assert captured_backend_kwargs["validate_allowed_mask"] is False
+    assert captured_backend_kwargs["blocked_mask"] is blocked_mask
 
 
 def _geometry(block_size: int, history_blocks: int, num_samples: int = 1) -> TeacherForcingGeometry:
@@ -230,7 +243,7 @@ def test_build_packed_sequence_constructs_teacher_forcing_attention_info_without
     assert attention_meta.is_three_way is False
     torch.testing.assert_close(
         attention_meta.dense_gen_mask,
-        build_dense_teacher_forcing_gen_mask(layout),
+        torch.logical_not(build_dense_teacher_forcing_gen_mask(layout)),
     )
     assert natten_metadata is None
 
@@ -303,10 +316,10 @@ def test_per_sample_dense_attention_matches_global_output_and_gradients():
     global_mask = build_dense_teacher_forcing_gen_mask(layout)
     sample_masks = build_per_sample_teacher_forcing_gen_masks(layout)
 
-    global_output = teacher_forcing_dense_attention(*global_inputs, global_mask)
+    global_output = teacher_forcing_dense_attention(*global_inputs, torch.logical_not(global_mask))
     sample_output = teacher_forcing_per_sample_dense_attention(
         *sample_inputs,
-        sample_masks,
+        tuple(torch.logical_not(mask) for mask in sample_masks),
         sample_lens=layout.sample_lens,
         gen_sample_lens=layout.split_lens[1::2],
     )
@@ -360,7 +373,7 @@ def test_visualize_dense_teacher_forcing_gen_mask_saves_png(tmp_path):
         assert _pixel(8, 8) == (245, 166, 35)
 
 
-def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention():
+def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention(cpu_attention):
     layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs()
 
     output_pack, kv_to_store = dispatch_attention(
@@ -380,7 +393,7 @@ def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention(
     assert kv_to_store is None
 
 
-def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen_attention():
+def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen_attention(cpu_attention):
     layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs(
         "per_sample"
     )
@@ -390,14 +403,14 @@ def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen
         get_all_seq(query_pack)[layout.gen_query_indexes],
         get_all_seq(key_pack),
         get_all_seq(value_pack),
-        build_dense_teacher_forcing_gen_mask(layout),
+        torch.logical_not(build_dense_teacher_forcing_gen_mask(layout)),
     ).flatten(-2, -1)
 
     torch.testing.assert_close(get_gen_seq(output_pack)[: expected_gen.shape[0]], expected_gen)
     assert kv_to_store is None
 
 
-def test_dispatch_teacher_forcing_attention_uses_normalized_und_keys_for_gen():
+def test_dispatch_teacher_forcing_attention_uses_normalized_und_keys_for_gen(cpu_attention):
     layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs()
     normalized_all_keys = get_all_seq(key_pack).clone()
     und_indexes = torch.nonzero(layout.stream_ids == -1, as_tuple=True)[0]

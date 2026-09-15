@@ -760,9 +760,47 @@ class DataloaderTrainConfig(BaseModel):
     )
     max_duration_s: float = Field(
         default=61.0,
+        ge=0,
         description=(
-            "VFM only. episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃。"
-            "remapped 到 SFT dataset 的 'max_duration_s'。"
+            "VFM only. episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃；"
+            "设为 0 关闭时长上限。remapped 到 SFT dataset 的 'max_duration_s'。"
+        ),
+    )
+    long_video_policy: Literal["drop", "split"] = Field(
+        default="drop",
+        description=(
+            "VFM LeRobot only. Drop episodes above max_duration_s, or expand each long episode "
+            "into balanced independent clips. Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
+    video_window_overlap_s: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "VFM LeRobot only. Overlap in seconds between adjacent clips when long_video_policy='split'. "
+            "Must be smaller than max_duration_s when the duration cap is enabled."
+        ),
+    )
+    max_video_fps: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "VFM LeRobot only. Integer-stride downsample videos whose native FPS exceeds this cap. "
+            "Set 0 to disable FPS downsampling. Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
+    video_backend: Literal["torchcodec", "pyav"] = Field(
+        default="pyav",
+        description=(
+            "VFM LeRobot only. Video decoder backend, remapped to the nested SFT dataset. "
+            "Skipped on VLM datasets, which own their backend configuration."
+        ),
+    )
+    video_resize_mode: Literal["post_decode", "decode_transform"] = Field(
+        default="decode_transform",
+        description=(
+            "VFM LeRobot only. Resize source-resolution tensors after decoding, or resize each frame "
+            "inside the configured decoder path before materializing the batch tensor."
         ),
     )
     video_tolerance_s: float = Field(
@@ -772,7 +810,13 @@ class DataloaderTrainConfig(BaseModel):
             "（idx/fps）的偏差超过该值时抛 FrameTimestampError 跳过该样本。"
             "remapped 到 SFT dataset 的 'video_tolerance_s'。"
         ),
-    )    
+    )
+
+    @model_validator(mode="after")
+    def validate_video_window_overlap(self) -> "DataloaderTrainConfig":
+        if self.max_duration_s > 0 and self.video_window_overlap_s >= self.max_duration_s:
+            raise ValueError("video_window_overlap_s must be smaller than max_duration_s")
+        return self
 
 
 # ---------------------------------------------------------------- top
