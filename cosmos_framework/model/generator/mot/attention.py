@@ -298,6 +298,7 @@ def teacher_forcing_attention(
         max_seqlen_KV=packed_query_states["max_causal_len"],
         is_causal=True,
         causal_type=CausalType.DontCare if use_dont_care_mask else CausalType.TopLeft,
+        backend="npu_fusion_attention",
     )
     causal_out = causal_res.squeeze(0).flatten(-2, -1)  # type: ignore[union-attr]
 
@@ -313,7 +314,6 @@ def teacher_forcing_attention(
             get_all_seq(key_pack_for_gen),
             get_all_seq(packed_value_states),
             attention_meta.dense_gen_mask,
-            mask_is_prevalidated=True,
         )
     elif attention_meta.dense_mode == "per_sample":
         full_res = teacher_forcing_per_sample_dense_attention(
@@ -323,7 +323,6 @@ def teacher_forcing_attention(
             attention_meta.sample_gen_masks,
             sample_lens=attention_meta.layout.sample_lens,
             gen_sample_lens=gen_sample_lens,
-            masks_are_prevalidated=True,
         )
     else:
         raise ValueError(f"Unsupported teacher-forcing dense mode: {attention_meta.dense_mode!r}")
@@ -731,14 +730,16 @@ def build_packed_sequence(
         ):
             raise ValueError("PackedSequence splits do not match teacher-forcing layout geometry")
         if teacher_forcing_dense_mode == "global":
-            dense_gen_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout).to(device=device)
+            dense_gen_mask = build_dense_teacher_forcing_gen_mask(teacher_forcing_layout)
+            dense_gen_mask.logical_not_()
+            dense_gen_mask = dense_gen_mask.to(device=device)
             sample_gen_masks: tuple[torch.BoolTensor, ...] = ()
         elif teacher_forcing_dense_mode == "per_sample":
             dense_gen_mask = None
-            sample_gen_masks = tuple(
-                mask.to(device=device)
-                for mask in build_per_sample_teacher_forcing_gen_masks(teacher_forcing_layout)
-            )
+            sample_gen_masks = build_per_sample_teacher_forcing_gen_masks(teacher_forcing_layout)
+            for mask in sample_gen_masks:
+                mask.logical_not_()
+            sample_gen_masks = tuple(mask.to(device=device) for mask in sample_gen_masks)
         else:
             raise ValueError(
                 "teacher_forcing_dense_mode must be 'global' or 'per_sample', "

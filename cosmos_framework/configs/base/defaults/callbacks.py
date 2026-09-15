@@ -157,13 +157,15 @@ OPTIMIZATION_DIT_CALLBACKS = dict(
 VIZ_ONLINE_SAMPLING_CALLBACKS = dict(
     every_n_sample_reg=L(EveryNDrawSample)(
         every_n=5000,
-        save_s3=True,
+        save_s3=False,
+        save_local=True,
         do_x0_prediction=False,
     ),
     every_n_sample_ema=L(EveryNDrawSample)(
         every_n=5000,
         is_ema=True,
-        save_s3=True,
+        save_s3=False,
+        save_local=True,
         do_x0_prediction=False,
     ),
 )

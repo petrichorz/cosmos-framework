@@ -34,13 +34,13 @@ def masked_sdpa_attention_check(
 
     if is_varlen:
         target_fn(
-            "masked_sdpa accepts one dense packed sequence; sample isolation must be encoded in allowed_mask.",
+            "masked_sdpa accepts one dense packed sequence; sample isolation must be encoded in blocked_mask.",
             exception=ValueError,
         )
         return False
     if is_causal:
         target_fn(
-            "masked_sdpa does not combine is_causal with allowed_mask; encode all visibility in allowed_mask.",
+            "masked_sdpa does not combine is_causal with blocked_mask; encode all visibility in blocked_mask.",
             exception=ValueError,
         )
         return False

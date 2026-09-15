@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Explicit-mask dense attention implemented with PyTorch SDPA."""
+"""Explicit-mask dense attention for PyTorch and Ascend NPU."""
 
 import torch
 from torch import Tensor
@@ -26,7 +26,7 @@ def masked_sdpa_attention(
     backend_kwargs: dict | None = None,
     deterministic: bool = False,
 ) -> Tensor:
-    """Run one dense SDPA call using ``allowed_mask`` (``True`` means visible)."""
+    """Run explicit-mask attention using ``blocked_mask`` (``True`` means masked)."""
     del max_seqlen_Q, max_seqlen_KV
     assert_universal_tensor_checks(query, key, value)
     is_varlen = cumulative_seqlen_Q is not None or cumulative_seqlen_KV is not None
@@ -47,28 +47,35 @@ def masked_sdpa_attention(
         raise NotImplementedError("masked_sdpa does not expose logsumexp.")
 
     kwargs = backend_kwargs.copy() if backend_kwargs is not None else {}
-    allowed_mask = kwargs.pop("allowed_mask", None)
-    validate_allowed_mask = kwargs.pop("validate_allowed_mask", True)
+    blocked_mask = kwargs.pop("blocked_mask", None)
     if kwargs:
         raise ValueError(f"Unsupported masked_sdpa backend kwargs: {sorted(kwargs)}")
-    if not isinstance(validate_allowed_mask, bool):
-        raise TypeError(f"validate_allowed_mask must be bool, got {type(validate_allowed_mask).__name__}")
-    if allowed_mask is None:
-        raise ValueError("masked_sdpa requires backend_kwargs['allowed_mask'].")
-    if allowed_mask.dtype != torch.bool:
-        raise TypeError(f"allowed_mask must use bool dtype, got {allowed_mask.dtype}")
+    if blocked_mask is None:
+        raise ValueError("masked_sdpa requires backend_kwargs['blocked_mask'].")
+    if blocked_mask.dtype != torch.bool:
+        raise TypeError(f"blocked_mask must use bool dtype, got {blocked_mask.dtype}")
     expected_mask_shape = (query.shape[1], key.shape[1])
-    if tuple(allowed_mask.shape) != expected_mask_shape:
-        raise ValueError(f"allowed_mask must have shape {expected_mask_shape}, got {tuple(allowed_mask.shape)}")
-    if allowed_mask.device != query.device:
+    if tuple(blocked_mask.shape) != expected_mask_shape:
+        raise ValueError(f"blocked_mask must have shape {expected_mask_shape}, got {tuple(blocked_mask.shape)}")
+    if blocked_mask.device != query.device:
         raise ValueError(
-            f"allowed_mask must be on the same device as query, got {allowed_mask.device} and {query.device}"
+            f"blocked_mask must be on the same device as query, got {blocked_mask.device} and {query.device}"
         )
-    # Reducing a device mask and converting the result to Python bool synchronizes
-    # the host with the accelerator. Keep validation enabled for generic callers,
-    # but allow trusted mask builders to disable this repeated hot-path check.
-    if validate_allowed_mask and not bool(allowed_mask.any(dim=-1).all()):
-        raise ValueError("every masked_sdpa query must have at least one visible key")
+
+    if query.device.type == "npu":
+        import torch_npu
+
+        return torch_npu.npu_fusion_attention(
+            query,
+            key,
+            value,
+            head_num=query.shape[2],
+            input_layout="BSND",
+            atten_mask=blocked_mask,
+            scale=query.shape[-1] ** -0.5 if scale is None else scale,
+            keep_prob=1.0,
+            sparse_mode=1,
+        )[0]
 
     q = query.transpose(1, 2)
     k = key.transpose(1, 2)
@@ -82,7 +89,7 @@ def masked_sdpa_attention(
         q,
         k,
         v,
-        attn_mask=allowed_mask.unsqueeze(0).unsqueeze(0),
+        attn_mask=torch.logical_not(blocked_mask).unsqueeze(0).unsqueeze(0),
         dropout_p=0.0,
         scale=scale,
     )
