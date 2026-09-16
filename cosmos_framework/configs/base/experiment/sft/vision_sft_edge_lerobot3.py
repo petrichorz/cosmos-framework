@@ -243,7 +243,6 @@ vision_sft_edge_lerobot3 = LazyDict(
                             use_system_prompt=False,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
                             video_backend="pyav",
-                            video_resize_mode="decode_transform",  # decode_transform 解码时 resize / post_decode 解码后 resize
                             video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
                             max_video_fps=30.0,       # 超过此 fps 用整数 stride 下采样（0 关闭）
                         ),

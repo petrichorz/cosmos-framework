@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import threading
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -129,6 +130,8 @@ def decode_video_frames(
     timestamps: list[float],
     tolerance_s: float,
     backend: str | None = None,
+    resize_h: int | None = None,
+    resize_w: int | None = None,
 ) -> torch.Tensor:
     """
     Decodes video frames using the specified backend.
@@ -137,7 +140,9 @@ def decode_video_frames(
         video_path (Path): Path to the video file.
         timestamps (list[float]): List of timestamps to extract frames.
         tolerance_s (float): Allowed deviation in seconds for frame retrieval.
-        backend (str, optional): Backend to use for decoding. Defaults to "torchcodec" when available in the platform; otherwise, defaults to "pyav"..
+        backend (str, optional): Backend to use for decoding. Defaults to "torchcodec" when available in the platform; otherwise, defaults to "pyav".
+        resize_h (int, optional): If set (with ``resize_w``), resize frames to this height during/after decode. Returns ``uint8`` in ``[0, 255]`` when resizing; otherwise keeps the backend's native float32 ``[0, 1]`` contract.
+        resize_w (int, optional): If set (with ``resize_h``), resize frames to this width.
 
     Returns:
         torch.Tensor: Decoded frames.
@@ -147,11 +152,85 @@ def decode_video_frames(
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
+        return decode_video_frames_torchcodec(
+            video_path, timestamps, tolerance_s, resize_h=resize_h, resize_w=resize_w
+        )
     elif backend in ["pyav", "video_reader"]:
+        if resize_h is not None and resize_w is not None:
+            return decode_video_frames_pyav_resized(video_path, timestamps, tolerance_s, resize_h, resize_w)
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
+
+
+def decode_video_frames_pyav_resized(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+    resize_h: int,
+    resize_w: int,
+) -> torch.Tensor:
+    """pyav 后端在解码阶段直接 resize（bicubic），返回 uint8 [0,255] TCHW。
+
+    镜像 ``decode_video_frames_torchvision`` 的时间戳选择逻辑，区别在于每解出一帧
+    AVFrame 就调用 ``frame.reformat`` 一步完成 yuv→rgb24 + 缩放到 (resize_h, resize_w)，
+    不再产出全分辨率中间 tensor。
+
+    返回 ``[T, 3, resize_h, resize_w]`` uint8 ∈ [0,255]（已 resize）。
+    注意：与 PyTorch ``F.interpolate(bicubic)`` 数值有细微差异（libswscale vs PyTorch 内核），
+    训练可接受，但非逐像素等价。
+    """
+    from av.video.reformatter import Interpolation
+
+    video_path = str(video_path)
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+    loaded_frames: list[torch.Tensor] = []
+    loaded_ts: list[float] = []
+
+    container = av.open(video_path, metadata_errors="ignore")
+    try:
+        stream = container.streams.video[0]
+        offset = int(round(max(first_ts, 0) / stream.time_base))
+        container.seek(offset, backward=True, any_frame=False, stream=stream)
+        for frame in container.decode(video=0):
+            if frame.pts is None:
+                # 个别编码的帧可能缺 pts，跳过以免 frame.pts * time_base 抛 TypeError
+                continue
+            current_ts = float(frame.pts * frame.time_base)
+            resized = frame.reformat(
+                width=resize_w,
+                height=resize_h,
+                format="rgb24",
+                interpolation=Interpolation.BICUBIC,
+            )
+            # to_ndarray() 返回临时 numpy 数组，copy 一份避免悬空引用
+            loaded_frames.append(torch.from_numpy(resized.to_ndarray().copy()).permute(2, 0, 1))
+            loaded_ts.append(current_ts)
+            if current_ts >= last_ts:
+                break
+    finally:
+        container.close()
+
+    query_ts = torch.tensor(timestamps)
+    decoded_ts = torch.tensor(loaded_ts)
+    if not loaded_frames:
+        raise FrameTimestampError(f"No frames decoded from video: {video_path}")
+    distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
+    minimum, closest_indices = distances.min(1)
+    within_tolerance = minimum < tolerance_s
+    if not within_tolerance.all():
+        raise FrameTimestampError(
+            "One or several query timestamps unexpectedly violate the tolerance "
+            f"({minimum[~within_tolerance]} > tolerance_s={tolerance_s})."
+            f"\nqueried timestamps: {query_ts}"
+            f"\nloaded timestamps: {decoded_ts}"
+            f"\nvideo: {video_path}"
+            "\nbackend: pyav"
+        )
+
+    closest_frames = torch.stack([loaded_frames[index] for index in closest_indices])
+    return closest_frames
 
 
 def decode_video_frames_torchvision(
@@ -294,6 +373,77 @@ class VideoDecoderCache:
             return len(self._cache)
 
 
+LRU_VIDEO_CACHE_MAX_SIZE = 64
+
+
+class LRUVideoDecoderCache:
+    """LRU 版 torchcodec decoder 缓存（与官方 ``VideoDecoderCache`` 对比）。
+
+    与官方 ``VideoDecoderCache`` 的差异：
+    - ``seek_mode="exact"``：精确切 episode 帧边界（官方用 approximate，seek 更快但定位不够精确）。
+    - LRU 封顶：多 worker 下避免 decoder 索引 + FFmpeg 上下文无界增长（官方是无界 dict、只加不删）。
+
+    ⚠️ 仅 torchcodec 后端生效：pyav 路径（``decode_video_frames_torchvision``）每次调用都新建
+    ``VideoReader`` 并 close，完全不查 ``_default_decoder_cache``。
+    """
+
+    def __init__(self, max_size: int = LRU_VIDEO_CACHE_MAX_SIZE) -> None:
+        self._max_size = max_size
+        self._cache: "OrderedDict[str, tuple[Any, Any]]" = OrderedDict()
+        self._lock = Lock()
+
+    def get_decoder(self, video_path: str) -> Any:
+        import importlib.util
+
+        if importlib.util.find_spec("torchcodec"):
+            from torchcodec.decoders import VideoDecoder
+        else:
+            raise ImportError("torchcodec is required but not available.")
+
+        import fsspec
+
+        video_path = str(video_path)
+        with self._lock:
+            if video_path in self._cache:
+                self._cache.move_to_end(video_path)
+                return self._cache[video_path][0]
+
+            file_handle = fsspec.open(video_path).__enter__()
+            try:
+                decoder = VideoDecoder(file_handle, seek_mode="exact")
+            except Exception:
+                # 构造失败时，已打开的文件句柄必须显式关闭，否则坏文件会累积 fd。
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
+                raise
+            self._cache[video_path] = (decoder, file_handle)
+
+            while len(self._cache) > self._max_size:
+                _, (old_decoder, old_fh) = self._cache.popitem(last=False)
+                # torchcodec VideoDecoder 无 close API，靠 del 触发 C++ 引用计数释放。
+                del old_decoder
+                try:
+                    old_fh.close()
+                except Exception:
+                    pass
+            return decoder
+
+    def clear(self) -> None:
+        with self._lock:
+            for _, file_handle in self._cache.values():
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
+            self._cache.clear()
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+
 class FrameTimestampError(ValueError):
     """Helper error to indicate the retrieved timestamps exceed the queried ones"""
 
@@ -309,6 +459,8 @@ def decode_video_frames_torchcodec(
     tolerance_s: float,
     log_loaded_timestamps: bool = False,
     decoder_cache: VideoDecoderCache | None = None,
+    resize_h: int | None = None,
+    resize_w: int | None = None,
 ) -> torch.Tensor:
     """Loads frames associated with the requested timestamps of a video using torchcodec.
 
@@ -376,8 +528,18 @@ def decode_video_frames_torchcodec(
     if log_loaded_timestamps:
         logging.info(f"{closest_ts=}")
 
-    # convert to float32 in [0,1] range
-    closest_frames = (closest_frames / 255.0).type(torch.float32)
+    if resize_h is not None and resize_w is not None:
+        # resize + 转 uint8 [0,255]（torchcodec 无 decode 阶段 resize，需 post-decode 单独 resize）
+        import torch.nn.functional as F
+
+        closest_frames = closest_frames.float()
+        closest_frames = F.interpolate(
+            closest_frames, size=(resize_h, resize_w), mode="bicubic", align_corners=False
+        )
+        closest_frames = closest_frames.round().clamp(0, 255).to(torch.uint8)
+    else:
+        # 官方契约：float32 [0,1]
+        closest_frames = (closest_frames / 255.0).type(torch.float32)
 
     if not len(timestamps) == len(closest_frames):
         raise FrameTimestampError(

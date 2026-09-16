@@ -796,13 +796,6 @@ class DataloaderTrainConfig(BaseModel):
             "Skipped on VLM datasets, which own their backend configuration."
         ),
     )
-    video_resize_mode: Literal["post_decode", "decode_transform"] = Field(
-        default="decode_transform",
-        description=(
-            "VFM LeRobot only. Resize source-resolution tensors after decoding, or resize each frame "
-            "inside the configured decoder path before materializing the batch tensor."
-        ),
-    )
     video_tolerance_s: float = Field(
         default=0.034,
         description=(

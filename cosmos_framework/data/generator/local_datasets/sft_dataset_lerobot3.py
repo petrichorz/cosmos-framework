@@ -19,10 +19,8 @@ import json
 import math
 import os
 import random
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import Any, Optional
 
 import huggingface_hub.constants as _hf_const
@@ -56,16 +54,14 @@ _MULTI_FPS_INTERVALS = (2, 3, 4)
 # causal 训练：caption 只追加 FPS，不再追加时长（时长信息由帧数/时序隐式表达）。
 _CAUSAL_DURATION_TEMPLATE = "The video is of {fps:.0f} FPS."
 
-# lerobot 解码器 LRU 缓存容量（替换 lerobot 自带的「无界 dict」缓存，防止 worker 内存无界增长）。
+# lerobot 解码器 LRU 缓存：见 lerobot.datasets.video_utils.LRUVideoDecoderCache。
 # ⚠️ 仅 torchcodec 后端生效：lerobot 的 pyav 路径（decode_video_frames_torchvision）每次新建
 # reader、用完即关，不查 _default_decoder_cache。所以当前 video_backend="pyav" 下本缓存是 no-op。
-_LRU_VIDEO_CACHE_MAX_SIZE = 64
 
 # long_video_policy 支持的策略：drop（丢弃超长 episode）/ split（切成均衡、连续的窗口）。
 _SUPPORTED_LONG_VIDEO_POLICIES = {"drop", "split"}
-# 可配置视频解码后端与 resize 时机。
+# 可配置视频解码后端。
 _SUPPORTED_VIDEO_BACKENDS = {"pyav", "torchcodec"}
-_SUPPORTED_VIDEO_RESIZE_MODES = {"decode_transform", "post_decode"}
 
 _hf_offline_applied = False
 _decoder_cache_patched = False
@@ -86,79 +82,7 @@ def _ensure_hf_hub_offline() -> None:
     _hf_offline_applied = True
 
 
-class _LRUVideoDecoderCache:
-    """LRU 版 torchcodec decoder 缓存，替换 lerobot 的 ``video_utils.VideoDecoderCache``。
-
-    与 action 侧 ``cosmos3_action_lerobot._LRUVideoDecoderCache`` 的唯一差异：
-    ``seek_mode="exact"``（vision SFT 需精确切 episode 帧边界，action 用 approximate）。
-
-    lerobot 自带的 ``VideoDecoderCache`` 是「无界 dict、只加不删」，多 worker 场景下
-    decoder 索引 + FFmpeg 上下文会持续累积导致内存上涨；这里用 LRU 封顶。
-
-    ⚠️ 仅 torchcodec 后端生效：lerobot 的 pyav 路径（``decode_video_frames_torchvision``）
-    每次调用都新建 ``VideoReader`` 并 close，完全不查 ``_default_decoder_cache``。因此
-    在 ``video_backend="pyav"`` 下本类永远不会被触发（no-op）；只有切到 torchcodec 后，
-    ``decode_video_frames_torchcodec`` 才会经 ``_default_decoder_cache.get_decoder()`` 复用它。
-    """
-
-    def __init__(self, max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
-        self._max_size = max_size
-        self._cache: "OrderedDict[str, tuple[Any, Any]]" = OrderedDict()
-        self._lock = Lock()
-
-    def get_decoder(self, video_path: str) -> Any:
-        import importlib.util
-
-        if importlib.util.find_spec("torchcodec"):
-            from torchcodec.decoders import VideoDecoder
-        else:
-            raise ImportError("torchcodec is required but not available.")
-
-        import fsspec
-
-        video_path = str(video_path)
-        with self._lock:
-            if video_path in self._cache:
-                self._cache.move_to_end(video_path)
-                return self._cache[video_path][0]
-
-            file_handle = fsspec.open(video_path).__enter__()
-            try:
-                decoder = VideoDecoder(file_handle, seek_mode="exact")
-            except Exception:
-                # 构造失败时，已打开的文件句柄必须显式关闭，否则坏文件会累积 fd。
-                try:
-                    file_handle.close()
-                except Exception:
-                    pass
-                raise
-            self._cache[video_path] = (decoder, file_handle)
-
-            while len(self._cache) > self._max_size:
-                _, (old_decoder, old_fh) = self._cache.popitem(last=False)
-                # torchcodec VideoDecoder 无 close API，靠 del 触发 C++ 引用计数释放。
-                del old_decoder
-                try:
-                    old_fh.close()
-                except Exception:
-                    pass
-            return decoder
-
-    def clear(self) -> None:
-        with self._lock:
-            for _, file_handle in self._cache.values():
-                try:
-                    file_handle.close()
-                except Exception:
-                    pass
-            self._cache.clear()
-
-    def size(self) -> int:
-        with self._lock:
-            return len(self._cache)
-
-
-def _patch_decoder_cache(max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
+def _patch_decoder_cache(max_size: int = None) -> None:
     """把 lerobot 模块级 ``_default_decoder_cache`` 替换为 LRU 版，防止无界内存增长。
 
     幂等，每个进程只 patch 一次。参考 action 侧 ``cosmos3_action_lerobot._patch_decoder_cache``。
@@ -170,65 +94,10 @@ def _patch_decoder_cache(max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE) -> None:
     global _decoder_cache_patched
     if _decoder_cache_patched:
         return
-    _vu._default_decoder_cache = _LRUVideoDecoderCache(max_size=max_size)
+    if max_size is None:
+        max_size = _vu.LRU_VIDEO_CACHE_MAX_SIZE
+    _vu._default_decoder_cache = _vu.LRUVideoDecoderCache(max_size=max_size)
     _decoder_cache_patched = True
-
-
-class _LeRobotVideoDecoderCache:
-    """按 (video_path, resize_hw) 缓存 torchcodec VideoDecoder 的 LRU 缓存。
-
-    本类给 ``LeRobotSFTDataset`` 自己的 torchcodec 后端使用，与 ``_LRUVideoDecoderCache``
-    （patch lerobot 全局 ``_default_decoder_cache``）职责不同：这里支持 decode 阶段的
-    resize（decode_transform 模式下 torchcodec 需要带 transforms 的 decoder）。
-    ``seek_mode="exact"``（精确帧定位，vision SFT 需切准 episode 帧边界）。
-    """
-
-    def __init__(self, max_size: int = 64):
-        self._max_size = max_size
-        self._cache: "OrderedDict[tuple[str, tuple[int, int] | None], tuple]" = OrderedDict()
-        self._lock = Lock()
-
-    def get_decoder(self, video_path: str, resize_hw: tuple[int, int] | None = None):
-        import fsspec
-        from torchcodec.decoders import VideoDecoder
-        from torchcodec.transforms import Resize
-
-        cache_key = (video_path, resize_hw)
-        with self._lock:
-            if cache_key in self._cache:
-                self._cache.move_to_end(cache_key)
-                return self._cache[cache_key][0]
-
-            file_handle = fsspec.open(video_path).__enter__()
-            decoder_kwargs = {"seek_mode": "exact"}
-            if resize_hw is not None:
-                decoder_kwargs["transforms"] = [Resize(resize_hw)]
-            try:
-                decoder = VideoDecoder(file_handle, **decoder_kwargs)
-            except Exception:
-                file_handle.close()
-                raise
-            self._cache[cache_key] = (decoder, file_handle)
-
-            while len(self._cache) > self._max_size:
-                _, (old_decoder, old_fh) = self._cache.popitem(last=False)
-                del old_decoder
-                try:
-                    old_fh.close()
-                except Exception:
-                    pass
-            return decoder
-
-    def discard(self, video_path: str) -> None:
-        """Close and remove every cached decoder variant for one video path."""
-        matching_keys = [key for key in self._cache if key[0] == video_path]
-        with self._lock:
-            for key in matching_keys:
-                _, file_handle = self._cache.pop(key)
-                try:
-                    file_handle.close()
-                except Exception:
-                    pass
 
 
 # ============================================================================
@@ -652,20 +521,14 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
-        video_resize_mode: str = "decode_transform",
         video_tolerance_s: float = 0.034,
         max_video_fps: float = 30.0,
-        decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
+        decoder_cache_max_size: int = _vu.LRU_VIDEO_CACHE_MAX_SIZE,
     ):
         assert temporal_compression_factor >= 1, "temporal_compression_factor must be >= 1"
         if video_backend is not None and video_backend not in _SUPPORTED_VIDEO_BACKENDS:
             raise ValueError(
                 f"Unsupported video_backend={video_backend!r}; expected one of {sorted(_SUPPORTED_VIDEO_BACKENDS)}"
-            )
-        if video_resize_mode not in _SUPPORTED_VIDEO_RESIZE_MODES:
-            raise ValueError(
-                f"Unsupported video_resize_mode={video_resize_mode!r}; "
-                f"expected one of {sorted(_SUPPORTED_VIDEO_RESIZE_MODES)}"
             )
         if video_tolerance_s <= 0:
             raise ValueError(f"video_tolerance_s must be positive, got {video_tolerance_s}")
@@ -703,16 +566,8 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         self.use_multi_fps = use_multi_fps
         # 视频后端：默认走 get_safe_default_codec()（torchcodec 可用则用 torchcodec，否则 pyav）。
         self.video_backend = video_backend if video_backend else _vu.get_safe_default_codec()
-        self.video_resize_mode = video_resize_mode
         self.video_tolerance_s = video_tolerance_s
         self.max_video_fps = float(max_video_fps)
-        # torchcodec 后端用本类自己的 LRU decoder cache（支持 decode 阶段 resize）；
-        # pyav 每次重建 reader、不共享 decoder，故仅 torchcodec 时启用。
-        self._decoder_cache = (
-            _LeRobotVideoDecoderCache(max_size=decoder_cache_max_size)
-            if self.video_backend == "torchcodec"
-            else None
-        )
 
         # They will be set by the RankPartitionedDataLoader
         self.shard_world_size = None
@@ -739,147 +594,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             log.warning(f"Text ids are too long, truncating: {len(text_ids)} > {self.max_caption_tokens}")
         text_ids = text_ids[: self.max_caption_tokens]
         return text_ids, caption
-
-    def _decode_video_frames_pyav_resized(
-        self,
-        video_path: str,
-        timestamps: list[float],
-        resize_h: int,
-        resize_w: int,
-    ) -> torch.Tensor:
-        """用底层 PyAV 在解码阶段直接 resize（bicubic），避免外部 F.interpolate。
-
-        镜像 lerobot ``decode_video_frames_torchvision`` 的时间戳选择逻辑，区别在于
-        每解出一帧 AVFrame 就调用 ``frame.reformat`` 一步完成 yuv→rgb24 + 缩放到
-        (resize_h, resize_w)，不再产出全分辨率中间 tensor。
-
-        返回 ``[T, 3, resize_h, resize_w]`` uint8 ∈ [0,255]（已 resize）。
-        注意：与 PyTorch ``F.interpolate(bicubic)`` 数值有细微差异（libswscale vs
-        PyTorch 内核），训练可接受，但非逐像素等价。
-        """
-        import av
-        from av.video.reformatter import Interpolation
-
-        first_ts = min(timestamps)
-        last_ts = max(timestamps)
-        loaded_frames: list[torch.Tensor] = []
-        loaded_ts: list[float] = []
-
-        container = av.open(video_path, metadata_errors="ignore")
-        try:
-            stream = container.streams.video[0]
-            offset = int(round(max(first_ts, 0) / stream.time_base))
-            container.seek(offset, backward=True, any_frame=False, stream=stream)
-            for frame in container.decode(video=0):
-                if frame.pts is None:
-                    # 个别编码的帧可能缺 pts，跳过以免 frame.pts * time_base 抛 TypeError
-                    continue
-                current_ts = float(frame.pts * frame.time_base)
-                resized = frame.reformat(
-                    width=resize_w,
-                    height=resize_h,
-                    format="rgb24",
-                    interpolation=Interpolation.BICUBIC,
-                )
-                # to_ndarray() 返回临时 numpy 数组，copy 一份避免悬空引用
-                loaded_frames.append(torch.from_numpy(resized.to_ndarray().copy()).permute(2, 0, 1))
-                loaded_ts.append(current_ts)
-                if current_ts >= last_ts:
-                    break
-        finally:
-            container.close()
-
-        query_ts = torch.tensor(timestamps)
-        decoded_ts = torch.tensor(loaded_ts)
-        if not loaded_frames:
-            raise FrameTimestampError(f"No frames decoded from video: {video_path}")
-        distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
-        minimum, closest_indices = distances.min(1)
-        within_tolerance = minimum < self.video_tolerance_s
-        if not within_tolerance.all():
-            raise FrameTimestampError(
-                "One or several query timestamps unexpectedly violate the tolerance "
-                f"({minimum[~within_tolerance]} > video_tolerance_s={self.video_tolerance_s})."
-                f"\nqueried timestamps: {query_ts}"
-                f"\nloaded timestamps: {decoded_ts}"
-                f"\nvideo: {video_path}"
-                "\nbackend: pyav"
-            )
-
-        closest_frames = torch.stack([loaded_frames[index] for index in closest_indices])
-        return closest_frames
-
-    def _decode_video_frames_torchcodec(
-        self,
-        video_path: str,
-        start_frame: int,
-        end_frame: int,
-        temporal_interval: int,
-        resize_hw: tuple[int, int] | None = None,
-    ) -> torch.Tensor:
-        """Decode an exact frame range with the cached TorchCodec path."""
-        assert self._decoder_cache is not None
-        decoder = self._decoder_cache.get_decoder(video_path, resize_hw=resize_hw)
-
-        # torchcodec uses a half-open [start, stop) range.
-        frame_batch = decoder.get_frames_in_range(
-            start=start_frame,
-            stop=end_frame + 1,
-            step=temporal_interval,
-        )
-        return frame_batch.data  # [N, C, H, W] uint8
-
-    def _decode_video_frames_pyav(
-        self,
-        video_path: str,
-        timestamps: list[float],
-        resize_hw: tuple[int, int] | None = None,
-    ) -> torch.Tensor:
-        """Decode requested timestamps through PyAV, optionally resizing before materialization."""
-        if resize_hw is None:
-            from lerobot.datasets.video_utils import decode_video_frames
-
-            data = decode_video_frames(
-                video_path,
-                timestamps,
-                tolerance_s=self.video_tolerance_s,
-                backend="pyav",
-            )
-            # lerobot 返回 float32 TCHW [0,1]；统一到 uint8 [0,255] 契约
-            return data.mul(255).round().clamp(0, 255).to(torch.uint8)
-        resize_h, resize_w = resize_hw
-        return self._decode_video_frames_pyav_resized(video_path, timestamps, resize_h, resize_w)
-
-    def _decode_video_frames(
-        self,
-        video_path: str,
-        start_frame: int,
-        end_frame: int,
-        temporal_interval: int,
-        original_fps: float,
-        resize_h: int,
-        resize_w: int,
-    ) -> torch.Tensor:
-        """按 backend + resize_mode 解码帧区间，返回 ``[T, 3, resize_h, resize_w]`` uint8。"""
-        decode_resize_hw = (resize_h, resize_w) if self.video_resize_mode == "decode_transform" else None
-
-        if self.video_backend == "torchcodec":
-            data = self._decode_video_frames_torchcodec(
-                video_path, start_frame, end_frame, temporal_interval, resize_hw=decode_resize_hw
-            )
-        else:
-            frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
-            timestamps = [idx / original_fps for idx in frame_indices]
-            data = self._decode_video_frames_pyav(video_path, timestamps, resize_hw=decode_resize_hw)
-
-        if self.video_resize_mode == "post_decode":
-            import torch.nn.functional as F
-
-            data = data.float()
-            data = F.interpolate(data, size=(resize_h, resize_w), mode="bicubic", align_corners=False)
-            data = data.round().clamp(0, 255).to(torch.uint8)
-
-        return data
 
     def process_one_sample(self, ds_idx: int, ep_idx: int, clip_idx: int) -> dict | None:
         """Process a single LeRobot SFT sample.
@@ -964,16 +678,18 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
 
         fps = original_fps / temporal_interval
 
-        # 【lerobot 加载】按 backend + resize_mode 解码帧区间（返回 uint8 [T,3,resize_h,resize_w]）
+        # 【lerobot 加载】帧号 → 绝对时间戳 → decode_video_frames 按 backend 解码
+        # （pyav 在解码时 resize；torchcodec post-decode 单独 resize，两者都返回 uint8 [T,3,resize_h,resize_w]）
+        frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
+        timestamps = [idx / original_fps for idx in frame_indices]
         try:
-            video_frames = self._decode_video_frames(
+            video_frames = _vu.decode_video_frames(
                 input_video_path,
-                start_frame,
-                end_frame,
-                temporal_interval,
-                original_fps,
-                resize_h,
-                resize_w,
+                timestamps,
+                self.video_tolerance_s,
+                self.video_backend,
+                resize_h=resize_h,
+                resize_w=resize_w,
             )
         except FrameTimestampError as e:
             # 时间戳与视频 pts 偏差超过 video_tolerance_s 时抛 FrameTimestampError。
@@ -985,8 +701,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             return None
         except Exception as e:
             # 其它解码失败（坏文件、解码器异常等），同样跳过该样本。
-            if self._decoder_cache is not None:
-                self._decoder_cache.discard(input_video_path)
             log.warning(
                 f"Failed to decode video for sample {uuid} "
                 f"(start={start_frame}, end={end_frame}, path={input_video_path}): "
@@ -1197,10 +911,9 @@ def get_sft_dataset_from_lerobot(
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
     video_backend: str = "pyav",
-    video_resize_mode: str = "decode_transform",
     video_tolerance_s: float = 0.034,
     max_video_fps: float = 30.0,
-    decoder_cache_max_size: int = _LRU_VIDEO_CACHE_MAX_SIZE,
+    decoder_cache_max_size: int = _vu.LRU_VIDEO_CACHE_MAX_SIZE,
     **kwargs,
 ) -> LeRobotSFTDataset:
     """LeRobot 版 get_sft_dataset，动态加载 LeRobot 数据集。
@@ -1272,7 +985,6 @@ def get_sft_dataset_from_lerobot(
         conditioning_config=conditioning_config,
         temporal_compression_factor=temporal_compression_factor,
         video_backend=video_backend,
-        video_resize_mode=video_resize_mode,
         video_tolerance_s=video_tolerance_s,
         max_video_fps=max_video_fps,
         decoder_cache_max_size=decoder_cache_max_size,

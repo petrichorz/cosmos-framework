@@ -107,7 +107,5 @@ video_window_overlap_s = 5.0
 max_video_fps = 30.0
 # 视频解码后端：pyav / torchcodec
 video_backend = "pyav"
-# resize 时机：decode_transform 解码时 resize / post_decode 解码后 resize
-video_resize_mode = "decode_transform"
 # PyAV 时间戳匹配容差（秒）
 video_tolerance_s = 0.034
