@@ -152,3 +152,32 @@ def test_teacher_forcing_network_vertical_slice_backpropagates_through_both_stre
     assert parameter_grads
     assert all(torch.isfinite(grad).all() for grad in parameter_grads)
     assert any(grad.abs().sum() > 0 for grad in parameter_grads)
+
+
+def test_grouped_tnd_network_matches_dense_parameter_gradients(monkeypatch):
+    import copy
+
+    from cosmos_framework.model.attention import attention
+
+    def cpu_attention(*args, backend, **kwargs):
+        return attention(*args, backend="sdpa", **kwargs)
+
+    monkeypatch.setattr("cosmos_framework.model.generator.mot.attention.attention", cpu_attention)
+    torch.manual_seed(1234)
+    dense = _make_network()
+    grouped = copy.deepcopy(dense)
+    grouped.config.teacher_forcing_dense_mode = "grouped_tnd"
+    dense_sequence, dense_clean, dense_noisy = _make_sequence()
+    grouped_sequence, grouped_clean, grouped_noisy = _make_sequence()
+    expected = dense(dense_sequence)["preds_vision"][0]
+    actual = grouped(grouped_sequence)["preds_vision"][0]
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+    expected.square().mean().backward()
+    actual.square().mean().backward()
+    for x, y in [(grouped_clean, dense_clean), (grouped_noisy, dense_noisy)]:
+        assert x.grad is not None and x.grad.abs().sum() > 0
+        torch.testing.assert_close(x.grad, y.grad, atol=1e-6, rtol=1e-5)
+    for (name, x), (_, y) in zip(grouped.named_parameters(), dense.named_parameters(), strict=True):
+        assert (x.grad is None) == (y.grad is None), name
+        if x.grad is not None:
+            torch.testing.assert_close(x.grad, y.grad, atol=1e-6, rtol=1e-5, msg=name)

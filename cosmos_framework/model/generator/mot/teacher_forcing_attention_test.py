@@ -283,9 +283,7 @@ def test_per_sample_masks_match_global_mask_diagonal_blocks():
 
     query_offset = 0
     key_offset = 0
-    for sample_mask, sample_len, gen_len in zip(
-        sample_masks, layout.sample_lens, layout.split_lens[1::2], strict=True
-    ):
+    for sample_mask, sample_len, gen_len in zip(sample_masks, layout.sample_lens, layout.split_lens[1::2], strict=True):
         torch.testing.assert_close(
             sample_mask,
             global_mask[
@@ -394,9 +392,7 @@ def test_dispatch_teacher_forcing_attention_matches_unified_dense_gen_attention(
 
 
 def test_dispatch_per_sample_teacher_forcing_attention_matches_unified_dense_gen_attention(cpu_attention):
-    layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs(
-        "per_sample"
-    )
+    layout, _, _, _, query_pack, key_pack, value_pack, attention_meta, _ = _make_teacher_forcing_packs("per_sample")
 
     output_pack, kv_to_store = dispatch_attention(query_pack, key_pack, value_pack, attention_meta)
     expected_gen = teacher_forcing_dense_attention(
@@ -456,3 +452,23 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
             num_layers=1,
             teacher_forcing_layout=layout,
         )
+
+
+def test_grouped_tnd_dispatch_matches_dense_without_building_masks(cpu_attention, monkeypatch):
+    def reject_mask(*args, **kwargs):
+        raise AssertionError("grouped_tnd must not build a dense mask")
+
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_dense_teacher_forcing_gen_mask", reject_mask
+    )
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_per_sample_teacher_forcing_gen_masks", reject_mask
+    )
+    layout, _, _, _, q, k, v, meta, _ = _make_teacher_forcing_packs("grouped_tnd")
+    result, _ = dispatch_attention(q, k, v, meta)
+    expected = teacher_forcing_dense_attention(
+        get_gen_seq(q), get_all_seq(k), get_all_seq(v), ~build_dense_teacher_forcing_gen_mask(layout)
+    )
+    torch.testing.assert_close(get_gen_seq(result).reshape_as(expected), expected)
+    assert meta.dense_gen_mask is None
+    assert meta.sample_gen_masks == ()

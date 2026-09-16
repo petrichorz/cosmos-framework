@@ -74,9 +74,9 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
             "teacher-forcing history_blocks range must satisfy 1 <= min <= max, "
             f"got {config.teacher_forcing_history_blocks_min}..{config.teacher_forcing_history_blocks_max}"
         )
-    if config.teacher_forcing_dense_mode not in {"global", "per_sample"}:
+    if config.teacher_forcing_dense_mode not in {"global", "per_sample", "grouped_tnd"}:
         raise ValueError(
-            f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {config.teacher_forcing_dense_mode!r}"
+            f"teacher_forcing_dense_mode must be 'global', 'per_sample' or 'grouped_tnd', got {config.teacher_forcing_dense_mode!r}"
         )
 
 

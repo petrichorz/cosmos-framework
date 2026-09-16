@@ -90,9 +90,9 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.temporal_compression_factor_vision = temporal_compression_factor_vision
         self.natten_parameter_list = natten_parameter_list
         self.video_temporal_causal = video_temporal_causal
-        if teacher_forcing_dense_mode not in {"global", "per_sample"}:
+        if teacher_forcing_dense_mode not in {"global", "per_sample", "grouped_tnd"}:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
+                "teacher_forcing_dense_mode must be 'global', 'per_sample' or 'grouped_tnd', "
                 f"got {teacher_forcing_dense_mode!r}"
             )
         self.teacher_forcing_dense_mode = teacher_forcing_dense_mode

@@ -11,9 +11,14 @@ import torch
 import torch.distributed as dist
 import torch.utils.data
 
-from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.ascend_benchmark import AscendBenchmark
 from cosmos_framework.utils.context_managers import distributed_init
-from cosmos_framework.utils.profiling import maybe_enable_memory_snapshot, maybe_enable_nsys_profiling, maybe_enable_profiling
+from cosmos_framework.utils.flags import INTERNAL
+from cosmos_framework.utils.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_nsys_profiling,
+    maybe_enable_profiling,
+)
 
 try:
     from megatron.core import parallel_state
@@ -23,12 +28,11 @@ except ImportError:
     USE_MEGATRON = False
 
 
-from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import callback, distributed, ema, log, misc
 from cosmos_framework.utils.checkpointer import Checkpointer
+from cosmos_framework.utils.lazy_config import LazyConfig, instantiate
 from cosmos_framework.utils.misc import StragglerDetectorV2
-
 
 
 class ImaginaireTrainer:
@@ -246,6 +250,7 @@ class ImaginaireTrainer:
             # callbacks) so data-augmentation randomness starts from a deterministic state
             # regardless of how much RNG state init consumed.
             misc.set_random_seed(seed=self.config.trainer.seed, by_rank=True)
+        benchmark = AscendBenchmark()
         with (
             maybe_enable_profiling(self.config, global_step=iteration) as torch_profiler,
             maybe_enable_memory_snapshot(self.config, global_step=iteration) as memory_profiler,
@@ -254,10 +259,16 @@ class ImaginaireTrainer:
             while True:
                 dataloader_train_iter = iter(dataloader_train)
                 while True:
+                    # Stop before fetching an unused (potentially slow) video batch.
+                    if iteration >= self.config.trainer.max_iter:
+                        _end_training = True
+                        break
+                    benchmark.begin(iteration)
                     self.callbacks.on_before_dataloading(iteration)
                     try:
                         with (
                             self.training_timer("dataloader_train"),
+                            torch.profiler.record_function("COSMOS::DATALOADING"),
                             self.straggler_detector.profile_section(
                                 "dataloading",
                                 self.config.trainer.straggler_detection.analyze_dataloading,
@@ -280,7 +291,8 @@ class ImaginaireTrainer:
                         _end_training = True
                         break
                     # Move all tensors in the data batch to GPU device.
-                    data_batch = misc.to(data_batch, device="cuda")
+                    with torch.profiler.record_function("COSMOS::HOST_TO_DEVICE"):
+                        data_batch = misc.to(data_batch, device="cuda")
                     # The actual training step.
                     self.callbacks.on_training_step_start(model, data_batch, iteration=iteration)
                     self.callbacks.on_training_step_batch_start(model, data_batch, iteration=iteration)
@@ -315,6 +327,7 @@ class ImaginaireTrainer:
                     # This iteration is successful; reset the timeout signal.
                     signal.alarm(self.config.trainer.timeout_period)
                     self.straggler_detector.generate_report(iteration)
+                    benchmark.end(iteration, data_batch)
                     if torch_profiler:
                         torch_profiler.step()
                     if memory_profiler:
@@ -326,7 +339,10 @@ class ImaginaireTrainer:
         log.success("Done with training.")
         if sm_carveout:
             torch._C._set_sm_carveout_experimental(None)
-        if iteration % self.config.checkpoint.save_iter != 0:
+        if (
+            iteration % self.config.checkpoint.save_iter != 0
+            and os.environ.get("COSMOS_PERF_SKIP_FINAL_CHECKPOINT", "0") != "1"
+        ):
             self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
         self.callbacks.on_train_end(model, iteration=iteration)
         self.checkpointer.finalize()
@@ -364,7 +380,7 @@ class ImaginaireTrainer:
         # Only let DDP sync gradient at the last iteration of the gradient accumulation window
         with distributed.ddp_sync_grad(model_ddp, grad_accum_iter == self.config.trainer.grad_accum_iter - 1):
             self.callbacks.on_before_forward(iteration=iteration)
-            with self.training_timer("forward"):
+            with self.training_timer("forward"), torch.profiler.record_function("COSMOS::FORWARD"):
                 with self.straggler_detector.profile_section(
                     "fwd", self.config.trainer.straggler_detection.analyze_forward
                 ):
@@ -372,7 +388,7 @@ class ImaginaireTrainer:
             self.callbacks.on_after_forward(iteration=iteration)
             model = model_ddp.module if self.config.trainer.distributed_parallelism == "ddp" else model_ddp
             self.callbacks.on_before_backward(model, loss, iteration=iteration)
-            with self.training_timer("backward"):
+            with self.training_timer("backward"), torch.profiler.record_function("COSMOS::BACKWARD"):
                 with self.straggler_detector.profile_section(
                     "bwd", self.config.trainer.straggler_detection.analyze_backward
                 ):
@@ -382,7 +398,7 @@ class ImaginaireTrainer:
             self.callbacks.on_after_backward(model, iteration=iteration)
         grad_accum_iter += 1
         if grad_accum_iter == self.config.trainer.grad_accum_iter:
-            with self.training_timer("optimizer_step"):
+            with self.training_timer("optimizer_step"), torch.profiler.record_function("COSMOS::OPTIMIZER_STEP"):
                 with self.straggler_detector.profile_section(
                     "opt", self.config.trainer.straggler_detection.analyze_optimizer
                 ):

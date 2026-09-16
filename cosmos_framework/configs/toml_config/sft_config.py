@@ -368,11 +368,11 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
     )
-    teacher_forcing_dense_mode: Literal["global", "per_sample"] = Field(
+    teacher_forcing_dense_mode: Literal["global", "per_sample", "grouped_tnd"] = Field(
         default="global",
         description=(
             "Scheme-B GEN attention execution: one global explicit mask, or one dense attention "
-            "call per packed sample to skip cross-sample QK regions."
+            "call per packed sample, or maskless grouped_tnd over exact visible KV sets."
         ),
     )
     teacher_forcing_visualize_sdpa_mask: bool = Field(
