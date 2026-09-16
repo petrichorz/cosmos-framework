@@ -1,0 +1,85 @@
+{
+  "input_metadata_equal": true,
+  "packing_equal_except_history": true,
+  "block": 1,
+  "warmup": 3,
+  "measured": 5,
+  "runs": [
+    {
+      "history": 1,
+      "mean_seconds": 14.4916357900016,
+      "peak_allocated_gib": 37.4397873878479,
+      "peak_reserved_gib": 56.298828125,
+      "steps": [
+        {
+          "step": 4,
+          "seconds": 14.626368454890326,
+          "allocated_gib": 32.91386699676514,
+          "reserved_gib": 47.1875
+        },
+        {
+          "step": 5,
+          "seconds": 12.181551655987278,
+          "allocated_gib": 28.829246997833252,
+          "reserved_gib": 47.1875
+        },
+        {
+          "step": 6,
+          "seconds": 14.491989827947691,
+          "allocated_gib": 32.48771905899048,
+          "reserved_gib": 47.1875
+        },
+        {
+          "step": 7,
+          "seconds": 13.967941012000665,
+          "allocated_gib": 32.057405948638916,
+          "reserved_gib": 50.99609375
+        },
+        {
+          "step": 8,
+          "seconds": 17.190327999182045,
+          "allocated_gib": 37.4397873878479,
+          "reserved_gib": 56.298828125
+        }
+      ]
+    },
+    {
+      "history": 64,
+      "mean_seconds": 35.340231232810766,
+      "peak_allocated_gib": 37.4974308013916,
+      "peak_reserved_gib": 56.37890625,
+      "steps": [
+        {
+          "step": 4,
+          "seconds": 37.3515452479478,
+          "allocated_gib": 32.96599006652832,
+          "reserved_gib": 46.876953125
+        },
+        {
+          "step": 5,
+          "seconds": 29.712092945119366,
+          "allocated_gib": 28.876330852508545,
+          "reserved_gib": 47.06640625
+        },
+        {
+          "step": 6,
+          "seconds": 36.77179115591571,
+          "allocated_gib": 32.5419487953186,
+          "reserved_gib": 47.255859375
+        },
+        {
+          "step": 7,
+          "seconds": 35.57571285311133,
+          "allocated_gib": 32.1101861000061,
+          "reserved_gib": 51.076171875
+        },
+        {
+          "step": 8,
+          "seconds": 37.29001396195963,
+          "allocated_gib": 37.4974308013916,
+          "reserved_gib": 56.37890625
+        }
+      ]
+    }
+  ]
+}
