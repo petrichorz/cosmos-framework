@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 import math
+import os
 import re
 from typing import List, Tuple
 
@@ -72,6 +73,19 @@ VIDEO_RES_SIZE_INFO: dict[str, dict[str, tuple[int, int]]] = {
         "9,16": (4096, 7280),
     },
 }
+
+
+if os.environ.get("COSMOS_BSA64_BUCKETS") == "1":
+    # Process-local experiment toggle: dense and BSA A/B both use these buckets.
+    _bsa64_480_buckets = {
+        "1,1": (640, 640),
+        "4,3": (768, 512),
+        "3,4": (512, 768),
+        "16,9": (832, 512),
+        "9,16": (512, 832),
+    }
+    VIDEO_RES_SIZE_INFO["480"] = dict(_bsa64_480_buckets)
+    IMAGE_RES_SIZE_INFO["480"] = dict(_bsa64_480_buckets)
 
 
 def get_aspect_ratios_from_wdinfos(wdinfos: list[str]) -> list[str]:

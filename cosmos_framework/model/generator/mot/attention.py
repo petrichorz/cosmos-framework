@@ -321,6 +321,15 @@ def teacher_forcing_attention(
             get_all_seq(packed_value_states),
             attention_meta.tnd_plan,
         )
+    elif attention_meta.dense_mode == "bsa64":
+        from cosmos_framework.model.generator.mot.bsa64_attention import bsa64_per_sample_attention
+
+        full_res = bsa64_per_sample_attention(
+            full_q[:num_gen_queries],
+            get_all_seq(key_pack_for_gen),
+            get_all_seq(packed_value_states),
+            attention_meta.bsa64_plans,
+        )
     elif attention_meta.dense_mode == "global":
         if attention_meta.dense_gen_mask is None:
             raise ValueError("global teacher-forcing attention requires dense_gen_mask")
@@ -762,7 +771,16 @@ def build_packed_sequence(
             }
             with path.open("a") as handle:
                 handle.write(json.dumps(metadata) + "\n")
-        if teacher_forcing_dense_mode == "grouped_tnd":
+        use_bsa64 = os.environ.get("COSMOS_GEN_BSA64") == "1"
+        if use_bsa64:
+            from cosmos_framework.model.generator.mot.bsa64_attention import build_bsa64_plans
+
+            if teacher_forcing_dense_mode != "per_sample":
+                raise ValueError("experimental BSA64 requires per_sample teacher forcing")
+            bsa64_plans = build_bsa64_plans(teacher_forcing_layout, num_heads, device)
+            dense_gen_mask = None
+            sample_gen_masks = ()
+        elif teacher_forcing_dense_mode == "grouped_tnd":
             dense_gen_mask = None
             sample_gen_masks = ()
         elif teacher_forcing_dense_mode == "global":
@@ -790,6 +808,9 @@ def build_packed_sequence(
             sample_lens=sample_lens,
             actual_len=int(packed_sequence.shape[0]),
         )
+        if use_bsa64:
+            attention_meta.dense_mode = "bsa64"
+            attention_meta.bsa64_plans = bsa64_plans
         make_pack = sequence_pack_from_packed_sequence
         if teacher_forcing_dense_mode == "grouped_tnd":
             attention_meta.tnd_plan = build_tnd_plan(teacher_forcing_layout, device=device)
