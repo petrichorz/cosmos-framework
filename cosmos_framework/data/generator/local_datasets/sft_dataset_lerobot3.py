@@ -44,6 +44,7 @@ from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
 from cosmos_framework.utils import log
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
+from cosmos_framework.utils.performance import performance_scope
 
 # 多分辨率训练：候选档位（短边像素），只选 <= 视频短边的档位（不上采样）。
 # _MULTI_RESOLUTION_TIERS = ("256", "480", "720")
@@ -683,14 +684,21 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         frame_indices = list(range(start_frame, end_frame + 1, temporal_interval))
         timestamps = [idx / original_fps for idx in frame_indices]
         try:
-            video_frames = _vu.decode_video_frames(
-                input_video_path,
-                timestamps,
-                self.video_tolerance_s,
-                self.video_backend,
-                resize_h=resize_h,
-                resize_w=resize_w,
-            )
+            with performance_scope(
+                "video_decode",
+                video_path=input_video_path,
+                backend=self.video_backend,
+                start_frame=start_frame,
+                end_frame=end_frame,
+            ):
+                video_frames = _vu.decode_video_frames(
+                    input_video_path,
+                    timestamps,
+                    self.video_tolerance_s,
+                    self.video_backend,
+                    resize_h=resize_h,
+                    resize_w=resize_w,
+                )
         except FrameTimestampError as e:
             # 时间戳与视频 pts 偏差超过 video_tolerance_s 时抛 FrameTimestampError。
             # 打印其详细提示（哪些时间戳违反 tolerance、视频路径等），并跳过该样本，避免中断训练。
@@ -716,20 +724,21 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             return None
 
         # _decode_video_frames 已保证输出 (resize_h, resize_w)，直接转 [T,H,W,3] uint8
-        video_chunk = video_frames.permute(0, 2, 3, 1).cpu().numpy()  # [T,H,W,3] uint8
+        with performance_scope("video_postprocess", video_path=input_video_path):
+            video_chunk = video_frames.permute(0, 2, 3, 1).cpu().numpy()  # [T,H,W,3] uint8
 
-        # Truncate temporally to temporal_compression_factor * N + 1
-        target_t = (video_chunk.shape[0] - 1) // self.temporal_compression_factor * self.temporal_compression_factor + 1
+            # Truncate temporally to temporal_compression_factor * N + 1
+            target_t = (video_chunk.shape[0] - 1) // self.temporal_compression_factor * self.temporal_compression_factor + 1
 
-        # Apply spatial center crop and temporal truncation
-        video_chunk = video_chunk[:target_t, crop_y : crop_y + target_h, crop_x : crop_x + target_w]  # [T,H,W,3]
+            # Apply spatial center crop and temporal truncation
+            video_chunk = video_chunk[:target_t, crop_y : crop_y + target_h, crop_x : crop_x + target_w]  # [T,H,W,3]
 
-        # THWC -> CTHW
-        video_chunk = np.transpose(video_chunk, (3, 0, 1, 2))  # [3,T,H,W]
-        video = torch.from_numpy(np.ascontiguousarray(video_chunk)).to(torch.uint8)  # [3,T,H,W]
-        padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
-        # image_size: [target_h, target_w, orig_h, orig_w] in pixel space, for the model to crop the video
-        image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
+            # THWC -> CTHW
+            video_chunk = np.transpose(video_chunk, (3, 0, 1, 2))  # [3,T,H,W]
+            video = torch.from_numpy(np.ascontiguousarray(video_chunk)).to(torch.uint8)  # [3,T,H,W]
+            padding_mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
+            # image_size: [target_h, target_w, orig_h, orig_w] in pixel space, for the model to crop the video
+            image_size = torch.tensor([target_h, target_w, target_h, target_w], dtype=torch.float32)
 
         selected = _select_caption(t2w_window)
         if selected is None:
@@ -769,7 +778,8 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         if not self.cfg_dropout_keep_metadata and self.cfg_dropout_rate > 0:
             if random.random() < self.cfg_dropout_rate:
                 caption = ""
-        text_ids, caption = self._tokenize_caption(caption)
+        with performance_scope("caption_tokenize"):
+            text_ids, caption = self._tokenize_caption(caption)
 
         ret = dict(
             __key__=f"{uuid}_w0",
@@ -873,7 +883,8 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         while True:
             rng.shuffle(self.episode_index)
             for ds_idx, ep_idx, clip_idx in self.episode_index:
-                sample = self.process_one_sample(ds_idx, ep_idx, clip_idx)
+                with performance_scope("data_sample", ds_idx=ds_idx, ep_idx=ep_idx, clip_idx=clip_idx):
+                    sample = self.process_one_sample(ds_idx, ep_idx, clip_idx)
                 if sample is None:
                     log.warning(f"Failed to process sample (ds={ds_idx}, ep={ep_idx}, clip={clip_idx}), skipping...")
                     continue

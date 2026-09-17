@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
+import contextlib
 import functools
 import inspect
 import os
@@ -28,6 +29,7 @@ from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import callback, distributed, ema, log, misc
 from cosmos_framework.utils.checkpointer import Checkpointer
 from cosmos_framework.utils.misc import StragglerDetectorV2
+from cosmos_framework.utils.training_benchmark import TrainingBenchmark
 
 
 
@@ -219,6 +221,7 @@ class ImaginaireTrainer:
         if hasattr(dataloader_train, "set_start_iteration"):
             dataloader_train.set_start_iteration(iteration * self.config.trainer.grad_accum_iter)
         grad_accum_iter = 0
+        benchmark = TrainingBenchmark()
         log.critical(f"Distributed parallelism mode: {self.config.trainer.distributed_parallelism}")
         if self.config.trainer.distributed_parallelism == "ddp":
             # Create a DDP model wrapper.
@@ -254,10 +257,13 @@ class ImaginaireTrainer:
             while True:
                 dataloader_train_iter = iter(dataloader_train)
                 while True:
+                    if benchmark and grad_accum_iter == 0:
+                        benchmark.begin_iteration()
                     self.callbacks.on_before_dataloading(iteration)
                     try:
                         with (
                             self.training_timer("dataloader_train"),
+                            benchmark.phase("dataloader_train") if benchmark else contextlib.nullcontext(),
                             self.straggler_detector.profile_section(
                                 "dataloading",
                                 self.config.trainer.straggler_detection.analyze_dataloading,
@@ -280,7 +286,8 @@ class ImaginaireTrainer:
                         _end_training = True
                         break
                     # Move all tensors in the data batch to GPU device.
-                    data_batch = misc.to(data_batch, device="cuda")
+                    with benchmark.phase("host_to_device") if benchmark else contextlib.nullcontext():
+                        data_batch = misc.to(data_batch, device="cuda")
                     # The actual training step.
                     self.callbacks.on_training_step_start(model, data_batch, iteration=iteration)
                     self.callbacks.on_training_step_batch_start(model, data_batch, iteration=iteration)
@@ -288,15 +295,16 @@ class ImaginaireTrainer:
                         model_ddp.train()
                     assert model_ddp.training, "model_ddp is not in training mode."
                     assert model.training, "model is not in training mode."
-                    output_batch, loss, grad_accum_iter = self.training_step(
-                        model_ddp,
-                        optimizer,
-                        scheduler,
-                        grad_scaler,
-                        data_batch,
-                        iteration=iteration,
-                        grad_accum_iter=grad_accum_iter,
-                    )
+                    with benchmark.phase("training_step") if benchmark else contextlib.nullcontext():
+                        output_batch, loss, grad_accum_iter = self.training_step(
+                            model_ddp,
+                            optimizer,
+                            scheduler,
+                            grad_scaler,
+                            data_batch,
+                            iteration=iteration,
+                            grad_accum_iter=grad_accum_iter,
+                        )
                     self.callbacks.on_training_step_batch_end(
                         model, data_batch, output_batch, loss, iteration=iteration
                     )
@@ -305,6 +313,8 @@ class ImaginaireTrainer:
                         continue
                     # Do the following when an actual optimizer (update) step has been made.
                     iteration += 1
+                    if benchmark:
+                        benchmark.finish_iteration(iteration)
                     # Save checkpoint.
                     if iteration % self.config.checkpoint.save_iter == 0:
                         self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
@@ -330,6 +340,11 @@ class ImaginaireTrainer:
             self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
         self.callbacks.on_train_end(model, iteration=iteration)
         self.checkpointer.finalize()
+        if benchmark:
+            benchmark.close()
+        distributed.barrier()
+        if benchmark:
+            benchmark.write_global_summary()
         distributed.barrier()
         self.callbacks.on_app_end()
         if dist.is_available() and dist.is_initialized():

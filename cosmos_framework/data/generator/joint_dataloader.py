@@ -14,6 +14,7 @@ from torch.utils.data.dataloader import default_collate
 
 from cosmos_framework.utils.lazy_config import instantiate
 from cosmos_framework.utils import log
+from cosmos_framework.utils.performance import performance_scope
 from cosmos_framework.model.generator.tokenizers.uniae.frame_math import (
     get_uniae_chunk_frames,
     get_uniae_latent_num_frames,
@@ -539,7 +540,8 @@ class JointDataLoader(webdataset.WebLoader):
         buffer = self.buffers[index_id]
         if not buffer:
             try:
-                batch = next(self.dataloaders[index_id])
+                with performance_scope("dataloader_fetch", index_id=index_id):
+                    batch = next(self.dataloaders[index_id])
             except StopIteration:
                 raise
 
