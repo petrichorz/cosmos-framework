@@ -9,6 +9,7 @@ from pathlib import Path
 
 def main():
     env = os.environ
+    env["COSMOS_PRINT_INPUT_PROMPT"] = "1"
     output = Path(env["OUTPUT_ROOT"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     prompt = Path(env["PROMPT_FILE"]).read_text() if env.get("PROMPT_FILE") else env["PROMPT"]
