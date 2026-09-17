@@ -257,8 +257,8 @@ def _limit_temporal_interval_by_fps(
 
 def _build_lerobot_source(
     lerobot_root: str,
-    min_frames: int,
-    max_duration_s: float,
+    min_video_frames: int,
+    max_video_duration_s: float,
     min_short_edge: int,
     video_feature_key: str | None,
     caption_key: str,
@@ -328,18 +328,18 @@ def _build_lerobot_source(
         start_frame = round(from_ts * fps)
         end_frame = round(to_ts * fps) - 1
 
-        # 过滤：max_duration_s=0 关闭时长上限；>0 且超长时，drop 丢弃 / split 切分
-        if max_duration_s > 0 and duration > max_duration_s and long_video_policy == "drop":
+        # 过滤：max_video_duration_s=0 关闭时长上限；>0 且超长时，drop 丢弃 / split 切分
+        if max_video_duration_s > 0 and duration > max_video_duration_s and long_video_policy == "drop":
             source.episode_clips.append([])
             continue
         frames_in_window = end_frame - start_frame + 1
-        if frames_in_window < min_frames:
+        if frames_in_window < min_video_frames:
             source.episode_clips.append([])
             continue
 
         if long_video_policy == "split":
             clip_ranges = _build_balanced_video_windows(
-                start_frame, end_frame, fps, max_duration_s, video_window_overlap_s
+                start_frame, end_frame, fps, max_video_duration_s, video_window_overlap_s
             )
         else:
             clip_ranges = [(start_frame, end_frame)]
@@ -353,8 +353,8 @@ def _build_lerobot_source(
 
 def _load_lerobot_metadata(
     lerobot_root: str,
-    min_frames: int = 61,
-    max_duration_s: float = 61.0,
+    min_video_frames: int = 61,
+    max_video_duration_s: float = 61.0,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
@@ -381,8 +381,8 @@ def _load_lerobot_metadata(
     for root in roots:
         source, valid_clips = _build_lerobot_source(
             root,
-            min_frames=min_frames,
-            max_duration_s=max_duration_s,
+            min_video_frames=min_video_frames,
+            max_video_duration_s=max_video_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=video_feature_key,
             caption_key=caption_key,
@@ -399,8 +399,8 @@ def _load_lerobot_metadata(
 
 def _load_lerobot_metadata_from_manifest(
     manifest_path: str,
-    min_frames: int = 61,
-    max_duration_s: float = 61.0,
+    min_video_frames: int = 61,
+    max_video_duration_s: float = 61.0,
     min_short_edge: int = 0,
     video_feature_key: str | None = None,
     caption_key: str = "caption",
@@ -448,8 +448,8 @@ def _load_lerobot_metadata_from_manifest(
         path, fk, fkw, ck = task
         return _load_lerobot_metadata(
             path,
-            min_frames=min_frames,
-            max_duration_s=max_duration_s,
+            min_video_frames=min_video_frames,
+            max_video_duration_s=max_video_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=fk,
             caption_key=ck,
@@ -897,8 +897,8 @@ def get_sft_dataset_from_lerobot(
     append_duration_fps_timestamps: bool = True,
     append_resolution_info: bool = True,
     cfg_dropout_keep_metadata: bool = False,
-    min_frames: int = 61,
-    max_duration_s: float = 61.0,
+    min_video_frames: int = 61,
+    max_video_duration_s: float = 61.0,
     long_video_policy: str = "drop",
     video_window_overlap_s: float = 0.0,
     min_short_edge: int = 0,
@@ -937,8 +937,8 @@ def get_sft_dataset_from_lerobot(
     if dataset_path.endswith(".jsonl"):
         sources, episode_index = _load_lerobot_metadata_from_manifest(
             dataset_path,
-            min_frames=min_frames,
-            max_duration_s=max_duration_s,
+            min_video_frames=min_video_frames,
+            max_video_duration_s=max_video_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=video_feature_key,
             caption_key=caption_key,
@@ -950,8 +950,8 @@ def get_sft_dataset_from_lerobot(
     else:
         sources, episode_index = _load_lerobot_metadata(
             dataset_path,
-            min_frames=min_frames,
-            max_duration_s=max_duration_s,
+            min_video_frames=min_video_frames,
+            max_video_duration_s=max_video_duration_s,
             min_short_edge=min_short_edge,
             video_feature_key=video_feature_key,
             caption_key=caption_key,

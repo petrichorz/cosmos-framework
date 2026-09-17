@@ -109,11 +109,11 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_fps",
         ),
         # episode 过滤阈值：最小帧数（下界）/ 最大时长秒（上界），落在 SFT dataset 节点
-        ("dataloader_train", "min_frames"): (
-            "dataloader_train", "dataloader", "datasets", "video", "dataset", "min_frames",
+        ("dataloader_train", "min_video_frames"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "min_video_frames",
         ),
-        ("dataloader_train", "max_duration_s"): (
-            "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_duration_s",
+        ("dataloader_train", "max_video_duration_s"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "max_video_duration_s",
         ),
         ("model",): ("model", "config"),
     },
@@ -162,8 +162,8 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_samples_per_batch"): ("dataloader_train", "batcher", "max_batch_size"),
         ("dataloader_train", "max_sequence_length"): ("dataloader_train", "batcher", "max_tokens"),
         ("dataloader_train", "max_caption_tokens"): None,  # VFM-only knob — VLM packer caps via max_sequence_length
-        ("dataloader_train", "min_frames"): None,  # VFM LeRobot-only knob
-        ("dataloader_train", "max_duration_s"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "min_video_frames"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "max_video_duration_s"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "long_video_policy"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_window_overlap_s"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "max_video_fps"): None,  # VFM LeRobot-only knob

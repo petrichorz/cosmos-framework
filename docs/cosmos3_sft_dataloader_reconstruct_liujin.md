@@ -23,7 +23,7 @@
 | 视频解码 | 5 | 底层 PyAV `av.open` 解码时 `reformat` 直接 resize（消除外部 `F.interpolate`） |
 | decoder LRU 缓存 | 5.5 | 替换 lerobot 无界缓存为 LRU（**仅 torchcodec 生效，当前 pyav 下 no-op**） |
 | caption 回退 | 4.6 | `caption_key` 列优先，回退官方 `tasks` 列 |
-| episode 过滤阈值 | 4.11 | `min_frames`（下界/帧）+ `max_duration_s`（上界/秒）暴露到 toml |
+| episode 过滤阈值 | 4.11 | `min_video_frames`（下界/帧）+ `max_video_duration_s`（上界/秒）暴露到 toml |
 | 本地 vendored lerobot | 附录 | `lerobot/`（0.5.0），训练时经 `PYTHONPATH=.` 优先于 site-packages |
 
 ---
@@ -458,35 +458,35 @@ toml [dataloader_train].use_multi_resolution
 - `use_multi_fps` 直接作用于 native chunk 抽帧步长（已无 `num_video_frames>0` 分支）。
 - `resolution` 参数**保留**，作为单分辨率模式的 fallback（`use_multi_resolution=False` 时生效）。
 
-### 4.11 episode 过滤阈值（`min_frames` + `max_duration_s`）
+### 4.11 episode 过滤阈值（`min_video_frames` + `max_video_duration_s`）
 
 加载期在 `_build_lerobot_source` 里对每个 episode 做两层过滤，阈值已提取为可配置参数并暴露到 toml：
 
 | 参数 | 单位 | 方向 | 默认 | 作用 | 等价（30fps） |
 |------|------|------|------|------|--------------|
-| `min_frames` | 帧 | 下界 | 61 | 丢弃帧数 < 61 的短 episode | ~2 秒 |
-| `max_duration_s` | 秒 | 上界 | 61.0 | 丢弃时长 > 61 秒的长 episode | ~1830 帧 |
+| `min_video_frames` | 帧 | 下界 | 61 | 丢弃帧数 < 61 的短 episode | ~2 秒 |
+| `max_video_duration_s` | 秒 | 上界 | 61.0 | 丢弃时长 > 61 秒的长 episode | ~1830 帧 |
 
-> 注意：两者数值巧合都是 61，但**单位与过滤方向完全不同**——`min_frames` 管「太短」（帧），`max_duration_s` 管「太长」（秒）。
+> 注意：两者数值巧合都是 61，但**单位与过滤方向完全不同**——`min_video_frames` 管「太短」（帧），`max_video_duration_s` 管「太长」（秒）。
 
 过滤逻辑（`sft_dataset_lerobot3.py` 的 `_build_lerobot_source`）：
 
 ```python
 duration = to_ts - from_ts                    # 秒
-if duration > max_duration_s:                 # 上界：时长超限
+if duration > max_video_duration_s:           # 上界：时长超限
     continue
 frames_in_window = end_frame - start_frame + 1  # 帧
-if frames_in_window < min_frames:             # 下界：帧数不足
+if frames_in_window < min_video_frames:       # 下界：帧数不足
     continue
 ```
 
 传递链路（与多分辨率/多 fps 同构）：
 
 ```
-toml [dataloader_train].min_frames / .max_duration_s
+toml [dataloader_train].min_video_frames / .max_video_duration_s
   → PATH_REMAPS["vfm"] 路由
-  → dataset.min_frames / dataset.max_duration_s
-  → get_sft_dataset_from_lerobot(min_frames=..., max_duration_s=...)
+  → dataset.min_video_frames / dataset.max_video_duration_s
+  → get_sft_dataset_from_lerobot(min_video_frames=..., max_video_duration_s=...)
   → _load_lerobot_metadata(_from_manifest) → _build_lerobot_source
 ```
 
@@ -734,8 +734,8 @@ dataset=L(get_sft_dataset_from_lerobot)(
     video_feature_key=None,                      # 显式指定 feature 名（精确匹配）；None 则不显式指定
     video_feature_keywords=["top", "head"],      # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
     caption_key="task",                          # episodes 表里的 caption 列名（真实数据集用 task 列）
-    min_frames=61,                               # episode 过滤下界（帧）
-    max_duration_s=61.0,                         # episode 过滤上界（秒）
+    min_video_frames=61,                         # episode 过滤下界（帧）
+    max_video_duration_s=61.0,                   # episode 过滤上界（秒）
     resolution="256",                            # 单分辨率 fallback（use_multi_resolution=False 时生效）
     use_multi_resolution=False,                  # 多分辨率开关（experiment 默认 False，被 toml 覆盖为 true）
     use_multi_fps=False,                         # 多 fps 开关（experiment 默认 False，被 toml 覆盖为 true）
@@ -776,8 +776,8 @@ max_num_tokens_after_packing = 65760       # 从 45056 放大（配合 480 档�
 max_sequence_length = 65760                # 从 45056 放大（真正生效的 budget，见 4.10）
 use_multi_resolution = true                # 多分辨率开关（256/480 随机）
 use_multi_fps = true                       # 多 fps 开关（temporal_interval 随机 2/3/4）
-min_frames = 61                            # episode 过滤下界（帧）
-max_duration_s = 61.0                      # episode 过滤上界（秒）
+min_video_frames = 61                      # episode 过滤下界（帧）
+max_video_duration_s = 61.0                # episode 过滤上界（秒）
 ```
 
 两个开关和两个过滤阈值都经 `toml_config_helper.py` 的 `PATH_REMAPS["vfm"]` 路由到 `dataloader_train.dataloader.datasets.video.dataset.*` 节点，覆盖 experiment 里的默认值。
@@ -894,7 +894,7 @@ loss = 2.0362（前向成功）
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | 原 vision SFT 实验配置（JSONL 流程），**未改动** |
 | `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py` | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` + 统一 `dataset_path` 接入；`caption_key="task"`、`video_backend="pyav"`） |
 | `cosmos_framework/configs/base/config.py` | 加 1 行 import 注册新 experiment |
-| `cosmos_framework/configs/toml_config/sft_config.py` | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps`/`min_frames`/`max_duration_s` 字段 |
+| `cosmos_framework/configs/toml_config/sft_config.py` | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps`/`min_video_frames`/`max_video_duration_s` 字段 |
 | `cosmos_framework/configs/toml_config/toml_config_helper.py` | `PATH_REMAPS` 新增 remap，把 toml 开关/过滤阈值路由到 dataset 节点 |
 | `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py` | `vae_path` 改绝对路径（环境相关，非本特性，慎提交） |
 | `examples/toml/sft_config/vision_sft_edge.toml` | `experiment` 字段指向 `vision_sft_edge_lerobot3` + 多分辨率/fps 开关 + 过滤阈值 + token 预算放大到 65760 |

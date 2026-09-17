@@ -412,8 +412,8 @@ def test_vfm_lerobot_video_backend_and_resize_route_to_nested_dataset() -> None:
     raw = {
         "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
         "dataloader_train": {
-            "min_frames": 17,
-            "max_duration_s": 0.0,
+            "min_video_frames": 17,
+            "max_video_duration_s": 0.0,
             "long_video_policy": "split",
             "video_window_overlap_s": 5.0,
             "max_video_fps": 20.0,
@@ -425,8 +425,8 @@ def test_vfm_lerobot_video_backend_and_resize_route_to_nested_dataset() -> None:
     SFTExperimentConfig.model_validate(raw)
     overrides = build_hydra_overrides(raw)
 
-    assert "dataloader_train.dataloader.datasets.video.dataset.min_frames=17" in overrides
-    assert "dataloader_train.dataloader.datasets.video.dataset.max_duration_s=0.0" in overrides
+    assert "dataloader_train.dataloader.datasets.video.dataset.min_video_frames=17" in overrides
+    assert "dataloader_train.dataloader.datasets.video.dataset.max_video_duration_s=0.0" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.long_video_policy=split" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.video_window_overlap_s=5.0" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.max_video_fps=20.0" in overrides
@@ -438,7 +438,7 @@ def test_video_window_overlap_must_be_smaller_than_enabled_duration_cap() -> Non
     raw = {
         "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
         "dataloader_train": {
-            "max_duration_s": 5.0,
+            "max_video_duration_s": 5.0,
             "long_video_policy": "split",
             "video_window_overlap_s": 5.0,
         },

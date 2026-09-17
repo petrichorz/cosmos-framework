@@ -415,8 +415,7 @@ class ModelConfig(BaseModel):
     lora_rank: int = Field(
         default=16,
         description=(
-            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target "
-            "module. Standard values are 4, 8, 16, 32."
+            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target module. Standard values are 4, 8, 16, 32."
         ),
     )
     lora_alpha: int = Field(
@@ -437,9 +436,7 @@ class ModelConfig(BaseModel):
     ema: EMAConfig = Field(default_factory=EMAConfig)
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
     compile: CompileConfig = Field(default_factory=CompileConfig)
-    activation_checkpointing: ActivationCheckpointingConfig = Field(
-        default_factory=ActivationCheckpointingConfig
-    )
+    activation_checkpointing: ActivationCheckpointingConfig = Field(default_factory=ActivationCheckpointingConfig)
     tokenizer: ModelTokenizerConfig = Field(default_factory=ModelTokenizerConfig)
     backbone: BackboneConfig = Field(default_factory=BackboneConfig)
 
@@ -545,15 +542,12 @@ class SchedulerConfig(BaseModel):
     )
     f_start: list[float] = Field(
         default_factory=lambda: [1.0e-6],
-        description=(
-            "Initial LR multiplier at step 0, before warmup ramps up."
-        ),
+        description=("Initial LR multiplier at step 0, before warmup ramps up."),
     )
     verbosity_interval: int = Field(
         default=0,
         description=(
-            "How often the scheduler logs the current LR (in optimizer "
-            "steps). 0 = silent. VFM only — skipped on VLM."
+            "How often the scheduler logs the current LR (in optimizer steps). 0 = silent. VFM only — skipped on VLM."
         ),
     )
     warm_up_steps: list[int] = Field(
@@ -605,8 +599,7 @@ class GradClipCallback(BaseModel):
     clip_norm: float = Field(
         default=1.0,
         description=(
-            "Maximum global L2 norm of the gradient. Steps with a larger "
-            "norm are rescaled so ||grad|| ≤ clip_norm."
+            "Maximum global L2 norm of the gradient. Steps with a larger norm are rescaled so ||grad|| ≤ clip_norm."
         ),
     )
     force_finite: bool = Field(
@@ -639,8 +632,7 @@ class TrainerConfig(BaseModel):
     distributed_parallelism: str = Field(
         default="fsdp",
         description=(
-            "Distributed strategy. 'fsdp' (the only supported value today) "
-            "routes through cosmos's FSDP wrapper."
+            "Distributed strategy. 'fsdp' (the only supported value today) routes through cosmos's FSDP wrapper."
         ),
     )
     grad_accum_iter: int = Field(
@@ -751,25 +743,25 @@ class DataloaderTrainConfig(BaseModel):
             "remapped 到 SFT dataset 的 'use_multi_fps'。"
         ),
     )
-    min_frames: int = Field(
+    min_video_frames: int = Field(
         default=61,
         description=(
             "VFM only. episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃。"
-            "remapped 到 SFT dataset 的 'min_frames'。"
+            "remapped 到 SFT dataset 的 'min_video_frames'。"
         ),
     )
-    max_duration_s: float = Field(
+    max_video_duration_s: float = Field(
         default=61.0,
         ge=0,
         description=(
             "VFM only. episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃；"
-            "设为 0 关闭时长上限。remapped 到 SFT dataset 的 'max_duration_s'。"
+            "设为 0 关闭时长上限。remapped 到 SFT dataset 的 'max_video_duration_s'。"
         ),
     )
     long_video_policy: Literal["drop", "split"] = Field(
         default="drop",
         description=(
-            "VFM LeRobot only. Drop episodes above max_duration_s, or expand each long episode "
+            "VFM LeRobot only. Drop episodes above max_video_duration_s, or expand each long episode "
             "into balanced independent clips. Remapped to the nested SFT dataset and skipped on VLM."
         ),
     )
@@ -778,7 +770,7 @@ class DataloaderTrainConfig(BaseModel):
         ge=0,
         description=(
             "VFM LeRobot only. Overlap in seconds between adjacent clips when long_video_policy='split'. "
-            "Must be smaller than max_duration_s when the duration cap is enabled."
+            "Must be smaller than max_video_duration_s when the duration cap is enabled."
         ),
     )
     max_video_fps: float = Field(
@@ -807,8 +799,8 @@ class DataloaderTrainConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_video_window_overlap(self) -> "DataloaderTrainConfig":
-        if self.max_duration_s > 0 and self.video_window_overlap_s >= self.max_duration_s:
-            raise ValueError("video_window_overlap_s must be smaller than max_duration_s")
+        if self.max_video_duration_s > 0 and self.video_window_overlap_s >= self.max_video_duration_s:
+            raise ValueError("video_window_overlap_s must be smaller than max_video_duration_s")
         return self
 
 
@@ -893,8 +885,7 @@ def load_experiment_from_toml(
         base_config_path = TASK_TO_BASE_CONFIG[task]
     except KeyError as e:
         raise ValueError(
-            f"{toml_path}: [job].task={task!r} is not supported. "
-            f"Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
+            f"{toml_path}: [job].task={task!r} is not supported. Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
         ) from e
 
     overrides = build_hydra_overrides(raw)
@@ -906,10 +897,7 @@ def load_experiment_from_toml(
             if not o or o == "--":
                 continue
             if "=" not in o:
-                raise ValueError(
-                    f"extra override {o!r} must be Hydra dotted-path syntax "
-                    f"(e.g. 'optimizer.lr=1e-5')."
-                )
+                raise ValueError(f"extra override {o!r} must be Hydra dotted-path syntax (e.g. 'optimizer.lr=1e-5').")
             overrides.append(o)
 
     # Import lazily so this module stays cheap to import in non-training contexts.
