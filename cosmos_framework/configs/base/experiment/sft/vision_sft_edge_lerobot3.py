@@ -233,21 +233,21 @@ vision_sft_edge_lerobot3 = LazyDict(
                                 "top",
                                 "head",
                             ],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
+                            video_backend="pyav",
+                            video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
+                            max_video_fps=30.0,  # 0 disables FPS downsampling
                             caption_key="task",  # episodes 表里的 caption 列名
-                            min_video_frames=61,  # 下界：episode 帧数少于 61 帧丢弃
-                            max_video_duration_s=61.0,  # 上界：episode 时长超过 61 秒丢弃（0 关闭上限）
-                            long_video_policy="split",  # 超长 episode 策略：drop 丢弃 / split 切分
-                            video_window_overlap_s=0.0,  # split 时相邻窗口重叠秒数
                             min_short_edge=0,
+                            min_video_frames=61,  # metadata filter; configurable from TOML
+                            max_video_duration_s=61.0,  # set 0 in TOML to disable the duration cap
+                            long_video_policy="split",  # "split" expands long episodes into independent clips
+                            video_window_overlap_s=0.0,  # adjacent clip overlap; only used by split policy
                             resolution="256",
                             use_multi_resolution=False,  # 多分辨率训练开关（256/480 随机，不上采样）
                             use_multi_fps=False,  # 多 fps 训练开关（temporal_interval 随机 2/3/4）
                             temporal_compression_factor=4,
                             use_system_prompt=False,
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
-                            video_backend="pyav",
-                            video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
-                            max_video_fps=30.0,  # 超过此 fps 用整数 stride 下采样（0 关闭）
                         ),
                     ),
                 ),

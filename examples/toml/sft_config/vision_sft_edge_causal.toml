@@ -103,7 +103,7 @@ max_caption_tokens = 2048
 # max_samples_per_batch omitted (None — PackingDataLoader doesn't cap by sample count)
 # seed omitted — PackingDataLoader has no seed ctor kwarg
 
-# 多分辨率训练开关：True 时在 256/480/720 随机（不上采样）
+# 多分辨率训练开关：True 时在 256/480 随机（不上采样）
 use_multi_resolution = true
 # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
 use_multi_fps = true
@@ -114,10 +114,10 @@ max_video_duration_s = 61
 # 视频解码时间戳容差（单位：秒）：命中帧真实 pts 与期望时间戳偏差超过它则跳过样本
 video_tolerance_s = 0.001
 # 超长 episode 策略
-long_video_policy = "split"                           # ← 从 profile 侧移植（原来没有）
+long_video_policy = "split"
 # split 时相邻窗口重叠秒数
-video_window_overlap_s = 5.0                          # ← 从 profile 侧移植
+video_window_overlap_s = 5.0
 # 原生 fps 超过此值用整数 stride 下采样
-max_video_fps = 30.0                                  # ← 从 profile 侧移植
+max_video_fps = 30.0
 # 视频解码后端
-video_backend = "pyav"                                # ← 默认 pyav（按你的决策）
+video_backend = "pyav"

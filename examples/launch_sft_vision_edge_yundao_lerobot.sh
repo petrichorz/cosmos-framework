@@ -75,7 +75,7 @@ fi
 # EXTRA_DATASET_CHECK：校验原始路径存在 + 恢复 DATASET_PATH（供 config 的 ${oc.env:DATASET_PATH} 读取）
 EXTRA_DATASET_CHECK="[[ -e \"$_DATASET_ORIGINAL\" ]] || { echo \"ERROR: dataset not found: $_DATASET_ORIGINAL\" >&2; exit 1; }; export DATASET_PATH=\"$_DATASET_ORIGINAL\";"
 TAIL_OVERRIDES=(
-      "model=mot_causal_fsdp"    # ← fsdp 版；若用 ddp 则写 model=mot_causal_ddp
+      "model=mot_causal_fsdp"
       '~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}'
       '+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0}'
       "model.config.vlm_config.tokenizer.repository=null"

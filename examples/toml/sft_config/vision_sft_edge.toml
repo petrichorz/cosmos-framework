@@ -85,27 +85,20 @@ save_iter            = 100
 
 [dataloader_train]
 max_sequence_length = 45056
+min_video_frames      = 61     # episode 最少帧数
+max_video_duration_s  = 61.0   # episode 最长秒数；设为 0 可关闭上限
+max_video_fps         = 30.0   # 超过后按整数帧间隔下采样；设为 0 可关闭
+video_backend         = "pyav" # 可切换为 "torchcodec"
+video_tolerance_s     = 0.034  # PyAV 最近帧匹配容差；TorchCodec 后端不使用
 # Per-caption token cap before truncation. Structured-JSON captions run longer than
 # dense prose (measured max ~1790 tokens), so keep headroom; raise it for longer captions.
 max_caption_tokens = 2048
 # max_samples_per_batch omitted (None — PackingDataLoader doesn't cap by sample count)
 # seed omitted — PackingDataLoader has no seed ctor kwarg
 
-# 多分辨率训练开关：True 时在 256/480/720 随机（不上采样）
+# 多分辨率训练开关：True 时在 256/480 随机（不上采样）
 use_multi_resolution = true
 # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
 use_multi_fps = true
-# episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃
-min_video_frames = 61
-# episode 过滤上界（单位：秒）：episode 时长超过该值时丢弃；设为 0 关闭上限
-max_video_duration_s = 61.0
-# 超长 episode 策略：drop 丢弃 / split 切成均衡连续窗口
-long_video_policy = "split"
-# split 时相邻窗口重叠秒数；必须小于 max_video_duration_s
-video_window_overlap_s = 5.0
-# 原生 fps 超过此值时用整数 stride 下采样；设为 0 关闭
-max_video_fps = 30.0
-# 视频解码后端：pyav / torchcodec
-video_backend = "pyav"
-# PyAV 时间戳匹配容差（秒）
-video_tolerance_s = 0.034
+long_video_policy      = "split" # 超长 episode 生成均衡、独立的连续窗口
+video_window_overlap_s = 5.0     # 相邻窗口重叠秒数；必须小于 max_video_duration_s

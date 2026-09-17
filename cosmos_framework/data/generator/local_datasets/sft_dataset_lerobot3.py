@@ -60,8 +60,6 @@ _CAUSAL_DURATION_TEMPLATE = "The video is of {fps:.0f} FPS."
 
 # long_video_policy 支持的策略：drop（丢弃超长 episode）/ split（切成均衡、连续的窗口）。
 _SUPPORTED_LONG_VIDEO_POLICIES = {"drop", "split"}
-# 可配置视频解码后端。
-_SUPPORTED_VIDEO_BACKENDS = {"pyav", "torchcodec"}
 
 _hf_offline_applied = False
 _decoder_cache_patched = False
@@ -236,23 +234,6 @@ def _build_balanced_video_windows(
     assert windows[-1][1] == end_frame
     assert all(window_end - window_start + 1 <= max_frames for window_start, window_end in windows)
     return windows
-
-
-def _limit_temporal_interval_by_fps(
-    original_fps: float,
-    temporal_interval: int,
-    max_video_fps: float,
-) -> int:
-    """Return an integer frame stride whose effective FPS does not exceed the cap."""
-    if original_fps <= 0:
-        raise ValueError(f"original_fps must be positive, got {original_fps}")
-    if temporal_interval < 1:
-        raise ValueError(f"temporal_interval must be at least 1, got {temporal_interval}")
-    if max_video_fps < 0:
-        raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
-    if max_video_fps == 0:
-        return temporal_interval
-    return max(temporal_interval, math.ceil(original_fps / max_video_fps))
 
 
 def _build_lerobot_source(
@@ -482,6 +463,27 @@ def _load_lerobot_metadata_from_manifest(
             results = list(ex.map(_load_one, tasks))
 
     return _merge(results)
+
+
+# 可配置视频解码后端。
+_SUPPORTED_VIDEO_BACKENDS = {"pyav", "torchcodec"}
+
+
+def _limit_temporal_interval_by_fps(
+    original_fps: float,
+    temporal_interval: int,
+    max_video_fps: float,
+) -> int:
+    """Return an integer frame stride whose effective FPS does not exceed the cap."""
+    if original_fps <= 0:
+        raise ValueError(f"original_fps must be positive, got {original_fps}")
+    if temporal_interval < 1:
+        raise ValueError(f"temporal_interval must be at least 1, got {temporal_interval}")
+    if max_video_fps < 0:
+        raise ValueError(f"max_video_fps must be non-negative, got {max_video_fps}")
+    if max_video_fps == 0:
+        return temporal_interval
+    return max(temporal_interval, math.ceil(original_fps / max_video_fps))
 
 
 # ============================================================================
@@ -888,6 +890,10 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
 def get_sft_dataset_from_lerobot(
     dataset_path: str,
     resolution: str = "720",
+    min_video_frames: int = 61,
+    max_video_duration_s: float = 61.0,
+    long_video_policy: str = "drop",
+    video_window_overlap_s: float = 0.0,
     use_multi_resolution: bool = False,  # 多分辨率训练开关：True 时在 256/480 随机（不上采样）
     use_multi_fps: bool = False,  # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机
     tokenizer_config: Optional[Any] = None,
@@ -897,10 +903,6 @@ def get_sft_dataset_from_lerobot(
     append_duration_fps_timestamps: bool = True,
     append_resolution_info: bool = True,
     cfg_dropout_keep_metadata: bool = False,
-    min_video_frames: int = 61,
-    max_video_duration_s: float = 61.0,
-    long_video_policy: str = "drop",
-    video_window_overlap_s: float = 0.0,
     min_short_edge: int = 0,
     caption_suffix: str = "",
     conditioning_fps: float = 24,
