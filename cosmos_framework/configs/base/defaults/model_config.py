@@ -248,8 +248,11 @@ class OmniMoTModelConfig:
     teacher_forcing_history_blocks_min: int = 1
     teacher_forcing_history_blocks_max: int = 32
     # "global" builds one packed Dense Mask; "per_sample" loops over packed
-    # samples and builds one smaller Dense Mask for each sample.
+    # samples and builds one smaller Dense Mask for each sample; "grouped_tnd"
+    # runs exact visible KV groups without a dense mask.
     teacher_forcing_dense_mode: str = "global"
+    # Maximum gathered KV tokens passed to one grouped-TND attention call.
+    teacher_forcing_tnd_max_kv_tokens: int = 131072
     # Rank 0 saves one compact block-level visualization of the complete
     # attention pattern: causal UND plus the bool mask used by GEN SDPA.
     # The file is written below IMAGINAIRE_OUTPUT_ROOT.
