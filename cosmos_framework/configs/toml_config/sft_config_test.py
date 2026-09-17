@@ -57,6 +57,7 @@ class TestSchemaValidation:
                 "teacher_forcing_history_blocks_min": 1,
                 "teacher_forcing_history_blocks_max": 32,
                 "teacher_forcing_dense_mode": "per_sample",
+                "teacher_forcing_tnd_max_kv_tokens": 65536,
                 "teacher_forcing_visualize_sdpa_mask": True,
             },
         }
@@ -65,6 +66,7 @@ class TestSchemaValidation:
 
         assert cfg.model.causal_training_strategy == "teacher_forcing"
         assert cfg.model.teacher_forcing_dense_mode == "per_sample"
+        assert cfg.model.teacher_forcing_tnd_max_kv_tokens == 65536
         assert cfg.model.teacher_forcing_visualize_sdpa_mask is True
 
     def test_custom_section_validates_arbitrary_nested_content(self) -> None:
@@ -143,6 +145,7 @@ class TestBuildHydraOverrides:
                 "teacher_forcing_history_blocks_min": 1,
                 "teacher_forcing_history_blocks_max": 32,
                 "teacher_forcing_dense_mode": "per_sample",
+                "teacher_forcing_tnd_max_kv_tokens": 65536,
                 "teacher_forcing_visualize_sdpa_mask": True,
             },
         }
@@ -155,6 +158,7 @@ class TestBuildHydraOverrides:
         assert "model.config.teacher_forcing_history_blocks_min=1" in overrides
         assert "model.config.teacher_forcing_history_blocks_max=32" in overrides
         assert "model.config.teacher_forcing_dense_mode=per_sample" in overrides
+        assert "model.config.teacher_forcing_tnd_max_kv_tokens=65536" in overrides
         assert "model.config.teacher_forcing_visualize_sdpa_mask=true" in overrides
 
     def test_teacher_forcing_model_fields_are_skipped_for_vlm(self) -> None:

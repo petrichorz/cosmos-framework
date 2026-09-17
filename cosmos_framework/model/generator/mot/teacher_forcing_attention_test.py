@@ -456,3 +456,23 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
             num_layers=1,
             teacher_forcing_layout=layout,
         )
+
+
+def test_grouped_tnd_dispatch_matches_dense_without_building_masks(cpu_attention, monkeypatch):
+    def reject_mask(*args, **kwargs):
+        raise AssertionError("grouped_tnd must not build a dense mask")
+
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_dense_teacher_forcing_gen_mask", reject_mask
+    )
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_per_sample_teacher_forcing_gen_masks", reject_mask
+    )
+    layout, _, _, _, query, key, value, attention_meta, _ = _make_teacher_forcing_packs("grouped_tnd")
+    result, _ = dispatch_attention(query, key, value, attention_meta)
+    expected = teacher_forcing_dense_attention(
+        get_gen_seq(query), get_all_seq(key), get_all_seq(value), ~build_dense_teacher_forcing_gen_mask(layout)
+    )
+    torch.testing.assert_close(get_gen_seq(result).reshape_as(expected), expected)
+    assert attention_meta.dense_gen_mask is None
+    assert attention_meta.sample_gen_masks == ()

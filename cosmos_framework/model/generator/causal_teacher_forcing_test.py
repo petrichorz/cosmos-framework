@@ -32,6 +32,7 @@ def _config(**overrides):
         teacher_forcing_history_blocks_min=3,
         teacher_forcing_history_blocks_max=3,
         teacher_forcing_dense_mode="global",
+        teacher_forcing_tnd_max_kv_tokens=131072,
         parallelism=SimpleNamespace(context_parallel_shard_degree=1),
     )
     values.update(overrides)
