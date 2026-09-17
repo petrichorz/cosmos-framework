@@ -1,21 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# Short causal continued-pretraining trial for Cosmos3-Edge.
-#
-# Optimizer settings follow the Cosmos 3 Generator pre-training recipe:
-# FusedAdamW, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.05,
-# gradient clipping at 1.0, and linear warmup/decay to 0.30x peak LR.
-# The paper does not disclose the exact warmup length. This 2k trial uses a
-# 50-step warmup, which is a local choice rather than a paper-reported value.
-# The vision_sft_edge experiment already applies 10% CFG caption dropout.
+# Template for Cosmos3-Edge causal continued pre-training with grouped TND attention.
+# The paired launcher restricts conditioning to T2V, which is the training mode
+# currently supported by Scheme-B teacher forcing.
 
 [job]
 task         = "vfm"
 experiment   = "vision_sft_edge_lerobot3"
 project      = "cosmos3"
 group        = "causal_pretrain"
-name         = "vision_causal_pretrain_2k_edge"
+name         = "vision_causal_edge_tnd_pretrain"
 wandb_mode   = "offline"
 
 [model]
@@ -26,11 +21,12 @@ teacher_forcing_block_size_min      = 1
 teacher_forcing_block_size_max      = 4
 teacher_forcing_history_blocks_min  = 1
 teacher_forcing_history_blocks_max  = 64
-teacher_forcing_dense_mode          = "per_sample"
+teacher_forcing_dense_mode          = "grouped_tnd"
+teacher_forcing_tnd_max_kv_tokens   = 131072
 teacher_forcing_visualize_sdpa_mask = false
 
 [model.ema]
-enabled         = false
+enabled         = true
 rate            = 0.1
 iteration_shift = 0
 
@@ -80,7 +76,7 @@ warm_up_steps      = [50]
 distributed_parallelism = "fsdp"
 grad_accum_iter         = 1
 logging_iter            = 1
-max_iter                = 9
+max_iter                = 2000
 
 [trainer.callbacks.compile_tokenizer]
 compile_after_iterations = 3
@@ -93,19 +89,19 @@ force_finite = true
 [checkpoint]
 keys_to_skip_loading = ["net_ema."]
 load_path            = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter            = 1000
+save_iter            = 500
 
 [dataloader_train]
-max_sequence_length = 54000 # 45056
-max_caption_tokens = 2048
+max_sequence_length = 54000
+max_caption_tokens   = 2048
 
-min_video_frames    = 61          # episode 最少帧数
-max_video_duration_s = 61.0       # stress profile: maximum clip duration in seconds
-max_video_fps        = 15.0       # 超过后按整数帧间隔下采样；设为 0 可关闭
+min_video_frames     = 61
+max_video_duration_s = 61.0
+max_video_fps        = 15.0
 
-video_backend     = "pyav" # 可切换为 "pyav"
-video_resize_mode = "decode_transform" # 可切换为 "decode_transform"
-video_tolerance_s = 0.033       # PyAV 最近帧匹配容差；TorchCodec 后端不使用
+video_backend     = "pyav"
+video_resize_mode = "decode_transform"
+video_tolerance_s = 0.033
 
-long_video_policy = "split"
+long_video_policy      = "split"
 video_window_overlap_s = 2.0
