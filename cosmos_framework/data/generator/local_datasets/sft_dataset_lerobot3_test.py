@@ -9,10 +9,10 @@ import pytest
 import torch
 
 from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
-    LeRobotSFTDataset,
     _build_balanced_video_windows,
     _limit_temporal_interval_by_fps,
 )
+from lerobot.datasets import video_utils as _vu
 
 
 def test_balanced_video_windows_cover_source_with_exact_overlap():
@@ -50,23 +50,31 @@ def test_limit_temporal_interval_by_fps(original_fps, temporal_interval, max_vid
     assert _limit_temporal_interval_by_fps(original_fps, temporal_interval, max_video_fps) == expected
 
 
-def test_torchcodec_passes_temporal_interval_as_decoder_step():
+def test_torchcodec_requests_expected_frame_indices(monkeypatch):
     calls = []
 
     class FakeDecoder:
-        def get_frames_in_range(self, **kwargs):
-            calls.append(kwargs)
-            return SimpleNamespace(data=torch.zeros((4, 3, 2, 2), dtype=torch.uint8))
+        metadata = SimpleNamespace(average_fps=30.0)
 
-    dataset = object.__new__(LeRobotSFTDataset)
-    dataset._decoder_cache = SimpleNamespace(get_decoder=lambda video_path, resize_hw: FakeDecoder())
+        def get_frames_at(self, *, indices):
+            calls.append(indices)
+            return SimpleNamespace(
+                data=torch.zeros((4, 3, 2, 2), dtype=torch.uint8),
+                pts_seconds=torch.tensor([0.1, 0.2, 0.3, 0.4]),
+            )
 
-    frames = dataset._decode_video_frames_torchcodec(
-        "video.mp4",
-        start_frame=3,
-        end_frame=12,
-        temporal_interval=3,
+    monkeypatch.setattr(
+        _vu,
+        "_default_decoder_cache",
+        SimpleNamespace(get_decoder=lambda video_path: FakeDecoder()),
     )
 
-    assert calls == [{"start": 3, "stop": 13, "step": 3}]
+    frames = _vu.decode_video_frames(
+        "video.mp4",
+        timestamps=[0.1, 0.2, 0.3, 0.4],
+        tolerance_s=1e-4,
+        backend="torchcodec",
+    )
+
+    assert calls == [[3, 6, 9, 12]]
     assert frames.shape[0] == 4
