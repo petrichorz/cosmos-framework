@@ -395,6 +395,8 @@ class Profiling:
     profile_freq: int = 1
     # Number of warmup iterations before the active profile iteration.
     profile_warmup: int = 3
+    # Number of active iterations recorded by the profiler.
+    profile_active: int = 1
     # Target ranks for profiling, each entry must be >=0 and < world_size.
     target_ranks: list[int] = list(range(8))
     # The options below apply only to the torch profiler (enable_profiling).

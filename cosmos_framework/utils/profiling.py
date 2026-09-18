@@ -26,7 +26,7 @@ def _enable_npu_profiling(config, global_step):
     if rank not in options.target_ranks:
         yield None
         return
-    active = int(os.environ.get("COSMOS_NPU_PROFILE_ACTIVE_STEPS", "2"))
+    active = options.profile_active
     wait = options.profile_freq - options.profile_warmup - active
     if active < 1 or wait < 0:
         raise ValueError("profile_freq must cover profile_warmup + positive active steps")
