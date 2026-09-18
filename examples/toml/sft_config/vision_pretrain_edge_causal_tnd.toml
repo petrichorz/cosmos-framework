@@ -9,7 +9,7 @@
 task         = "vfm"
 experiment   = "vision_sft_edge_lerobot3"
 project      = "cosmos3"
-group        = "causal_pretrain"
+group        = "mot_causal_fsdp"
 name         = "vision_causal_edge_tnd_pretrain"
 wandb_mode   = "offline"
 
@@ -65,7 +65,7 @@ weight_decay = 0.05
 
 [scheduler]
 lr_scheduler_type = "LambdaLinear"
-cycle_lengths      = [2000]
+cycle_lengths      = [20000]
 f_max              = [1.0]
 f_min              = [0.3]
 f_start            = [0.0]
@@ -76,7 +76,7 @@ warm_up_steps      = [50]
 distributed_parallelism = "fsdp"
 grad_accum_iter         = 1
 logging_iter            = 1
-max_iter                = 2000
+max_iter                = 20000
 
 [trainer.callbacks.compile_tokenizer]
 compile_after_iterations = 3
@@ -94,9 +94,11 @@ save_iter            = 500
 [dataloader_train]
 max_sequence_length = 54000
 max_caption_tokens   = 2048
+use_multi_resolution = true
+use_multi_fps        = true
 
 min_video_frames     = 61
-max_video_duration_s = 61.0
+max_video_duration_s = 31.0
 max_video_fps        = 15.0
 
 video_backend     = "pyav"
