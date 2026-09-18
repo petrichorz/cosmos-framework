@@ -10,21 +10,21 @@
 
 ## 已实现特性总览
 
-| 特性 | 章节 | 简述 |
-|------|------|------|
-| LeRobot 3.x 动态加载 | 3、4 | 不转 JSONL，用官方 `LeRobotDatasetMetadata` 读 info.json + episodes parquet |
-| **惰性化加载** | 3、4 | 加载期只产出 `(sources, episode_index)` 扁平索引，episode 字段采样期现算，不物化 dict |
-| **独立 IterableDataset** | 2.3 | `LeRobotSFTDataset` 不继承 `SFTDataset`，自实现 `__init__`/`__len__`/`__iter__`/`process_one_sample` |
-| 统一数据入口 `dataset_path` | 4.7 | `.jsonl`→manifest 模式；目录→单数据集根/父目录递归 |
-| manifest 多数据集加载 | 4.8 | 每行一个 path，逐行覆盖 `video_feature_key`/`keywords`/`caption_key` |
-| manifest 并行加载 | 4.8 | ThreadPoolExecutor 并行读多个数据集 |
-| 多分辨率训练 | 4.10 | `use_multi_resolution`：256/480 随机，不上采样 |
-| 多 fps 训练 | 4.10 | `use_multi_fps`：temporal_interval 随机 2/3/4 |
-| 视频解码 | 5 | 底层 PyAV `av.open` 解码时 `reformat` 直接 resize（消除外部 `F.interpolate`） |
-| decoder LRU 缓存 | 5.5 | 替换 lerobot 无界缓存为 LRU（**仅 torchcodec 生效，当前 pyav 下 no-op**） |
-| caption 回退 | 4.6 | `caption_key` 列优先，回退官方 `tasks` 列 |
-| episode 过滤阈值 | 4.11 | `min_video_frames`（下界/帧）+ `max_video_duration_s`（上界/秒）暴露到 toml |
-| 本地 vendored lerobot | 附录 | `lerobot/`（0.5.0），训练时经 `PYTHONPATH=.` 优先于 site-packages |
+| 特性                        | 章节 | 简述                                                                                                 |
+| --------------------------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| LeRobot 3.x 动态加载        | 3、4 | 不转 JSONL，用官方 `LeRobotDatasetMetadata` 读 info.json + episodes parquet                          |
+| **惰性化加载**              | 3、4 | 加载期只产出 `(sources, episode_index)` 扁平索引，episode 字段采样期现算，不物化 dict                |
+| **独立 IterableDataset**    | 2.3  | `LeRobotSFTDataset` 不继承 `SFTDataset`，自实现 `__init__`/`__len__`/`__iter__`/`process_one_sample` |
+| 统一数据入口 `dataset_path` | 4.7  | `.jsonl`→manifest 模式；目录→单数据集根/父目录递归                                                   |
+| manifest 多数据集加载       | 4.8  | 每行一个 path，逐行覆盖 `video_feature_key`/`keywords`/`caption_key`                                 |
+| manifest 并行加载           | 4.8  | ThreadPoolExecutor 并行读多个数据集                                                                  |
+| 多分辨率训练                | 4.10 | `use_multi_resolution`：256/480 随机，不上采样                                                       |
+| 多 fps 训练                 | 4.10 | `use_multi_fps`：temporal_interval 随机 2/3/4                                                        |
+| 视频解码                    | 5    | 底层 PyAV `av.open` 解码时 `reformat` 直接 resize（消除外部 `F.interpolate`）                        |
+| decoder LRU 缓存            | 5.5  | 替换 lerobot 无界缓存为 LRU（**仅 torchcodec 生效，当前 pyav 下 no-op**）                            |
+| caption 回退                | 4.6  | `caption_key` 列优先，回退官方 `tasks` 列                                                            |
+| episode 过滤阈值            | 4.11 | `min_video_frames`（下界/帧）+ `max_video_duration_s`（上界/秒）暴露到 toml                          |
+| 本地 vendored lerobot       | 附录 | `lerobot/`（0.5.0），训练时经 `PYTHONPATH=.` 优先于 site-packages                                    |
 
 ---
 
@@ -51,16 +51,16 @@
 
 ### 已拍板的决策
 
-| # | 决策 | 说明 |
-|---|------|------|
-| 1 | 路线 | 路线 B：动态加载，不转 JSONL |
-| 2 | 相机 | 关键字匹配选视角（key 名含 `top`/`head` 等关键字即选中；匹配不到回退第一个 video），用官方 `meta.video_keys` |
-| 3 | caption 粒度 | episode 级（一个任务一个描述）；`caption_key` 列优先，回退官方 `tasks` 列 |
-| 4 | 字段语义 | 帧区间存**帧编号**（非 timestamp）；episode 级字段在采样期现算 |
-| 5 | 代码组织 | **原 `sft_dataset.py` / `vision_sft_edge.py` 一行不改**；新建 `sft_dataset_lerobot3.py` + `vision_sft_edge_lerobot3.py`，且 `LeRobotSFTDataset` **不继承 `SFTDataset`** |
-| 6 | 效率 | 惰性化加载（`sources` + `episode_index` 扁平索引）；视频解码复用官方 lerobot `decode_video_frames` |
-| 7 | **数据入口** | 统一 `DATASET_PATH`：`.jsonl` 文件 → manifest 模式（每行一个数据集 path）；目录 → 单数据集根/父目录递归 |
-| 8 | 解码后端 | `video_backend="pyav"`（torchcodec 当前 NPU 环境不可用）；decoder LRU 缓存仅 torchcodec 生效 |
+| #   | 决策         | 说明                                                                                                                                                                    |
+| --- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 路线         | 路线 B：动态加载，不转 JSONL                                                                                                                                            |
+| 2   | 相机         | 关键字匹配选视角（key 名含 `top`/`head` 等关键字即选中；匹配不到回退第一个 video），用官方 `meta.video_keys`                                                            |
+| 3   | caption 粒度 | episode 级（一个任务一个描述）；`caption_key` 列优先，回退官方 `tasks` 列                                                                                               |
+| 4   | 字段语义     | 帧区间存**帧编号**（非 timestamp）；episode 级字段在采样期现算                                                                                                          |
+| 5   | 代码组织     | **原 `sft_dataset.py` / `vision_sft_edge.py` 一行不改**；新建 `sft_dataset_lerobot3.py` + `vision_sft_edge_lerobot3.py`，且 `LeRobotSFTDataset` **不继承 `SFTDataset`** |
+| 6   | 效率         | 惰性化加载（`sources` + `episode_index` 扁平索引）；视频解码复用官方 lerobot `decode_video_frames`                                                                      |
+| 7   | **数据入口** | 统一 `DATASET_PATH`：`.jsonl` 文件 → manifest 模式（每行一个数据集 path）；目录 → 单数据集根/父目录递归                                                                 |
+| 8   | 解码后端     | `video_backend="pyav"`（torchcodec 当前 NPU 环境不可用）；decoder LRU 缓存仅 torchcodec 生效                                                                            |
 
 ---
 
@@ -88,21 +88,21 @@ examples/_sft_launcher_common.sh            # 公共启动脚本，**未改动**
 
 ### 2.1 `sft_dataset_lerobot3.py` 内容
 
-| 符号 | 行号 | 作用 |
-|------|------|------|
-| `_MULTI_RESOLUTION_TIERS` / `_MULTI_FPS_INTERVALS` | 51 / 53 | 多分辨率档位（256/480）/ 多 fps 间隔（2/3/4） |
-| `_LRU_VIDEO_CACHE_MAX_SIZE` | 58 | decoder LRU 缓存容量（仅 torchcodec 生效） |
-| `_ensure_hf_hub_offline` | 64 | 强制 HF Hub 离线（幂等，只加载本地数据集） |
-| `_LRUVideoDecoderCache` | 79 | LRU 版 torchcodec decoder 缓存（`seek_mode="exact"`，pyav 下 no-op） |
-| `_patch_decoder_cache` | 151 | 把 lerobot 模块级无界缓存替换为 LRU 版（pyav 下 no-op） |
-| `_LerobotSource` | 172 | dataclass：数据集级常量 + 官方 meta 对象，每数据集一份 |
-| `_select_lerobot_video_key` | 195 | 选定 video 字段（用官方 `meta.video_keys`；显式 → 关键字 → 第一个） |
-| `_discover_lerobot_roots` | 228 | 单数据集根 or 父目录多数据集发现 |
-| `_build_lerobot_source` | 253 | 读单个数据集 → `(source, valid_eps)`，不物化 episode dict |
-| `_load_lerobot_metadata` | 322 | 目录入口：发现多个数据集 → 产出 `(sources, episode_index)` |
-| `_load_lerobot_metadata_from_manifest` | 362 | **manifest 入口**：读 JSONL，每行一个 path，并行加载合并 |
-| `LeRobotSFTDataset(IterableDataset)` | 448 | **独立** IterableDataset，不继承 `SFTDataset` |
-| `get_sft_dataset_from_lerobot` | 832 | LeRobot 版入口，按 `dataset_path` 后缀分流，构造 `LeRobotSFTDataset` |
+| 符号                                               | 行号    | 作用                                                                 |
+| -------------------------------------------------- | ------- | -------------------------------------------------------------------- |
+| `_MULTI_RESOLUTION_TIERS` / `_MULTI_FPS_INTERVALS` | 51 / 53 | 多分辨率档位（256/480）/ 多 fps 间隔（2/3/4）                        |
+| `_LRU_VIDEO_CACHE_MAX_SIZE`                        | 58      | decoder LRU 缓存容量（仅 torchcodec 生效）                           |
+| `_ensure_hf_hub_offline`                           | 64      | 强制 HF Hub 离线（幂等，只加载本地数据集）                           |
+| `_LRUVideoDecoderCache`                            | 79      | LRU 版 torchcodec decoder 缓存（`seek_mode="exact"`，pyav 下 no-op） |
+| `_patch_decoder_cache`                             | 151     | 把 lerobot 模块级无界缓存替换为 LRU 版（pyav 下 no-op）              |
+| `_LerobotSource`                                   | 172     | dataclass：数据集级常量 + 官方 meta 对象，每数据集一份               |
+| `_select_lerobot_video_key`                        | 195     | 选定 video 字段（用官方 `meta.video_keys`；显式 → 关键字 → 第一个）  |
+| `_discover_lerobot_roots`                          | 228     | 单数据集根 or 父目录多数据集发现                                     |
+| `_build_lerobot_source`                            | 253     | 读单个数据集 → `(source, valid_eps)`，不物化 episode dict            |
+| `_load_lerobot_metadata`                           | 322     | 目录入口：发现多个数据集 → 产出 `(sources, episode_index)`           |
+| `_load_lerobot_metadata_from_manifest`             | 362     | **manifest 入口**：读 JSONL，每行一个 path，并行加载合并             |
+| `LeRobotSFTDataset(IterableDataset)`               | 448     | **独立** IterableDataset，不继承 `SFTDataset`                        |
+| `get_sft_dataset_from_lerobot`                     | 832     | LeRobot 版入口，按 `dataset_path` 后缀分流，构造 `LeRobotSFTDataset` |
 
 ### 2.2 复用父模块符号（不重复实现）
 
@@ -133,15 +133,15 @@ from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # 读 info/
 
 早期版本通过继承 `SFTDataset` 并 override `process_one_sample` 复用逻辑，但父类是单体方法（无钩子），导致要逐字复制整个方法、且 S3 相关属性（`boto3`、`s3_client`）被白带进来。最终改为**独立 `IterableDataset`**：
 
-| 项 | 处理方式 |
-|----|----------|
-| 类声明 | `class LeRobotSFTDataset(torch.utils.data.IterableDataset)` |
-| `__init__` | 自实现（含 tokenizer 实例化、shard 占位属性），**无 S3 依赖** |
-| `__len__` | `len(self.episode_index)` |
-| `_tokenize_caption` | 自封装 `tokenize_caption` + 截断 |
-| `__iter__` | 复制父类 shard 脚手架（分区/shuffle/无限循环），删掉 boto3 |
-| `process_one_sample(ds_idx, ep_idx)` | 惰性化采样：现算 episode 字段，走官方 `decode_video_frames` |
-| 复用纯函数 | `_select_caption` / `_DURATION_TEMPLATE` / `_RESOLUTION_TEMPLATE` / `_MAX_CAPTION_TOKENS` |
+| 项                                   | 处理方式                                                                                  |
+| ------------------------------------ | ----------------------------------------------------------------------------------------- |
+| 类声明                               | `class LeRobotSFTDataset(torch.utils.data.IterableDataset)`                               |
+| `__init__`                           | 自实现（含 tokenizer 实例化、shard 占位属性），**无 S3 依赖**                             |
+| `__len__`                            | `len(self.episode_index)`                                                                 |
+| `_tokenize_caption`                  | 自封装 `tokenize_caption` + 截断                                                          |
+| `__iter__`                           | 复制父类 shard 脚手架（分区/shuffle/无限循环），删掉 boto3                                |
+| `process_one_sample(ds_idx, ep_idx)` | 惰性化采样：现算 episode 字段，走官方 `decode_video_frames`                               |
+| 复用纯函数                           | `_select_caption` / `_DURATION_TEMPLATE` / `_RESOLUTION_TEMPLATE` / `_MAX_CAPTION_TOKENS` |
 
 这样保留了 `RankPartitionedDataLoader` 依赖的 `shard_world_size`/`shard_rank`/`shard_id` + `__iter__` 约定，同时彻底去掉 S3 流程的耦合。
 
@@ -153,11 +153,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # 读 info/
 
 LeRobot 版**不再在加载期物化 episode dict**，而是把样本信息拆成两层：
 
-| 层 | 存什么 | 何时产生 |
-|----|--------|---------|
-| **数据集级常量**（`_LerobotSource`） | root / meta / video_key / width / height / fps / aspect_ratio / total_frames / caption_key / root_hash / name | 加载期，每数据集一份 |
-| **扁平 episode 索引** | `episode_index: list[tuple[int, int]]`，每项 `(ds_idx, ep_idx)` | 加载期，每 episode 一个 2 元组 |
-| **episode 级字段** | uuid / vision_path / start_frame / end_frame / caption | **采样期**由 `process_one_sample(ds_idx, ep_idx)` 从 `meta.episodes[ep_idx]` 现算 |
+| 层                                   | 存什么                                                                                                        | 何时产生                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **数据集级常量**（`_LerobotSource`） | root / meta / video_key / width / height / fps / aspect_ratio / total_frames / caption_key / root_hash / name | 加载期，每数据集一份                                                              |
+| **扁平 episode 索引**                | `episode_index: list[tuple[int, int]]`，每项 `(ds_idx, ep_idx)`                                               | 加载期，每 episode 一个 2 元组                                                    |
+| **episode 级字段**                   | uuid / vision_path / start_frame / end_frame / caption                                                        | **采样期**由 `process_one_sample(ds_idx, ep_idx)` 从 `meta.episodes[ep_idx]` 现算 |
 
 数据流：
 
@@ -176,12 +176,12 @@ LeRobot 版**不再在加载期物化 episode dict**，而是把样本信息拆�
 
 ### 3.2 与早期「加载期物化」的对比
 
-| 阶段 | 早期（物化） | 现在（惰性化） |
-|------|-------------|---------------|
-| 加载期产出 | `list[dict]`，每 episode 一个完整 dict（~15 字段 + 嵌套 window） | `sources` + `episode_index`（每 episode 一个 `(int,int)` 元组） |
-| 数据集级字段 | 每 episode 重复存一份（7 字段 × N） | 每数据集存一份 |
-| episode 级字段 | 提前算好存 dict | 采样期从 `meta.episodes[ep_idx]` 现算 |
-| 内存 | 大数据集下几十~上百 MB Python 对象 | 主要是 mmap + 轻量元组列表 |
+| 阶段           | 早期（物化）                                                     | 现在（惰性化）                                                  |
+| -------------- | ---------------------------------------------------------------- | --------------------------------------------------------------- |
+| 加载期产出     | `list[dict]`，每 episode 一个完整 dict（~15 字段 + 嵌套 window） | `sources` + `episode_index`（每 episode 一个 `(int,int)` 元组） |
+| 数据集级字段   | 每 episode 重复存一份（7 字段 × N）                              | 每数据集存一份                                                  |
+| episode 级字段 | 提前算好存 dict                                                  | 采样期从 `meta.episodes[ep_idx]` 现算                           |
+| 内存           | 大数据集下几十~上百 MB Python 对象                               | 主要是 mmap + 轻量元组列表                                      |
 
 **收益**：省内存 + 省加载期耗时；**代价**：采样期多一次 mmap 行取 + 字段现算（被视频解码开销覆盖，可忽略）。shard/shuffle 算法不变，只是被 shuffle 的对象从重 dict 列表换成轻索引。
 
@@ -204,6 +204,7 @@ uuid = f"{source.name}_{source.root_hash}_chunk_{data_chunk}_file_{data_file}_ep
 - 目的：跨**数据集**、跨 chunk、跨 file、跨 episode 唯一
 
 > episode_index 单数据集内唯一，但**多数据集合并时**：
+>
 > 1. 不同数据集可能有相同编号 → 加数据集目录名。
 > 2. **不同父目录下可能有同名数据集目录** → 光有目录名不够，再加**完整路径的短 hash** 保证唯一。
 
@@ -256,10 +257,10 @@ end_frame   = round(to_ts * fps) - 1   # to 是开区间，-1 变闭区间
 
 验证（toy 数据）：
 
-| episode | from | to | start | end | length | 吻合 |
-|---------|------|-----|-------|-----|--------|------|
-| 0 | 0.0 | 18.466667 | 0 | 553 | 554 | ✅ |
-| 1 | 18.466667 | 36.133333 | 554 | 1083 | 530 | ✅ |
+| episode | from      | to        | start | end  | length | 吻合 |
+| ------- | --------- | --------- | ----- | ---- | ------ | ---- |
+| 0       | 0.0       | 18.466667 | 0     | 553  | 554    | ✅   |
+| 1       | 18.466667 | 36.133333 | 554   | 1083 | 530    | ✅   |
 
 > `to_timestamp` 是**开区间**，该时刻的帧属于下一个 episode，所以 `end_frame = round(to×fps) - 1`。
 
@@ -283,7 +284,7 @@ if not caption:
 ```
 
 > 关键边界行为：caption 为空时，`t2w_window` 里**没有** `caption` key，下游 `_select_caption` 找不到已知 key → `return None` → `process_one_sample` 跳过该样本。**不写 `caption: None`**，否则下游 `raw.strip()` 会 `AttributeError` 崩溃。
-
+>
 > `tasks` 列是官方 episodes 表原生列，实际类型为 `numpy.ndarray`（非 list），用 `hasattr(x, "__len__")` 判断。
 
 ### 4.7 统一数据入口（`dataset_path` 分流）
@@ -297,22 +298,22 @@ else:
     sources, episode_index = _load_lerobot_metadata(dataset_path, ...)                # 目录模式
 ```
 
-| 传入值 | 类型 | 走哪条逻辑 | 行为 |
-|--------|------|-----------|------|
-| `xxx.jsonl` | 文件 | `_load_lerobot_metadata_from_manifest` | 逐行读 path，加载所有数据集 |
-| 单数据集根（含 `meta/info.json`） | 目录 | `_discover_lerobot_roots` 第 1 分支 | 返回 `[root]` |
-| 父目录（含多个数据集） | 目录 | `_discover_lerobot_roots` 第 2 分支 | `rglob("meta/info.json")` 递归发现 |
+| 传入值                            | 类型 | 走哪条逻辑                             | 行为                               |
+| --------------------------------- | ---- | -------------------------------------- | ---------------------------------- |
+| `xxx.jsonl`                       | 文件 | `_load_lerobot_metadata_from_manifest` | 逐行读 path，加载所有数据集        |
+| 单数据集根（含 `meta/info.json`） | 目录 | `_discover_lerobot_roots` 第 1 分支    | 返回 `[root]`                      |
+| 父目录（含多个数据集）            | 目录 | `_discover_lerobot_roots` 第 2 分支    | `rglob("meta/info.json")` 递归发现 |
 
 ### 4.8 manifest 文件格式（JSONL）
 
 manifest 是 JSONL 文件，**每行一个 dict**，每行支持以下 key（其余 key 静默忽略）：
 
-| key | 必需 | 含义 | 缺省回退 |
-|-----|------|------|---------|
-| `path` | ✅ 必需 | 数据集路径（单数据集根 or 父目录） | 无（缺则 warning 跳过） |
-| `video_feature_key` | 可选 | 显式指定 feature 名 | config 全局值（`None`） |
-| `video_feature_keywords` | 可选 | 关键字 list | config 全局值（`["top","head"]`） |
-| `caption_key` | 可选 | caption 列名 | config 全局值（`"caption"`） |
+| key                      | 必需    | 含义                               | 缺省回退                          |
+| ------------------------ | ------- | ---------------------------------- | --------------------------------- |
+| `path`                   | ✅ 必需 | 数据集路径（单数据集根 or 父目录） | 无（缺则 warning 跳过）           |
+| `video_feature_key`      | 可选    | 显式指定 feature 名                | config 全局值（`None`）           |
+| `video_feature_keywords` | 可选    | 关键字 list                        | config 全局值（`["top","head"]`） |
+| `caption_key`            | 可选    | caption 列名                       | config 全局值（`"caption"`）      |
 
 ```jsonl
 {"path": "/data/dataset_a", "video_feature_keywords": ["side"]}
@@ -364,14 +365,15 @@ sources, episode_index = _merge(results)
 
 **为什么选多线程而非多进程**：
 
-| 环节 | 性质 | 多线程能否并行 |
-|------|------|--------------|
-| `LeRobotDatasetMetadata`（info.json + episodes parquet I/O + C++ 解压） | 会释放 GIL | ✅ 能并行 |
-| 字段映射（Python 纯代码） | 受 GIL 限制 | ❌ 不能 |
+| 环节                                                                    | 性质        | 多线程能否并行 |
+| ----------------------------------------------------------------------- | ----------- | -------------- |
+| `LeRobotDatasetMetadata`（info.json + episodes parquet I/O + C++ 解压） | 会释放 GIL  | ✅ 能并行      |
+| 字段映射（Python 纯代码）                                               | 受 GIL 限制 | ❌ 不能        |
 
 因为耗时大头是 `LeRobotDatasetMetadata` 加载（I/O 密集、释放 GIL），`ThreadPoolExecutor` 就能吃到大部分收益，且免去多进程的 pickle 开销、冷启动和日志乱序。
 
 **关键设计**：
+
 - `ex.map` 保持输入顺序，结果顺序与 manifest 行顺序一致
 - `workers<=1` 或只有 1 个数据集时，走原串行路径（零并发开销）
 - 只进入并行分支时打一条 `[manifest] 并行加载 N 个数据集` 日志
@@ -382,9 +384,9 @@ sources, episode_index = _merge(results)
 
 `video_feature_key` / `video_feature_keywords` / `caption_key` 有**两层默认值**：
 
-| 层 | 位置 | 值 |
-|----|------|-----|
-| 函数签名默认值 | `sft_dataset_lerobot3.py:850-852` | `None` / `None` / `"caption"` |
+| 层                                  | 位置                                  | 值                                   |
+| ----------------------------------- | ------------------------------------- | ------------------------------------ |
+| 函数签名默认值                      | `sft_dataset_lerobot3.py:850-852`     | `None` / `None` / `"caption"`        |
 | **experiment 显式传入**（实际生效） | `vision_sft_edge_lerobot3.py:231-233` | `None` / `["top","head"]` / `"task"` |
 
 experiment 显式传了这三个参数，所以**真正生效的是 experiment 的值**（其中 `video_feature_keywords` 用 `["top","head"]` 覆盖了签名默认 `None`；`caption_key` 用 `"task"` 覆盖了签名默认 `"caption"`——真实数据集的 caption 列名叫 `task`）。这三个 experiment 值就是 manifest 逐行缺省时的回退值。
@@ -421,11 +423,11 @@ else:
 
 **不上采样**：候选 = 所有 ≤ 视频短边的档位。
 
-| 视频 | 候选档位 |
-|------|---------|
-| 1080p / 720p / 480p | 256 / 480 |
-| 360p | 256 |
-| 超小（短边<256） | fallback 256 |
+| 视频                | 候选档位     |
+| ------------------- | ------------ |
+| 1080p / 720p / 480p | 256 / 480    |
+| 360p                | 256          |
+| 超小（短边<256）    | fallback 256 |
 
 #### fps 随机选择（`process_one_sample`）
 
@@ -462,10 +464,10 @@ toml [dataloader_train].use_multi_resolution
 
 加载期在 `_build_lerobot_source` 里对每个 episode 做两层过滤，阈值已提取为可配置参数并暴露到 toml：
 
-| 参数 | 单位 | 方向 | 默认 | 作用 | 等价（30fps） |
-|------|------|------|------|------|--------------|
-| `min_video_frames` | 帧 | 下界 | 61 | 丢弃帧数 < 61 的短 episode | ~2 秒 |
-| `max_video_duration_s` | 秒 | 上界 | 61.0 | 丢弃时长 > 61 秒的长 episode | ~1830 帧 |
+| 参数                   | 单位 | 方向 | 默认 | 作用                         | 等价（30fps） |
+| ---------------------- | ---- | ---- | ---- | ---------------------------- | ------------- |
+| `min_video_frames`     | 帧   | 下界 | 61   | 丢弃帧数 < 61 的短 episode   | ~2 秒         |
+| `max_video_duration_s` | 秒   | 上界 | 61.0 | 丢弃时长 > 61 秒的长 episode | ~1830 帧      |
 
 > 注意：两者数值巧合都是 61，但**单位与过滤方向完全不同**——`min_video_frames` 管「太短」（帧），`max_video_duration_s` 管「太长」（秒）。
 
@@ -497,9 +499,9 @@ toml [dataloader_train].min_video_frames / .max_video_duration_s
 **token 预算表**（demo 640×480 数据，4:3，T=1341 帧）：
 
 | 分辨率档 | patch 数 | interval=2 时单样本 token | 是否超 45056 |
-|---------|---------|--------------------------|-------------|
-| 256 | 80 | ~13440 | ✅ 不超 |
-| 480 | 391 | ~65688 | ❌ 超 |
+| -------- | -------- | ------------------------- | ------------ |
+| 256      | 80       | ~13440                    | ✅ 不超      |
+| 480      | 391      | ~65688                    | ❌ 超        |
 
 **必须同步改 toml 两处**（`vision_sft_edge.toml`）：
 
@@ -522,6 +524,7 @@ max_sequence_length = 65760             # 从 45056 放大（真正生效的 bud
 ## 5. 视频解码（底层 PyAV 解码时 resize）
 
 > ⚠️ **本章已二次重写**。演进历史：
+>
 > 1. 最早是「自建 torchcodec decoder + `get_frames_in_range` 按帧编号 seek + 自写 resize」；
 > 2. 后改为「复用官方 lerobot `decode_video_frames` 按时间戳解码 + 外部 `F.interpolate` resize」；
 > 3. **最终**改为「底层 PyAV `av.open` 解码时直接 `frame.reformat` resize」，消除全分辨率中间 tensor 与外部 `F.interpolate`。
@@ -555,6 +558,7 @@ def _decode_video_frames_pyav_resized(
 ```
 
 **关键收益**：
+
 - 省掉全分辨率 RGB 中间 tensor 的生成 + 内存带宽 + 一次独立 `F.interpolate` kernel。
 - toy 640×480 收益 <5%（resize 本就是零头）；高分辨率真实数据约 10~20%（全分辨率 RGB 每帧 3~6MB，1341 帧就是 4~8GB 中间搬运）。
 - **省不掉**：yuv 软解本身（帧间依赖，reformat 前必须解出全分辨率 YUV 帧）——这是 87% 的大头。
@@ -613,7 +617,7 @@ _vu._default_decoder_cache = _LRUVideoDecoderCache(max_size=max_size)
 3. **`max_size=64`**：限制同时打开的 decoder 数量；带 `Lock` 保证多线程安全。
 
 > 与 action 侧 `_LRUVideoDecoderCache` 唯一差异：`seek_mode="exact"`（vision SFT 要精确切 episode 帧边界；action 对精确帧不敏感，用 `approximate`）。
-
+>
 > ⚠️ **重要：本缓存仅在 torchcodec 后端生效。** 现在 `_decode_video_frames_pyav_resized` 走的是底层 PyAV，也不查 `_default_decoder_cache`。所以当前 `_patch_decoder_cache` / `_LRUVideoDecoderCache` / `decoder_cache_max_size` 全是 **no-op**。保留它们是给将来切 torchcodec 时防无界内存膨胀（方案 B）。
 
 ### 5.6 后处理（已 resize，直接转 uint8）
@@ -626,9 +630,9 @@ video_chunk = video_frames.permute(0, 2, 3, 1).cpu().numpy()  # [T,H,W,3] uint8
 ```
 
 > 说明：后续 `crop_y/crop_x/target_h/target_w` 的 center crop 逻辑不变——因为帧已 resize 到 `(resize_h, resize_w)`，crop 语义与原来「F.interpolate 到 resize 再 crop」一致。
-
+>
 > ⚠️ **bicubic 非逐像素等价**：PyAV `Interpolation.BICUBIC`（libswscale）与 PyTorch `F.interpolate(bicubic, align_corners=False)` 数值有细微差异，训练可接受，但非逐像素一致。
-
+>
 > **reformat 不可省略**：即使 `resize_h/resize_w == 原尺寸`（target == input，无需缩放），`frame.reformat(format="rgb24")` 仍必须执行——它同时承担 **yuv→rgb 色彩空间转换**，去掉会导致下游拿到 yuv 数据、颜色全错。
 
 ### 5.7 内存账（为什么不能全量 decode 缓存）
@@ -643,73 +647,73 @@ toy 一个 mp4：24263 帧 × 480 × 640 × 3 = **约 22.4 GB**（解压后 RGB�
 
 ### 6.1 数据格式层（LeRobot）
 
-| # | 风险点 | 结论 | 依据 |
-|---|--------|------|------|
-| 1 | v3 命名单数还是复数 | **复数 `observation.images.*`**（不是单数 `image`） | toy 数据实测 |
-| 2 | 一个 mp4 含几个 episode | **多个 episode 共享一个 mp4**，靠 `from/to_timestamp` 切分 | toy：50 episode 共享 file-000.mp4 |
-| 3 | `to_timestamp` 开闭区间 | **开区间**：该时刻帧属于下一 episode | toy：`to×fps` 精确等于下一集起始帧 |
-| 4 | `length` / 行跨度 / 时间跨度 | 精确相等：`length = round((to-from)×fps)` | toy 数据验证 |
-| 5 | `frame_index` 全局还是 episode 内 | **episode 内从 0 重新开始** | toy：episode 1 首帧 frame_index=0 |
+| #   | 风险点                            | 结论                                                       | 依据                               |
+| --- | --------------------------------- | ---------------------------------------------------------- | ---------------------------------- |
+| 1   | v3 命名单数还是复数               | **复数 `observation.images.*`**（不是单数 `image`）        | toy 数据实测                       |
+| 2   | 一个 mp4 含几个 episode           | **多个 episode 共享一个 mp4**，靠 `from/to_timestamp` 切分 | toy：50 episode 共享 file-000.mp4  |
+| 3   | `to_timestamp` 开闭区间           | **开区间**：该时刻帧属于下一 episode                       | toy：`to×fps` 精确等于下一集起始帧 |
+| 4   | `length` / 行跨度 / 时间跨度      | 精确相等：`length = round((to-from)×fps)`                  | toy 数据验证                       |
+| 5   | `frame_index` 全局还是 episode 内 | **episode 内从 0 重新开始**                                | toy：episode 1 首帧 frame_index=0  |
 
 ### 6.2 字段映射层
 
-| # | 风险点 | 结论 |
-|---|--------|------|
-| 1 | `shape` 是 H×W 还是 W×H | **`[H, W, C]`**，`width=shape[1]`, `height=shape[0]` |
-| 2 | 视频字段 key 能否硬编码 | **不能**（`observation.images.top` 是数据集特定的），用关键字匹配/兜底动态选 |
-| 3 | `end_frame` 语义 | 存**帧编号**（文件内），非 timestamp；`end = round(to×fps) - 1` |
-| 4 | `aspect_ratio` | `get_aspect_ratio(width,height)` 派生，JSONL/LeRobot 里没有现成字段 |
+| #   | 风险点                  | 结论                                                                         |
+| --- | ----------------------- | ---------------------------------------------------------------------------- |
+| 1   | `shape` 是 H×W 还是 W×H | **`[H, W, C]`**，`width=shape[1]`, `height=shape[0]`                         |
+| 2   | 视频字段 key 能否硬编码 | **不能**（`observation.images.top` 是数据集特定的），用关键字匹配/兜底动态选 |
+| 3   | `end_frame` 语义        | 存**帧编号**（文件内），非 timestamp；`end = round(to×fps) - 1`              |
+| 4   | `aspect_ratio`          | `get_aspect_ratio(width,height)` 派生，JSONL/LeRobot 里没有现成字段          |
 
 ### 6.3 加 caption 的侵入位置
 
-| # | 风险点 | 结论 |
-|---|--------|------|
-| 1 | 加到 episodes 表 | ✅ **安全**，官方 lerobot 加载不报错（已实测） |
-| 2 | 加到 data 表 | ❌ **禁止**，破坏 `info.json` schema 校验，报 `CastError`（已实测） |
-| 3 | `info.json` 的 `features` 约束范围 | **只严格约束 data 表**，不约束 episodes 表 |
-| 4 | **pandas 3.0.5 破坏嵌套 list 列** | ❌ 不能用 pandas 3.0.5 读写 episodes parquet（`stats/*/*` 列损坏）。加 caption 用 **pyarrow**（append_column）或 **pandas 2.x** |
-| 5 | `tasks` 列实际类型 | **`numpy.ndarray`**（不是 list/tuple），判断用 `hasattr(x, "__len__")` |
-| 6 | **toy 数据集 stats 列 parquet 编码损坏** | 磁盘 def/rep level 损坏，重写整表必然失败。**解法：drop 掉 `stats/*/*` 列**，只保留有效列 + caption |
+| #   | 风险点                                   | 结论                                                                                                                            |
+| --- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 加到 episodes 表                         | ✅ **安全**，官方 lerobot 加载不报错（已实测）                                                                                  |
+| 2   | 加到 data 表                             | ❌ **禁止**，破坏 `info.json` schema 校验，报 `CastError`（已实测）                                                             |
+| 3   | `info.json` 的 `features` 约束范围       | **只严格约束 data 表**，不约束 episodes 表                                                                                      |
+| 4   | **pandas 3.0.5 破坏嵌套 list 列**        | ❌ 不能用 pandas 3.0.5 读写 episodes parquet（`stats/*/*` 列损坏）。加 caption 用 **pyarrow**（append_column）或 **pandas 2.x** |
+| 5   | `tasks` 列实际类型                       | **`numpy.ndarray`**（不是 list/tuple），判断用 `hasattr(x, "__len__")`                                                          |
+| 6   | **toy 数据集 stats 列 parquet 编码损坏** | 磁盘 def/rep level 损坏，重写整表必然失败。**解法：drop 掉 `stats/*/*` 列**，只保留有效列 + caption                             |
 
 ### 6.4 视频解码层（lerobot `decode_video_frames`）
 
-| # | 风险点 | 结论 |
-|---|--------|------|
-| 1 | 解码 API | 官方 `lerobot.datasets.video_utils.decode_video_frames`，按**绝对时间戳**解码（非帧编号 seek） |
-| 2 | 返回形状/dtype | `[T, C, H, W]` float32 ∈ [0,1]（**不是 uint8 也不是 `[N,H,W,C]`**），后处理 resize + 转 uint8（见 5.6） |
-| 3 | seek_mode | `_LRUVideoDecoderCache` 用 **`exact`**（精确帧定位），不是 action 侧的 `approximate`（**但仅 torchcodec 生效**） |
-| 4 | decoder 缓存 | lerobot 模块级无界缓存 → 替换为 LRU 版 `_LRUVideoDecoderCache`（防内存膨胀）；**pyav 下 no-op**（见 5.5） |
-| 5 | 时间戳偏差 | 偏差超过 `tolerance_s` 会抛 `AssertionError`；已 catch 并跳过坏样本（见 5.4） |
-| 6 | 不能全量 decode 缓存 | 一个 mp4 解压后 ~22GB（toy），会 OOM；缓存的只是 decoder，不是解码帧 |
-| 7 | 抽帧越界 | 已删除固定抽 N 帧（`num_video_frames>0`）能力，native chunk 下 `end_frame` 由 `to_timestamp` 精确切分，不再有抽帧跨度越界问题 |
+| #   | 风险点               | 结论                                                                                                                          |
+| --- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 解码 API             | 官方 `lerobot.datasets.video_utils.decode_video_frames`，按**绝对时间戳**解码（非帧编号 seek）                                |
+| 2   | 返回形状/dtype       | `[T, C, H, W]` float32 ∈ [0,1]（**不是 uint8 也不是 `[N,H,W,C]`**），后处理 resize + 转 uint8（见 5.6）                       |
+| 3   | seek_mode            | `_LRUVideoDecoderCache` 用 **`exact`**（精确帧定位），不是 action 侧的 `approximate`（**但仅 torchcodec 生效**）              |
+| 4   | decoder 缓存         | lerobot 模块级无界缓存 → 替换为 LRU 版 `_LRUVideoDecoderCache`（防内存膨胀）；**pyav 下 no-op**（见 5.5）                     |
+| 5   | 时间戳偏差           | 偏差超过 `tolerance_s` 会抛 `AssertionError`；已 catch 并跳过坏样本（见 5.4）                                                 |
+| 6   | 不能全量 decode 缓存 | 一个 mp4 解压后 ~22GB（toy），会 OOM；缓存的只是 decoder，不是解码帧                                                          |
+| 7   | 抽帧越界             | 已删除固定抽 N 帧（`num_video_frames>0`）能力，native chunk 下 `end_frame` 由 `to_timestamp` 精确切分，不再有抽帧跨度越界问题 |
 
 ### 6.5 尚未验证、版本迭代时需重点关注
 
-| # | 风险点 | 说明 |
-|---|--------|------|
-| 1 | 多文件场景的 `from_timestamp` 语义 | toy 是单 mp4，无法验证；真实多文件数据需确认是全局时间还是文件内相对时间 |
-| 2 | 抽帧语义 | lerobot 按时间戳解码，抽帧通过「帧号列表步长」（`range(start, end+1, interval)`）实现 |
-| 3 | 惰性化的 `meta` 对象 pickle | `_LerobotSource.meta` 含 HF Dataset mmap + pandas DataFrame；fork 下 worker 直接继承没问题，若切 spawn 需确认可 pickle |
+| #   | 风险点                             | 说明                                                                                                                   |
+| --- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 1   | 多文件场景的 `from_timestamp` 语义 | toy 是单 mp4，无法验证；真实多文件数据需确认是全局时间还是文件内相对时间                                               |
+| 2   | 抽帧语义                           | lerobot 按时间戳解码，抽帧通过「帧号列表步长」（`range(start, end+1, interval)`）实现                                  |
+| 3   | 惰性化的 `meta` 对象 pickle        | `_LerobotSource.meta` 含 HF Dataset mmap + pandas DataFrame；fork 下 worker 直接继承没问题，若切 spawn 需确认可 pickle |
 
 ---
 
 ## 7. 关键结论速查
 
-| 问题 | 结论 |
-|------|------|
-| 类形态 | `LeRobotSFTDataset` 是**独立 `IterableDataset`**，不继承 `SFTDataset`；自实现 `__init__`/`__len__`/`__iter__`/`process_one_sample` |
-| 惰性化加载 | 加载期只产出 `(sources, episode_index)` 扁平索引，episode 字段采样期从 `meta.episodes[ep_idx]` 现算 |
-| uuid 格式 | `{dataset_name}_{root_hash}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}`（目录名 + 完整路径短 hash，跨数据集/同名目录唯一） |
-| 统一数据入口 | `dataset_path`：`.jsonl` → manifest 模式；目录 → 单数据集根/父目录递归 |
-| 多数据集加载 | 目录支持单数据集根 or 父目录，父目录自动 `rglob("meta/info.json")` 递归；manifest 每行一个 path，并行加载合并 |
-| 选哪路视频 | `_select_lerobot_video_key`：用官方 `meta.video_keys`；显式 key > 关键字匹配 > 第一个 video 字段 |
-| width/height 来源 | 官方 `meta.shapes`/`meta.names`，`width=shape[names.index("width")]`，存进 `_LerobotSource`（每数据集一份） |
-| caption 来源 | `caption_key` 列优先，回退官方 `tasks` 列第一个任务名 |
-| 视频解码怎么做 | 复用官方 lerobot `decode_video_frames` 按**绝对时间戳**解码；帧号先转 timestamp |
-| decoder 缓存 | LRU 版 `_LRUVideoDecoderCache`（max_size=64，`seek_mode="exact"`），**仅 torchcodec 生效，pyav 下 no-op** |
-| 加 caption 到哪 | episodes 表加列（安全）；**禁止加到 data 表** |
-| 多分辨率训练 | `use_multi_resolution=True` 时在 256/480 随机（只选 ≤ 视频短边，不上采样；720 已移除） |
-| 多 fps 训练 | `use_multi_fps=True` 时 `temporal_interval` 随机 2/3/4（保留 1/2、1/3、1/4），通过帧号列表步长抽帧 |
+| 问题              | 结论                                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 类形态            | `LeRobotSFTDataset` 是**独立 `IterableDataset`**，不继承 `SFTDataset`；自实现 `__init__`/`__len__`/`__iter__`/`process_one_sample` |
+| 惰性化加载        | 加载期只产出 `(sources, episode_index)` 扁平索引，episode 字段采样期从 `meta.episodes[ep_idx]` 现算                                |
+| uuid 格式         | `{dataset_name}_{root_hash}_chunk_{chunk_idx}_file_{file_idx}_episode_{ep_idx}`（目录名 + 完整路径短 hash，跨数据集/同名目录唯一） |
+| 统一数据入口      | `dataset_path`：`.jsonl` → manifest 模式；目录 → 单数据集根/父目录递归                                                             |
+| 多数据集加载      | 目录支持单数据集根 or 父目录，父目录自动 `rglob("meta/info.json")` 递归；manifest 每行一个 path，并行加载合并                      |
+| 选哪路视频        | `_select_lerobot_video_key`：用官方 `meta.video_keys`；显式 key > 关键字匹配 > 第一个 video 字段                                   |
+| width/height 来源 | 官方 `meta.shapes`/`meta.names`，`width=shape[names.index("width")]`，存进 `_LerobotSource`（每数据集一份）                        |
+| caption 来源      | `caption_key` 列优先，回退官方 `tasks` 列第一个任务名                                                                              |
+| 视频解码怎么做    | 复用官方 lerobot `decode_video_frames` 按**绝对时间戳**解码；帧号先转 timestamp                                                    |
+| decoder 缓存      | LRU 版 `_LRUVideoDecoderCache`（max_size=64，`seek_mode="exact"`），**仅 torchcodec 生效，pyav 下 no-op**                          |
+| 加 caption 到哪   | episodes 表加列（安全）；**禁止加到 data 表**                                                                                      |
+| 多分辨率训练      | `use_multi_resolution=True` 时在 256/480 随机（只选 ≤ 视频短边，不上采样；720 已移除）                                             |
+| 多 fps 训练       | `use_multi_fps=True` 时 `temporal_interval` 随机 2/3/4（保留 1/2、1/3、1/4），通过帧号列表步长抽帧                                 |
 
 ---
 
@@ -719,11 +723,11 @@ toy 一个 mp4：24263 帧 × 480 × 640 × 3 = **约 22.4 GB**（解压后 RGB�
 
 基于原 `vision_sft_edge.py` 派生（新文件 256 行），核心只改 3 处：
 
-| 位置 | 改动 |
-|------|------|
-| import（32 行） | `from ...sft_dataset_lerobot3 import get_sft_dataset_from_lerobot` |
+| 位置                 | 改动                                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| import（32 行）      | `from ...sft_dataset_lerobot3 import get_sft_dataset_from_lerobot`                                                                     |
 | `dataset=`（220 行） | `L(get_sft_dataset_from_lerobot)(...)`，参数用统一入口 `dataset_path` + `video_feature_key` + `video_feature_keywords` + `caption_key` |
-| `job.name`（70 行） | `"vision_sft_edge_lerobot3"` |
+| `job.name`（70 行）  | `"vision_sft_edge_lerobot3"`                                                                                                           |
 
 关键参数（第 220-241 行）：
 
@@ -746,6 +750,7 @@ dataset=L(get_sft_dataset_from_lerobot)(
 ```
 
 > 说明：
+>
 > - `use_multi_resolution`/`use_multi_fps` 在 experiment 里写 `False`，但 `vision_sft_edge.toml` 里是 `true`，经 `PATH_REMAPS` 覆盖到 dataset 节点后**实际生效为 true**（见 8.3）。
 > - 已删除 `num_video_frames` / `temporal_interval_mode` / `frame_selection_mode` / `sample_by_window`（JSONL 兼容参数，LeRobot 恒 native chunk）。
 
@@ -786,10 +791,10 @@ max_video_duration_s = 61.0                # episode 过滤上界（秒）
 
 `examples/launch_sft_vision_edge_yundao_lerobot.sh`：
 
-| 位置 | 改动 |
-|------|------|
-| `DATASET_PATH`（第 10 行） | 统一入口，`.jsonl` 文件 or 目录均可 |
-| 绕过 `-d` 检查（第 66-71 行） | 保存原值 → 若是文件则临时指向父目录 |
+| 位置                              | 改动                                 |
+| --------------------------------- | ------------------------------------ |
+| `DATASET_PATH`（第 10 行）        | 统一入口，`.jsonl` 文件 or 目录均可  |
+| 绕过 `-d` 检查（第 66-71 行）     | 保存原值 → 若是文件则临时指向父目录  |
 | `EXTRA_DATASET_CHECK`（第 74 行） | 校验原路径存在 + 恢复 `DATASET_PATH` |
 
 **绕过 common 脚本 `-d` 硬检查的技巧**：`_sft_launcher_common.sh` 对 `DATASET_PATH` 做 `-d`（仅目录）检查，`.jsonl` 文件过不了。启动脚本用「临时指向父目录 + EXTRA 恢复」绕过，**不改 common 脚本**：
@@ -841,20 +846,21 @@ Hydra compose 按 "experiment=..." 查 ConfigStore → 命中 vision_sft_edge_le
 
 > 早期在 `_load_single_lerobot_metadata` 里验证；现在改为惰性化后字段在 `process_one_sample` 现算，但取值语义不变。
 
-| 字段 | 验证值 | 结果 |
-|------|--------|------|
-| uuid | `chunk_0_file_0_episode_0` | ✅ |
-| width/height | 640×480（shape `[480,640,3]` 正确取位） | ✅ |
-| aspect_ratio | `4,3` | ✅ |
-| 帧编号 | `[0,553]`、`[554,1083]`（to 开区间 -1 生效） | ✅ |
-| vision_path | 指向 `observation.images.top`（关键字 `top` 命中） | ✅ |
-| caption 读取 | 正确读到 caption 列 | ✅ |
+| 字段         | 验证值                                             | 结果 |
+| ------------ | -------------------------------------------------- | ---- |
+| uuid         | `chunk_0_file_0_episode_0`                         | ✅   |
+| width/height | 640×480（shape `[480,640,3]` 正确取位）            | ✅   |
+| aspect_ratio | `4,3`                                              | ✅   |
+| 帧编号       | `[0,553]`、`[554,1083]`（to 开区间 -1 生效）       | ✅   |
+| vision_path  | 指向 `observation.images.top`（关键字 `top` 命中） | ✅   |
+| caption 读取 | 正确读到 caption 列                                | ✅   |
 
 ### 9.3 训练全链路测试结果
 
 **结果**：✅ **全链路跑通**（metadata → caption → 视频解码 → 训练前向 loss 计算成功）。
 
 日志关键证据：
+
 ```
 Total number of parameters: 1414924992（模型加载成功）
 PackedSequence(sample_lens=[11184, 10464, 11184, 10544], ...)（4 个 sample 打包）
@@ -867,11 +873,11 @@ loss = 2.0362（前向成功）
 
 **测试数据集**：3 个副本，每个 40 episode，side 4 mp4 + wrist 2 mp4，共 120 episode。
 
-| 指标 | 数值 |
-|------|------|
-| 平均单 episode | 2.823s |
+| 指标                | 数值                   |
+| ------------------- | ---------------------- |
+| 平均单 episode      | 2.823s                 |
 | read_bytes 整个 mp4 | 0 次（直接用本地路径） |
-| 写临时文件 | 0 次 |
+| 写临时文件          | 0 次                   |
 
 **诊断结论**：
 
@@ -883,20 +889,20 @@ loss = 2.0362（前向成功）
 
 ## 附录：相关文件索引
 
-| 文件 | 作用 |
-|------|------|
-| `cosmos_framework/data/generator/local_datasets/sft_dataset.py` | 原 vision SFT 数据加载（JSONL/S3 流程），**未改动**，提供 `_select_caption`/`_DURATION_TEMPLATE`/`_RESOLUTION_TEMPLATE`/`_MAX_CAPTION_TOKENS` 等纯函数供复用（不再继承其 `SFTDataset`） |
-| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py` | ★ 新增：LeRobot 动态加载（惰性化 `sources`+`episode_index` + manifest 加载 + 独立 `LeRobotSFTDataset` + 底层 PyAV 解码时 resize + `get_sft_dataset_from_lerobot`） |
-| `cosmos_framework/data/generator/local_datasets/sft_dataset_260907.py` | ⚠️ 备份文件：是 JSONL 父类 `sft_dataset.py` 的副本（非 LeRobot 版），勿与 `sft_dataset_lerobot3.py` 混淆 |
-| `lerobot/` | ★ 本地 vendored lerobot 0.5.0 源码（调试用）。训练时经 `_sft_launcher_common.sh` 的 `PYTHONPATH=.` 优先于 site-packages 被 import；`__version__` 会误读 conda 的 0.4.4（用源码特征判断真实版本，见正文） |
-| `cosmos_framework/data/generator/local_datasets/helper.py` | `ffmpeg_decode_video`、`get_aspect_ratio`、`get_video_metadata`、`download_from_s3`（未改动） |
-| `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴） |
-| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py` | 原 vision SFT 实验配置（JSONL 流程），**未改动** |
-| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py` | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` + 统一 `dataset_path` 接入；`caption_key="task"`、`video_backend="pyav"`） |
-| `cosmos_framework/configs/base/config.py` | 加 1 行 import 注册新 experiment |
-| `cosmos_framework/configs/toml_config/sft_config.py` | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps`/`min_video_frames`/`max_video_duration_s` 字段 |
-| `cosmos_framework/configs/toml_config/toml_config_helper.py` | `PATH_REMAPS` 新增 remap，把 toml 开关/过滤阈值路由到 dataset 节点 |
-| `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py` | `vae_path` 改绝对路径（环境相关，非本特性，慎提交） |
-| `examples/toml/sft_config/vision_sft_edge.toml` | `experiment` 字段指向 `vision_sft_edge_lerobot3` + 多分辨率/fps 开关 + 过滤阈值 + token 预算放大到 65760 |
-| `examples/launch_sft_vision_edge_yundao_lerobot.sh` | 启动脚本（`DATASET_PATH` 统一入口 + 绕过 `-d` 检查技巧） |
-| `examples/_sft_launcher_common.sh` | 公共启动脚本，**未改动**（已回滚） |
+| 文件                                                                        | 作用                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset.py`             | 原 vision SFT 数据加载（JSONL/S3 流程），**未改动**，提供 `_select_caption`/`_DURATION_TEMPLATE`/`_RESOLUTION_TEMPLATE`/`_MAX_CAPTION_TOKENS` 等纯函数供复用（不再继承其 `SFTDataset`）                  |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset_lerobot3.py`    | ★ 新增：LeRobot 动态加载（惰性化 `sources`+`episode_index` + manifest 加载 + 独立 `LeRobotSFTDataset` + 底层 PyAV 解码时 resize + `get_sft_dataset_from_lerobot`）                                       |
+| `cosmos_framework/data/generator/local_datasets/sft_dataset_260907.py`      | ⚠️ 备份文件：是 JSONL 父类 `sft_dataset.py` 的副本（非 LeRobot 版），勿与 `sft_dataset_lerobot3.py` 混淆                                                                                                 |
+| `lerobot/`                                                                  | ★ 本地 vendored lerobot 0.5.0 源码（调试用）。训练时经 `_sft_launcher_common.sh` 的 `PYTHONPATH=.` 优先于 site-packages 被 import；`__version__` 会误读 conda 的 0.4.4（用源码特征判断真实版本，见正文） |
+| `cosmos_framework/data/generator/local_datasets/helper.py`                  | `ffmpeg_decode_video`、`get_aspect_ratio`、`get_video_metadata`、`download_from_s3`（未改动）                                                                                                            |
+| `cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py` | action 侧 LeRobot 加载 + `_LRUVideoDecoderCache`（可借鉴）                                                                                                                                               |
+| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge.py`           | 原 vision SFT 实验配置（JSONL 流程），**未改动**                                                                                                                                                         |
+| `cosmos_framework/configs/base/experiment/sft/vision_sft_edge_lerobot3.py`  | ★ 新增：LeRobot experiment（`get_sft_dataset_from_lerobot` + 统一 `dataset_path` 接入；`caption_key="task"`、`video_backend="pyav"`）                                                                    |
+| `cosmos_framework/configs/base/config.py`                                   | 加 1 行 import 注册新 experiment                                                                                                                                                                         |
+| `cosmos_framework/configs/toml_config/sft_config.py`                        | `DataloaderTrainConfig` 新增 `use_multi_resolution`/`use_multi_fps`/`min_video_frames`/`max_video_duration_s` 字段                                                                                       |
+| `cosmos_framework/configs/toml_config/toml_config_helper.py`                | `PATH_REMAPS` 新增 remap，把 toml 开关/过滤阈值路由到 dataset 节点                                                                                                                                       |
+| `cosmos_framework/configs/base/experiment/sft/models/edge_model_config.py`  | `vae_path` 改绝对路径（环境相关，非本特性，慎提交）                                                                                                                                                      |
+| `examples/toml/sft_config/vision_sft_edge.toml`                             | `experiment` 字段指向 `vision_sft_edge_lerobot3` + 多分辨率/fps 开关 + 过滤阈值 + token 预算放大到 65760                                                                                                 |
+| `examples/launch_sft_vision_edge_yundao_lerobot.sh`                         | 启动脚本（`DATASET_PATH` 统一入口 + 绕过 `-d` 检查技巧）                                                                                                                                                 |
+| `examples/_sft_launcher_common.sh`                                          | 公共启动脚本，**未改动**（已回滚）                                                                                                                                                                       |
