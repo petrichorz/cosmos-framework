@@ -104,7 +104,7 @@ max_caption_tokens = 2048
 # seed omitted — PackingDataLoader has no seed ctor kwarg
 
 # 多分辨率训练开关：True 时在 256/480 随机（不上采样）
-use_multi_resolution = true
+use_multi_resolution = false
 # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机（保留 1/2、1/3、1/4）
 use_multi_fps = true
 # episode 过滤下界（单位：帧）：episode 帧数少于该值时丢弃
@@ -118,6 +118,6 @@ long_video_policy = "split"
 # split 时相邻窗口重叠秒数
 video_window_overlap_s = 5.0
 # 原生 fps 超过此值用整数 stride 下采样
-max_video_fps = 30.0
+max_video_fps = 15.0
 # 视频解码后端
 video_backend = "pyav"
