@@ -280,7 +280,7 @@ class TestEndToEndLoader:
             ],
         )
 
-        assert config.model._target_ is OmniMoTCausalModel
+        assert config.model._target_ == f"{OmniMoTCausalModel.__module__}.{OmniMoTCausalModel.__qualname__}"
         assert config.job.name == "vision_causal_smoke_edge"
         assert config.trainer.distributed_parallelism == "ddp"
         assert config.trainer.max_iter == 3
@@ -337,7 +337,7 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 
         config = _load_or_skip(toml_path, extra_overrides=["model=mot_causal_fsdp"])
 
-        assert config.model._target_ is OmniMoTCausalModel
+        assert config.model._target_ == f"{OmniMoTCausalModel.__module__}.{OmniMoTCausalModel.__qualname__}"
         assert config.model.config.causal_training_strategy == "teacher_forcing"
         assert config.model.config.joint_attn_implementation == "teacher_forcing"
         assert config.model.config.teacher_forcing_block_size_min == 1
