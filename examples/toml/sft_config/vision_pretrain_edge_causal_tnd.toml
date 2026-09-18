@@ -100,8 +100,7 @@ max_video_duration_s = 61.0
 max_video_fps        = 15.0
 
 video_backend     = "pyav"
-video_resize_mode = "decode_transform"
-video_tolerance_s = 0.033
+video_tolerance_s = 1e-4
 
 long_video_policy      = "split"
 video_window_overlap_s = 2.0
