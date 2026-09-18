@@ -22,7 +22,6 @@ export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-/mnt/sfs_turbo/public/ckpts
 export COSMOS3_EDGE_PROCESSOR_PATH="${COSMOS3_EDGE_PROCESSOR_PATH:-/mnt/sfs_turbo/public/ckpts/Cosmos/Cosmos3-Edge}"
 export WAN_VAE_PATH="${WAN_VAE_PATH:-/mnt/sfs_turbo/public/ckpts/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}"
 export COSMOS_NPU_PROFILE_ACTIVE_STEPS=2
-export COSMOS_PERF_SKIP_FINAL_CHECKPOINT=1
 export IMAGINAIRE_OUTPUT_ROOT="${PROFILE_RUN_DIR:-/mnt/sfs_turbo/zheng/cosmos-ascend-profile/cosmos-profile-logs/egosuite_4npu_stack_$(date -u +%Y%m%d_%H%M%S)}"
 mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
 exec > >(tee -a "$IMAGINAIRE_OUTPUT_ROOT/launcher.log") 2>&1
