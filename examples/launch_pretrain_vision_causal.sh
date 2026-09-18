@@ -63,10 +63,6 @@ done
 for path_var in WAN_VAE_PATH TOML_PATH; do
     [[ -f "${!path_var}" ]] || { echo "ERROR: missing file: $path_var=${!path_var}" >&2; exit 1; }
 done
-[[ -n "$(find "$DATASET_PATH" -path '*/meta/info.json' -print -quit)" ]] || {
-    echo "ERROR: no LeRobot meta/info.json found under DATASET_PATH=$DATASET_PATH" >&2
-    exit 1
-}
 
 mkdir -p "$OUTPUT_ROOT"
 cd "$REPO_ROOT"
