@@ -298,6 +298,10 @@ def _build_lerobot_source(
 
     # 数据集级过滤：短边不满足时整个数据集所有 episode 都无效
     if min_short_edge > 0 and min(width, height) < min_short_edge:
+        log.warning(
+            f"Skipping LeRobot dataset {root}: resolution {width}x{height} has short edge "
+            f"{min(width, height)}, below min_short_edge={min_short_edge}"
+        )
         return source, []
 
     valid_clips: list[tuple[int, int]] = []
