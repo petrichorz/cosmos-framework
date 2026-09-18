@@ -77,7 +77,7 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 
 
-TOML_FILE="/data5T/liujin/code/cosmos-framework/examples/toml/sft_config/vision_sft_edge_causal.toml"
+TOML_FILE="/data5T/liujin/code/cosmos-framework/examples/toml/sft_config/vision_pretrain_edge_causal_tnd.toml"
 : "${DATASET_PATH:=examples/data/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
 
