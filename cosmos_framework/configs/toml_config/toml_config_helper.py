@@ -77,6 +77,22 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
             "dataset",
             "max_video_duration_s",
         ),
+        ("dataloader_train", "long_video_policy"): (
+            "dataloader_train",
+            "dataloader",
+            "datasets",
+            "video",
+            "dataset",
+            "long_video_policy",
+        ),
+        ("dataloader_train", "video_window_overlap_s"): (
+            "dataloader_train",
+            "dataloader",
+            "datasets",
+            "video",
+            "dataset",
+            "video_window_overlap_s",
+        ),
         ("dataloader_train", "max_video_fps"): (
             "dataloader_train",
             "dataloader",
@@ -100,22 +116,6 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
             "video",
             "dataset",
             "video_tolerance_s",
-        ),
-        ("dataloader_train", "long_video_policy"): (
-            "dataloader_train",
-            "dataloader",
-            "datasets",
-            "video",
-            "dataset",
-            "long_video_policy",
-        ),
-        ("dataloader_train", "video_window_overlap_s"): (
-            "dataloader_train",
-            "dataloader",
-            "datasets",
-            "video",
-            "dataset",
-            "video_window_overlap_s",
         ),
         # 多分辨率 / 多 fps 训练开关，同样落在 SFT dataset 节点
         ("dataloader_train", "use_multi_resolution"): (
@@ -173,11 +173,11 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_caption_tokens"): None,  # VFM-only knob — VLM packer caps via max_sequence_length
         ("dataloader_train", "min_video_frames"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "max_video_duration_s"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "long_video_policy"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "video_window_overlap_s"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "max_video_fps"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_backend"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_tolerance_s"): None,  # VFM LeRobot-only knob
-        ("dataloader_train", "long_video_policy"): None,  # VFM LeRobot-only knob
-        ("dataloader_train", "video_window_overlap_s"): None,  # VFM LeRobot-only knob
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
     },
