@@ -795,19 +795,11 @@ class DataloaderTrainConfig(BaseModel):
         default=42,
         description=("Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has no seed ctor kwarg there)."),
     )
-    use_multi_resolution: bool = Field(
-        default=False,
+    resolution_tiers: list[str] = Field(
+        default_factory=lambda: ["256"],
         description=(
-            "VFM only. 多分辨率训练开关：True 时从 multi_resolution_tiers "
-            "中随机选择不高于视频短边的档位。remapped 到 SFT dataset 的 "
-            "'use_multi_resolution'。"
-        ),
-    )
-    multi_resolution_tiers: list[str] = Field(
-        default_factory=lambda: ["256", "480"],
-        description=(
-            "VFM LeRobot only. Candidate resolution tiers sampled uniformly when "
-            "use_multi_resolution is enabled. Remapped to the nested SFT dataset."
+            "VFM LeRobot only. One entry selects a fixed resolution tier; multiple entries "
+            "enable resolution sampling. Remapped to the nested SFT dataset."
         ),
     )
     use_multi_fps: bool = Field(
@@ -819,16 +811,16 @@ class DataloaderTrainConfig(BaseModel):
         ),
     )
 
-    @field_validator("multi_resolution_tiers")
+    @field_validator("resolution_tiers")
     @classmethod
-    def validate_multi_resolution_tiers(cls, tiers: list[str]) -> list[str]:
+    def validate_resolution_tiers(cls, tiers: list[str]) -> list[str]:
         if not tiers:
-            raise ValueError("multi_resolution_tiers must not be empty")
+            raise ValueError("resolution_tiers must not be empty")
         if len(set(tiers)) != len(tiers):
-            raise ValueError("multi_resolution_tiers must not contain duplicates")
+            raise ValueError("resolution_tiers must not contain duplicates")
         invalid_tiers = [tier for tier in tiers if not tier.isdecimal() or tier not in VIDEO_RES_SIZE_INFO]
         if invalid_tiers:
-            raise ValueError(f"Unsupported multi_resolution_tiers: {invalid_tiers}")
+            raise ValueError(f"Unsupported resolution_tiers: {invalid_tiers}")
         return tiers
 
     @model_validator(mode="after")

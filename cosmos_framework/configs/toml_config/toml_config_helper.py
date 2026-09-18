@@ -118,12 +118,8 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
             "dataset",
             "video_tolerance_s",
         ),
-        # 多分辨率 / 多 fps 训练开关，同样落在 SFT dataset 节点
-        ("dataloader_train", "use_multi_resolution"): (
-            "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_resolution",
-        ),
-        ("dataloader_train", "multi_resolution_tiers"): (
-            "dataloader_train", "dataloader", "datasets", "video", "dataset", "multi_resolution_tiers",
+        ("dataloader_train", "resolution_tiers"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "resolution_tiers",
         ),
         ("dataloader_train", "use_multi_fps"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_fps",
@@ -183,7 +179,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_video_fps"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_backend"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_tolerance_s"): None,  # VFM LeRobot-only knob
-        ("dataloader_train", "multi_resolution_tiers"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "resolution_tiers"): None,  # VFM LeRobot-only knob
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
     },

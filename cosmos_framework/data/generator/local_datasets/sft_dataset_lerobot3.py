@@ -45,9 +45,8 @@ from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_ca
 from cosmos_framework.utils import log
 from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
 
-# 多分辨率训练：候选档位（短边像素），只选 <= 视频短边的档位（不上采样）。
-# _MULTI_RESOLUTION_TIERS = ("256", "480", "720")
-_MULTI_RESOLUTION_TIERS = ("256", "480")
+# 默认使用固定 256 档；传入多个档位时启用多分辨率采样。
+_DEFAULT_RESOLUTION_TIERS = ("256",)
 # 多 fps 训练：候选 temporal_interval（保留 1/2、1/3、1/4）。
 _MULTI_FPS_INTERVALS = (2, 3, 4)
 
@@ -489,6 +488,26 @@ def _limit_temporal_interval_by_fps(
     return max(temporal_interval, math.ceil(original_fps / max_video_fps))
 
 
+def _validate_resolution_tiers(resolution_tiers: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    tiers = tuple(resolution_tiers)
+    if not tiers:
+        raise ValueError("resolution_tiers must not be empty")
+    if len(set(tiers)) != len(tiers):
+        raise ValueError(f"resolution_tiers must not contain duplicates: {tiers}")
+    invalid_tiers = [tier for tier in tiers if not tier.isdecimal() or tier not in VIDEO_RES_SIZE_INFO]
+    if invalid_tiers:
+        valid_tiers = sorted((tier for tier in VIDEO_RES_SIZE_INFO if tier.isdecimal()), key=int)
+        raise ValueError(f"Unsupported resolution_tiers={invalid_tiers}; expected tiers from {valid_tiers}")
+    return tiers
+
+
+def _select_resolution_tier(resolution_tiers: tuple[str, ...], video_min_edge: int) -> str:
+    if len(resolution_tiers) == 1:
+        return resolution_tiers[0]
+    candidates = [tier for tier in resolution_tiers if int(tier) <= video_min_edge]
+    return random.choice(candidates) if candidates else min(resolution_tiers, key=int)
+
+
 # ============================================================================
 # 2. LeRobotSFTDataset（独立 IterableDataset，不继承 SFTDataset）
 # ============================================================================
@@ -510,7 +529,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         self,
         sources: list[_LerobotSource],
         episode_index: list[tuple[int, int, int]],
-        resolution: str,
+        resolution_tiers: tuple[str, ...] | list[str] = _DEFAULT_RESOLUTION_TIERS,
         tokenizer_config: Optional[Any] = None,
         cfg_dropout_rate: float = 0.0,
         use_system_prompt: bool = False,
@@ -523,8 +542,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         conditioning_fps_noise_std: float = 0.0,
         conditioning_config: dict[int, float] | None = None,
         temporal_compression_factor: int = 4,
-        use_multi_resolution: bool = False,
-        multi_resolution_tiers: tuple[str, ...] | list[str] = _MULTI_RESOLUTION_TIERS,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
         video_tolerance_s: float = 1e-4,
@@ -547,7 +564,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
 
         self.sources = sources
         self.episode_index = episode_index
-        self.resolution = resolution
+        self.resolution_tiers = _validate_resolution_tiers(resolution_tiers)
         self.tokenizer_config = tokenizer_config
         self.cfg_dropout_rate = cfg_dropout_rate
         self.use_system_prompt = use_system_prompt
@@ -568,21 +585,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
             log.info(f"Conditioning config: {self.conditioning_config}")
 
         # LeRobot 扩展参数
-        self.use_multi_resolution = use_multi_resolution
-        self.multi_resolution_tiers = tuple(multi_resolution_tiers)
-        if not self.multi_resolution_tiers:
-            raise ValueError("multi_resolution_tiers must not be empty")
-        if len(set(self.multi_resolution_tiers)) != len(self.multi_resolution_tiers):
-            raise ValueError(f"multi_resolution_tiers must not contain duplicates: {self.multi_resolution_tiers}")
-        invalid_resolution_tiers = [
-            tier for tier in self.multi_resolution_tiers if not tier.isdecimal() or tier not in VIDEO_RES_SIZE_INFO
-        ]
-        if invalid_resolution_tiers:
-            valid_resolution_tiers = sorted((tier for tier in VIDEO_RES_SIZE_INFO if tier.isdecimal()), key=int)
-            raise ValueError(
-                f"Unsupported multi_resolution_tiers={invalid_resolution_tiers}; "
-                f"expected tiers from {valid_resolution_tiers}"
-            )
         self.use_multi_fps = use_multi_fps
         # 视频后端：默认走 get_safe_default_codec()（torchcodec 可用则用 torchcodec，否则 pyav）。
         self.video_backend = video_backend if video_backend else _vu.get_safe_default_codec()
@@ -594,8 +596,6 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         self.shard_rank = None
         self.shard_id = 0
         self.is_initialized = False
-        self.output_sizes = VIDEO_RES_SIZE_INFO[resolution]
-
         _vlm_proc = lazy_instantiate(self.tokenizer_config)
         self.vlm_tokenizer = _vlm_proc.tokenizer
         self.vlm_tokenizer, _ = add_special_tokens(self.vlm_tokenizer)
@@ -664,17 +664,8 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         original_fps = source.fps
         total_frames = source.total_frames
 
-        # Compute output resolution
-        if self.use_multi_resolution:
-            # 多分辨率：候选档位 = 所有 <= 视频短边 的档位（不上采样），随机选一个。
-            # 视频太小时 fallback 到配置中的最小档。
-            video_min_edge = min(input_w, input_h)
-            candidates = [r for r in self.multi_resolution_tiers if int(r) <= video_min_edge]
-            if not candidates:
-                candidates = [min(self.multi_resolution_tiers, key=int)]
-            output_sizes = VIDEO_RES_SIZE_INFO[random.choice(candidates)]
-        else:
-            output_sizes = self.output_sizes
+        resolution_tier = _select_resolution_tier(self.resolution_tiers, min(input_w, input_h))
+        output_sizes = VIDEO_RES_SIZE_INFO[resolution_tier]
         target_w, target_h = output_sizes[source.aspect_ratio]
         resize_ratio = max(target_w / input_w, target_h / input_h)
         resize_h, resize_w = (round(input_h * resize_ratio), round(input_w * resize_ratio))
@@ -907,13 +898,11 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
 
 def get_sft_dataset_from_lerobot(
     dataset_path: str,
-    resolution: str = "720",
+    resolution_tiers: tuple[str, ...] | list[str] = _DEFAULT_RESOLUTION_TIERS,
     min_video_frames: int = 61,
     max_video_duration_s: float = 61.0,
     long_video_policy: str = "drop",
     video_window_overlap_s: float = 0.0,
-    use_multi_resolution: bool = False,  # 多分辨率训练开关：True 时在配置的档位中随机
-    multi_resolution_tiers: tuple[str, ...] | list[str] = _MULTI_RESOLUTION_TIERS,
     use_multi_fps: bool = False,  # 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机
     tokenizer_config: Optional[Any] = None,
     cfg_dropout_rate: float = 0.1,
@@ -950,7 +939,6 @@ def get_sft_dataset_from_lerobot(
     4. 惰性化加载：加载期只产出 (sources, episode_index) 扁平索引，episode 字段采样期现算
     """
     log.info(f"Unknown kwargs for get_sft_dataset_from_lerobot: {kwargs}")
-    assert resolution in VIDEO_RES_SIZE_INFO.keys(), "The provided resolution cannot be found in VIDEO_RES_SIZE_INFO."
 
     # 加载 metadata 前就确保 HF 离线，避免 LeRobotDatasetMetadata 触发 HF Hub 联网
     _ensure_hf_hub_offline()
@@ -990,9 +978,7 @@ def get_sft_dataset_from_lerobot(
     dataset = LeRobotSFTDataset(
         sources=sources,
         episode_index=episode_index,
-        resolution=resolution,
-        use_multi_resolution=use_multi_resolution,
-        multi_resolution_tiers=multi_resolution_tiers,
+        resolution_tiers=resolution_tiers,
         use_multi_fps=use_multi_fps,
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
