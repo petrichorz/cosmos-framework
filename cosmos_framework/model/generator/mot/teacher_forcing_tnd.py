@@ -3,8 +3,7 @@
 
 """Exact teacher-forcing visibility as independent maskless attention groups."""
 
-import contextlib
-import os
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -14,12 +13,6 @@ from cosmos_framework.model.attention.npu_fusion_attention.functions import (
     NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES,
     NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
 )
-
-_PROFILE_RANGES = os.environ.get("COSMOS_TND_PROFILE_RANGES") == "1"
-
-
-def _profile_range(name):
-    return torch.profiler.record_function(name) if _PROFILE_RANGES else contextlib.nullcontext()
 
 
 @dataclass(frozen=True)
@@ -132,30 +125,27 @@ class _NPUTeacherForcing(torch.autograd.Function):
 
         outputs, statistics, rng = [], [], []
         for chunk in plan.chunks:
-            with _profile_range("TND::forward_gather"):
-                q = query.index_select(0, chunk.query_indexes)
-                k = key.index_select(0, chunk.kv_indexes)
-                v = value.index_select(0, chunk.kv_indexes)
-            with _profile_range("TND::forward_fa"):
-                result = torch_npu.npu_fusion_attention(
-                    q,
-                    k,
-                    v,
-                    head_num=q.shape[1],
-                    input_layout="TND",
-                    atten_mask=None,
-                    scale=scale,
-                    keep_prob=1.0,
-                    sparse_mode=0,
-                    actual_seq_qlen=chunk.query_ends,
-                    actual_seq_kvlen=chunk.kv_ends,
-                )
+            q = query.index_select(0, chunk.query_indexes)
+            k = key.index_select(0, chunk.kv_indexes)
+            v = value.index_select(0, chunk.kv_indexes)
+            result = torch_npu.npu_fusion_attention(
+                q,
+                k,
+                v,
+                head_num=q.shape[1],
+                input_layout="TND",
+                atten_mask=None,
+                scale=scale,
+                keep_prob=1.0,
+                sparse_mode=0,
+                actual_seq_qlen=chunk.query_ends,
+                actual_seq_kvlen=chunk.kv_ends,
+            )
             outputs.append(result[0])
             statistics.extend(result[1:3])
             rng.append(result[4:7])
             del q, k, v, result
-        with _profile_range("TND::output_cat"):
-            output = torch.cat(outputs)
+        output = torch.cat(outputs)
         ctx.save_for_backward(query, key, value, output, *statistics)
         ctx.plan, ctx.scale, ctx.rng = plan, scale, rng
         return output
@@ -164,47 +154,42 @@ class _NPUTeacherForcing(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_output):
         query, key, value, output, *statistics = ctx.saved_tensors
-        with _profile_range("TND::backward_buffers"):
-            dq = torch.empty_like(query)
-            dk = torch.zeros_like(key, dtype=torch.float32)
-            dv = torch.zeros_like(value, dtype=torch.float32)
+        dq = torch.empty_like(query)
+        dk = torch.zeros_like(key, dtype=torch.float32)
+        dv = torch.zeros_like(value, dtype=torch.float32)
         offset = 0
         for i, chunk in enumerate(ctx.plan.chunks):
             end = offset + chunk.query_ends[-1]
-            with _profile_range("TND::backward_gather"):
-                q = query.index_select(0, chunk.query_indexes)
-                k = key.index_select(0, chunk.kv_indexes)
-                v = value.index_select(0, chunk.kv_indexes)
+            q = query.index_select(0, chunk.query_indexes)
+            k = key.index_select(0, chunk.kv_indexes)
+            v = value.index_select(0, chunk.kv_indexes)
             seed, rng_offset, numels = ctx.rng[i]
-            with _profile_range("TND::backward_fa"):
-                gradients = torch.ops.npu.npu_fusion_attention_grad.default(
-                    q,
-                    k,
-                    v,
-                    grad_output[offset:end].contiguous(),
-                    q.shape[1],
-                    "TND",
-                    atten_mask=None,
-                    softmax_max=statistics[2 * i],
-                    softmax_sum=statistics[2 * i + 1],
-                    attention_in=output[offset:end].contiguous(),
-                    scale_value=ctx.scale,
-                    keep_prob=1.0,
-                    sparse_mode=0,
-                    seed=seed,
-                    offset=rng_offset,
-                    numels=numels,
-                    actual_seq_qlen=chunk.query_ends,
-                    actual_seq_kvlen=chunk.kv_ends,
-                )
-            with _profile_range("TND::backward_accumulate"):
-                dq[offset:end] = gradients[0]
-                dk.index_add_(0, chunk.kv_indexes, gradients[1].float())
-                dv.index_add_(0, chunk.kv_indexes, gradients[2].float())
+            gradients = torch.ops.npu.npu_fusion_attention_grad.default(
+                q,
+                k,
+                v,
+                grad_output[offset:end].contiguous(),
+                q.shape[1],
+                "TND",
+                atten_mask=None,
+                softmax_max=statistics[2 * i],
+                softmax_sum=statistics[2 * i + 1],
+                attention_in=output[offset:end].contiguous(),
+                scale_value=ctx.scale,
+                keep_prob=1.0,
+                sparse_mode=0,
+                seed=seed,
+                offset=rng_offset,
+                numels=numels,
+                actual_seq_qlen=chunk.query_ends,
+                actual_seq_kvlen=chunk.kv_ends,
+            )
+            dq[offset:end] = gradients[0]
+            dk.index_add_(0, chunk.kv_indexes, gradients[1].float())
+            dv.index_add_(0, chunk.kv_indexes, gradients[2].float())
             offset = end
             del q, k, v, gradients
-        with _profile_range("TND::backward_cast"):
-            return dq, dk.to(key.dtype), dv.to(value.dtype), None, None
+        return dq, dk.to(key.dtype), dv.to(value.dtype), None, None
 
 
 def teacher_forcing_tnd_attention(query, key, value, plan: TNDPlan, *, scale=None):
@@ -215,6 +200,11 @@ def teacher_forcing_tnd_attention(query, key, value, plan: TNDPlan, *, scale=Non
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     if query.device.type == "npu":
         return _NPUTeacherForcing.apply(query, key, value, plan, scale)
+    warnings.warn(
+        f"grouped_tnd fusion is only supported on NPU; falling back to PyTorch SDPA on {query.device.type}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     indexes = tuple(chunk.kv_indexes for chunk in plan.chunks)
     keys = _GatherGroups.apply(key, *indexes)
     values = _GatherGroups.apply(value, *indexes)
