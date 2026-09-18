@@ -527,7 +527,7 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         use_multi_resolution: bool = False,
         use_multi_fps: bool = False,
         video_backend: str | None = None,
-        video_tolerance_s: float = 0.034,
+        video_tolerance_s: float = 1e-4,
         max_video_fps: float = 30.0,
         decoder_cache_max_size: int = _vu.LRU_VIDEO_CACHE_MAX_SIZE,
     ):
@@ -917,7 +917,7 @@ def get_sft_dataset_from_lerobot(
     caption_key: str = "caption",
     video_feature_keywords: list[str] | None = None,
     video_backend: str = "pyav",
-    video_tolerance_s: float = 0.034,
+    video_tolerance_s: float = 1e-4,
     max_video_fps: float = 30.0,
     decoder_cache_max_size: int = _vu.LRU_VIDEO_CACHE_MAX_SIZE,
     **kwargs,

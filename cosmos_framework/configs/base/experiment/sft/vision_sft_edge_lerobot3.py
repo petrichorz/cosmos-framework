@@ -234,7 +234,7 @@ vision_sft_edge_lerobot3 = LazyDict(
                                 "head",
                             ],  # 关键字 list：key 名含任一关键字即选中；匹配不到回退第一个 video
                             video_backend="pyav",
-                            video_tolerance_s=0.034,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
+                            video_tolerance_s=1e-4,  # 时间戳容差（秒）：命中帧真实 pts 与 idx/fps 偏差超过它则跳过样本
                             max_video_fps=30.0,  # 0 disables FPS downsampling
                             caption_key="task",  # episodes 表里的 caption 列名
                             min_short_edge=0,

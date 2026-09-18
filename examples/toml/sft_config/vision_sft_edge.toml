@@ -89,7 +89,7 @@ min_video_frames      = 61     # episode 最少帧数
 max_video_duration_s  = 61.0   # episode 最长秒数；设为 0 可关闭上限
 max_video_fps         = 30.0   # 超过后按整数帧间隔下采样；设为 0 可关闭
 video_backend         = "pyav" # 可切换为 "torchcodec"
-video_tolerance_s     = 0.034  # PyAV 最近帧匹配容差；TorchCodec 后端不使用
+video_tolerance_s     = 1e-4  # 最近帧匹配容差，PyAV 和 TorchCodec 后端均使用
 # Per-caption token cap before truncation. Structured-JSON captions run longer than
 # dense prose (measured max ~1790 tokens), so keep headroom; raise it for longer captions.
 max_caption_tokens = 2048

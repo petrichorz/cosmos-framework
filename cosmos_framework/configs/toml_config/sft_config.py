@@ -751,7 +751,7 @@ class DataloaderTrainConfig(BaseModel):
         ),
     )
     video_tolerance_s: float = Field(
-        default=0.034,
+        default=1e-4,
         description=(
             "VFM only. 视频解码时间戳容差（单位：秒）：命中帧真实 pts 与期望时间戳 "
             "（idx/fps）的偏差超过该值时抛 FrameTimestampError 跳过该样本。"
