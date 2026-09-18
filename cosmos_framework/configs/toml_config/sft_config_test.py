@@ -418,7 +418,6 @@ def test_vfm_lerobot_video_backend_and_resize_route_to_nested_dataset() -> None:
             "video_window_overlap_s": 5.0,
             "max_video_fps": 20.0,
             "video_backend": "pyav",
-            "video_resize_mode": "decode_transform",
             "video_tolerance_s": 1e-4,
         },
     }
@@ -432,7 +431,6 @@ def test_vfm_lerobot_video_backend_and_resize_route_to_nested_dataset() -> None:
     assert "dataloader_train.dataloader.datasets.video.dataset.video_window_overlap_s=5.0" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.max_video_fps=20.0" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.video_backend=pyav" in overrides
-    assert "dataloader_train.dataloader.datasets.video.dataset.video_resize_mode=decode_transform" in overrides
     assert "dataloader_train.dataloader.datasets.video.dataset.video_tolerance_s=0.0001" in overrides
 
 

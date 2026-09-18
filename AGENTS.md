@@ -38,6 +38,16 @@ A `justfile` is provided at the root with longer recipes (`just install`, `just 
 - After changing project dependencies or the pinned uv version, regenerate and check `uv.lock` with that exact uv version (for example, `uvx uv@0.12.7 lock` followed by `uvx uv@0.12.7 lock --check`) and commit `pyproject.toml` and `uv.lock` together when both change.
 - Package mirrors may be used temporarily to warm the uv cache, but generate the final committed `uv.lock` with the repository's configured indexes. Confirm that temporary mirror URLs are absent, then run the full pre-commit suite with the pinned uv version available on `PATH`.
 
+### Keep diffs focused and reviewable
+
+- Keep changes focused on the user's request and avoid unrelated cleanup.
+- Preserve existing variable names, code placement, comments, and formatting unless changing them is necessary to implement or verify the requested behavior.
+- Avoid cosmetic-only renames, code movement, comment rewrites, and formatting changes that make the functional diff harder to review.
+- Small local refactors are acceptable when they directly simplify the requested implementation, avoid duplication introduced by the change, or prevent a correctness issue.
+- Limit formatter changes to files involved in the task, and inspect formatter output for unrelated mechanical changes.
+- Before committing, inspect the final diff and remove accidental noise introduced during the task without overwriting pre-existing user changes.
+- If a broader rename, code move, or mechanical rewrite is necessary, briefly explain why and separate it from the functional change when practical.
+
 ## Key File Locations
 
 ### Training (`cosmos_framework/`)

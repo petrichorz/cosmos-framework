@@ -10,23 +10,23 @@ export COSMOS_DEVICE=npu  # Cosmos 模型强制在NPU芯片上运行
 
 # 当前的数据集、权重和输出路径
 # 【LeRobot 3.x 适配】DATASET_PATH 改为 LeRobot 数据集根目录（含 meta/info.json）
-export DATASET_PATH="/mi/data2T/liujin/dataset/toy_lerobot3_multi_with_caption"
+export DATASET_PATH="/mnt/sfs_turbo/public/datasets/egosuite_demo_v1"
 # 【留档】原 JSONL 数据集路径（改用 LeRobot 后注释掉，未删除）
 # export DATASET_PATH="/mi/data2T/Embodied-AI/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge"
-export BASE_CHECKPOINT_PATH="/mi/data2T/Embodied-AI/ckpts/Cosmos/Cosmos3-Edge-DCP"
-export COSMOS3_EDGE_PROCESSOR_PATH="/mi/data2T/Embodied-AI/ckpts/Cosmos/Cosmos3-Edge"
-export WAN_VAE_PATH="/mi/data2T/Embodied-AI/ckpts/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
-export OUTPUT_ROOT="/mi/data2T/liujin/code/cosmos_ascend/cosmos_trainging_logs"
+export BASE_CHECKPOINT_PATH="/mnt/sfs_turbo/public/ckpts/Cosmos/Cosmos3-Edge-DCP"
+export COSMOS3_EDGE_PROCESSOR_PATH="/mnt/sfs_turbo/public/ckpts/Cosmos/Cosmos3-Edge"
+export WAN_VAE_PATH="/mnt/sfs_turbo/public/ckpts/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+export OUTPUT_ROOT="/data5T/liujin/training_logs"
 
 # 配置Huggingface缓存
 if [ ! -e ~/.cache/huggingface ]; then
     mkdir -p ~/.cache
-    ln -s /mi/data2T/liujin/ckpts/huggingface ~/.cache/huggingface
+    ln -s /data5T/liujin/ckpts/huggingface ~/.cache/huggingface
 fi
 
 # torchrun 单机单卡设置
-export ASCEND_RT_VISIBLE_DEVICES="10"
-export NPROC_PER_NODE=1
+export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3"
+export NPROC_PER_NODE=4
 export NNODES=1
 export NODE_RANK=0
 export MASTER_ADDR="127.0.0.1"
@@ -40,15 +40,15 @@ export MASTER_PORT=50012
 # export MASTER_PORT="${MASTER_PORT:-50012}"
 
 # 切换conda环境
-CONDA_HOME="/mi/sfs_turbo/lilin_v1/anaconda3"
+CONDA_HOME="/data5T/liujin/software/miniconda3"
 source "$CONDA_HOME/etc/profile.d/conda.sh"
 conda activate cosmos-framework
 
 
-# 安装当前cosmos-framework包
-cd /mi/data2T/liujin/code/cosmos_ascend/cosmos-framework
-pip install -e .
-cd ..
+# # 安装当前cosmos-framework包
+# cd /data5T/liujin/code/cosmos-framework
+# pip install -e .
+# cd ..
 
 # 补充torchcodec需要的库
 # 编译 torchcodec 全过程（Python 解释器、pybind11、FFmpeg、cmake 依赖、运行时动态库）全部使用指定的 conda 虚拟环境，隔绝系统环境的库，避免版本冲突。
@@ -61,15 +61,23 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 
 
-TOML_FILE="examples/toml/sft_config/vision_sft_edge.toml"
+TOML_FILE="/data5T/liujin/code/cosmos-framework/examples/toml/sft_config/vision_sft_edge_causal.toml"
 : "${DATASET_PATH:=examples/data/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
 
-# 【LeRobot 3.x 适配】校验 LeRobot 数据集：$DATASET_PATH 下任意深度存在 meta/info.json（支持父目录下多个数据集）
-EXTRA_DATASET_CHECK='[[ -n "$(find "$DATASET_PATH" -path "*/meta/info.json" -print -quit)" ]] || { echo "ERROR: no meta/info.json found under $DATASET_PATH" >&2; exit 1; }'
-# 【留档】原 JSONL 校验（改用 LeRobot 后注释掉，未删除）
-# EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }'
+# 【LeRobot 3.x 适配】_sft_launcher_common.sh 对 DATASET_PATH 做 -d（目录）硬检查，
+# manifest 的 .jsonl 文件过不了。这里保存原始值，若为文件则临时指向其父目录通过检查。
+_DATASET_ORIGINAL="$DATASET_PATH"
+if [[ -f "$DATASET_PATH" && ! -d "$DATASET_PATH" ]]; then
+    DATASET_PATH="$(dirname "$DATASET_PATH")"
+fi
+
+# EXTRA_DATASET_CHECK：校验原始路径存在 + 恢复 DATASET_PATH（供 config 的 ${oc.env:DATASET_PATH} 读取）
+EXTRA_DATASET_CHECK="[[ -e \"$_DATASET_ORIGINAL\" ]] || { echo \"ERROR: dataset not found: $_DATASET_ORIGINAL\" >&2; exit 1; }; export DATASET_PATH=\"$_DATASET_ORIGINAL\";"
 TAIL_OVERRIDES=(
+      "model=mot_causal_fsdp"
+      '~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}'
+      '+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0}'
       "model.config.vlm_config.tokenizer.repository=null"
       "model.config.vlm_config.tokenizer.revision=null"
       "+model.config.vlm_config.tokenizer.tokenizer_type=$COSMOS3_EDGE_PROCESSOR_PATH"
