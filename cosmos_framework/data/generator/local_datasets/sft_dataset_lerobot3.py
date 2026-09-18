@@ -174,16 +174,11 @@ def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
     if (root / "meta" / "info.json").is_file():
         return [str(root)]
 
-    roots = sorted(
-        str(p)
-        for p in root.rglob("meta/info.json")
-    )
+    roots = sorted(str(p) for p in root.rglob("meta/info.json"))
     # rglob 找到的是 .../meta/info.json，取其上一级目录（去掉 /meta/info.json）
     dataset_roots = [str(Path(p).parent.parent) for p in roots]
     if not dataset_roots:
-        raise ValueError(
-            f"在 {lerobot_root} 下没找到任何含 meta/info.json 的 LeRobot 数据集目录"
-        )
+        raise ValueError(f"在 {lerobot_root} 下没找到任何含 meta/info.json 的 LeRobot 数据集目录")
     return dataset_roots
 
 
@@ -324,7 +319,11 @@ def _build_lerobot_source(
 
         if long_video_policy == "split":
             clip_ranges = _build_balanced_video_windows(
-                start_frame, end_frame, fps, max_video_duration_s, video_window_overlap_s
+                start_frame,
+                end_frame,
+                fps,
+                max_video_duration_s,
+                video_window_overlap_s,
             )
         else:
             clip_ranges = [(start_frame, end_frame)]

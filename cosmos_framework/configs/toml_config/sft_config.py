@@ -735,6 +735,21 @@ class DataloaderTrainConfig(BaseModel):
             "Set 0 to disable the duration cap. Remapped to the nested SFT dataset and skipped on VLM."
         ),
     )
+    long_video_policy: Literal["drop", "split"] = Field(
+        default="drop",
+        description=(
+            "VFM LeRobot only. Drop episodes above max_video_duration_s, or expand each long episode "
+            "into balanced independent clips. Remapped to the nested SFT dataset and skipped on VLM."
+        ),
+    )
+    video_window_overlap_s: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "VFM LeRobot only. Overlap in seconds between adjacent clips when long_video_policy='split'. "
+            "Must be smaller than max_video_duration_s when the duration cap is enabled."
+        ),
+    )
     max_video_fps: float = Field(
         default=30.0,
         ge=0,
@@ -776,21 +791,6 @@ class DataloaderTrainConfig(BaseModel):
             "VFM only. 多 fps 训练开关：True 时 temporal_interval 在 [2,3,4] 随机 "
             "（保留 1/2、1/3、1/4），直接作用于 native chunk 抽帧步长。"
             "remapped 到 SFT dataset 的 'use_multi_fps'。"
-        ),
-    )
-    long_video_policy: Literal["drop", "split"] = Field(
-        default="drop",
-        description=(
-            "VFM LeRobot only. Drop episodes above max_video_duration_s, or expand each long episode "
-            "into balanced independent clips. Remapped to the nested SFT dataset and skipped on VLM."
-        ),
-    )
-    video_window_overlap_s: float = Field(
-        default=0.0,
-        ge=0,
-        description=(
-            "VFM LeRobot only. Overlap in seconds between adjacent clips when long_video_policy='split'. "
-            "Must be smaller than max_video_duration_s when the duration cap is enabled."
         ),
     )
 
