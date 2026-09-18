@@ -16,6 +16,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 : "${COSMOS3_EDGE_PROCESSOR_PATH:=/path/to/Cosmos3-Edge}"
 : "${WAN_VAE_PATH:=/path/to/Wan2.2_VAE.pth}"
 : "${OUTPUT_ROOT:=/path/to/output/vision_causal_edge_tnd_pretrain}"
+: "${MROPE_BASE_FPS:=24}"
 TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/toml/sft_config/vision_pretrain_edge_causal_tnd.toml}"
 
 for path_var in DATASET_PATH BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT TOML_PATH; do
@@ -41,6 +42,7 @@ TRAIN_ARGS=(-m cosmos_framework.scripts.train --sft-toml="$TOML_PATH")
 CMD=(
     torchrun "${TORCHRUN_ARGS[@]}" "${TRAIN_ARGS[@]}" --
     model=mot_causal_fsdp
+    "model.config.diffusion_expert_config.base_fps=$MROPE_BASE_FPS"
     model.config.vlm_config.tokenizer.repository=null
     model.config.vlm_config.tokenizer.revision=null
     "+model.config.vlm_config.tokenizer.tokenizer_type=$COSMOS3_EDGE_PROCESSOR_PATH"
