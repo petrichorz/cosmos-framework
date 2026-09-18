@@ -5,6 +5,8 @@
 {{card_data}}
 ---
 
+# LeRobot Dataset
+
 This dataset was created using [LeRobot](https://github.com/huggingface/lerobot).
 
 {% if repo_id is defined and repo_id %}
