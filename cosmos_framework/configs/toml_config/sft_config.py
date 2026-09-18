@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import tomllib
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cosmos_framework.configs.toml_config.toml_config_helper import (
     TASK_TO_BASE_CONFIG,
     build_hydra_overrides,
 )
+from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.model.attention.npu_fusion_attention.functions import (
     NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
 )
@@ -729,6 +730,14 @@ class DataloaderTrainConfig(BaseModel):
             "recipe default. Skipped on VLM (the data packer caps via max_sequence_length)."
         ),
     )
+    num_workers: int = Field(
+        default=4,
+        ge=0,
+        description=(
+            "Number of data-loading worker processes. Remapped to the nested DataLoader on VFM; "
+            "used directly by CosmosDataLoader on VLM."
+        ),
+    )
     min_video_frames: int = Field(
         default=61,
         description=(
@@ -789,9 +798,16 @@ class DataloaderTrainConfig(BaseModel):
     use_multi_resolution: bool = Field(
         default=False,
         description=(
-            "VFM only. 多分辨率训练开关：True 时在 256/480 档位随机选一个 "
-            "（只选 <= 视频短边的档位，不上采样）。remapped 到 SFT dataset 的 "
+            "VFM only. 多分辨率训练开关：True 时从 multi_resolution_tiers "
+            "中随机选择不高于视频短边的档位。remapped 到 SFT dataset 的 "
             "'use_multi_resolution'。"
+        ),
+    )
+    multi_resolution_tiers: list[str] = Field(
+        default_factory=lambda: ["256", "480"],
+        description=(
+            "VFM LeRobot only. Candidate resolution tiers sampled uniformly when "
+            "use_multi_resolution is enabled. Remapped to the nested SFT dataset."
         ),
     )
     use_multi_fps: bool = Field(
@@ -802,6 +818,18 @@ class DataloaderTrainConfig(BaseModel):
             "remapped 到 SFT dataset 的 'use_multi_fps'。"
         ),
     )
+
+    @field_validator("multi_resolution_tiers")
+    @classmethod
+    def validate_multi_resolution_tiers(cls, tiers: list[str]) -> list[str]:
+        if not tiers:
+            raise ValueError("multi_resolution_tiers must not be empty")
+        if len(set(tiers)) != len(tiers):
+            raise ValueError("multi_resolution_tiers must not contain duplicates")
+        invalid_tiers = [tier for tier in tiers if not tier.isdecimal() or tier not in VIDEO_RES_SIZE_INFO]
+        if invalid_tiers:
+            raise ValueError(f"Unsupported multi_resolution_tiers: {invalid_tiers}")
+        return tiers
 
     @model_validator(mode="after")
     def validate_video_window_overlap(self) -> "DataloaderTrainConfig":

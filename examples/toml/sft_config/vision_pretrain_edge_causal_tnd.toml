@@ -94,7 +94,9 @@ save_iter            = 500
 [dataloader_train]
 max_sequence_length = 54000
 max_caption_tokens   = 2048
+num_workers          = 4
 use_multi_resolution = true
+multi_resolution_tiers = ["256", "480"]
 use_multi_fps        = true
 
 min_video_frames     = 61

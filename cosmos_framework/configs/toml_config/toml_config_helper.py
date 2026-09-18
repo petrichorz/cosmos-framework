@@ -61,6 +61,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
             "dataset",
             "max_caption_tokens",
         ),
+        ("dataloader_train", "num_workers"): ("dataloader_train", "dataloader", "num_workers"),
         ("dataloader_train", "min_video_frames"): (
             "dataloader_train",
             "dataloader",
@@ -121,6 +122,9 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "use_multi_resolution"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_resolution",
         ),
+        ("dataloader_train", "multi_resolution_tiers"): (
+            "dataloader_train", "dataloader", "datasets", "video", "dataset", "multi_resolution_tiers",
+        ),
         ("dataloader_train", "use_multi_fps"): (
             "dataloader_train", "dataloader", "datasets", "video", "dataset", "use_multi_fps",
         ),
@@ -179,6 +183,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_video_fps"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_backend"): None,  # VFM LeRobot-only knob
         ("dataloader_train", "video_tolerance_s"): None,  # VFM LeRobot-only knob
+        ("dataloader_train", "multi_resolution_tiers"): None,  # VFM LeRobot-only knob
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),
     },

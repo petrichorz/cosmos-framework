@@ -69,6 +69,16 @@ class TestSchemaValidation:
         assert cfg.model.teacher_forcing_tnd_max_kv_tokens == 65536
         assert cfg.model.teacher_forcing_visualize_sdpa_mask is True
 
+    @pytest.mark.parametrize("tiers", [[], ["480", "480"], ["unknown"]])
+    def test_invalid_multi_resolution_tiers_raise(self, tiers: list[str]) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
+            "dataloader_train": {"multi_resolution_tiers": tiers},
+        }
+
+        with pytest.raises(ValidationError, match="multi_resolution_tiers"):
+            SFTExperimentConfig.model_validate(raw)
+
     def test_custom_section_validates_arbitrary_nested_content(self) -> None:
         """Arbitrary nested [custom] content passes through untouched."""
         raw = {
@@ -134,6 +144,30 @@ class TestBuildHydraOverrides:
 
         assert "model.config.parallelism.fsdp_mixed_precision_enabled=true" in overrides
         assert "model.config.parallelism.fsdp_master_dtype=float32" in overrides
+
+    def test_num_workers_routes_to_vfm_nested_dataloader(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
+            "dataloader_train": {"num_workers": 8},
+        }
+
+        config = SFTExperimentConfig.model_validate(raw)
+        overrides = build_hydra_overrides(raw)
+
+        assert config.dataloader_train.num_workers == 8
+        assert "dataloader_train.dataloader.num_workers=8" in overrides
+
+    def test_multi_resolution_tiers_route_to_vfm_nested_dataset(self) -> None:
+        raw = {
+            "job": {"task": "vfm", "experiment": "vision_sft_edge_lerobot3"},
+            "dataloader_train": {"multi_resolution_tiers": ["480"]},
+        }
+
+        config = SFTExperimentConfig.model_validate(raw)
+        overrides = build_hydra_overrides(raw)
+
+        assert config.dataloader_train.multi_resolution_tiers == ["480"]
+        assert "dataloader_train.dataloader.datasets.video.dataset.multi_resolution_tiers=['480']" in overrides
 
     def test_teacher_forcing_model_fields_route_to_vfm_model_config(self) -> None:
         raw = {
