@@ -23,3 +23,8 @@ assets/** filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 *.tiff filter=lfs diff=lfs merge=lfs -text
 *.bmp filter=lfs diff=lfs merge=lfs -text
+
+# Small experiment figures are stored directly in Git.
+docs/tnd_history_memory_20260916.png -filter -diff -merge -text
+docs/tnd_kv_budget_20260916.png -filter -diff -merge -text
+docs/tnd_profile_480p_20260916.png -filter -diff -merge -text

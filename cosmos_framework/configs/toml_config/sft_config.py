@@ -20,6 +20,9 @@ from cosmos_framework.configs.toml_config.toml_config_helper import (
     TASK_TO_BASE_CONFIG,
     build_hydra_overrides,
 )
+from cosmos_framework.model.attention.npu_fusion_attention.functions import (
+    NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
+)
 
 # Common config for every model in this file:
 # - ``extra="forbid"``        → unknown TOML keys raise ValidationError (typo guard).
@@ -368,12 +371,18 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
     )
-    teacher_forcing_dense_mode: Literal["global", "per_sample"] = Field(
+    teacher_forcing_dense_mode: Literal["global", "per_sample", "grouped_tnd"] = Field(
         default="global",
         description=(
             "Scheme-B GEN attention execution: one global explicit mask, or one dense attention "
-            "call per packed sample to skip cross-sample QK regions."
+            "call per packed sample, or maskless grouped_tnd over exact visible KV sets."
         ),
+    )
+    teacher_forcing_tnd_max_kv_tokens: int = Field(
+        default=131072,
+        ge=1,
+        le=NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
+        description="Maximum number of gathered KV tokens in one grouped-TND attention call.",
     )
     teacher_forcing_visualize_sdpa_mask: bool = Field(
         default=False,

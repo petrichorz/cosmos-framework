@@ -4,6 +4,7 @@
 import math
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -18,10 +19,11 @@ import wandb
 from einops import rearrange
 
 from cosmos_framework.callbacks.every_n import EveryN
+from cosmos_framework.data.generator.sequence_packing import SequencePlan
 from cosmos_framework.model._base import ImaginaireModel
+from cosmos_framework.tools.visualize.video import save_img_or_video
 from cosmos_framework.utils import distributed, log, misc
 from cosmos_framework.utils.easy_io import easy_io
-from cosmos_framework.tools.visualize.video import save_img_or_video
 from cosmos_framework.utils.generator.data_utils import slice_data_batch
 
 WandbImagePaths = str | dict[str, str]
@@ -382,6 +384,9 @@ class EveryNDrawSample(EveryN):
         prompt_type: str = "t5_xxl",
         fps: int = 16,
         run_at_start: bool = False,
+        causal_num_blocks: int | None = None,
+        causal_block_size: int = 1,
+        causal_history_blocks: int = 16,
     ) -> None:
         # s3: # files: min(n_sample_to_save, data instance)  # per file: min(batch_size, n_viz_sample)
         # wandb: normal paths log one preview; multiview transfer logs one preview per selected timestamp.
@@ -401,6 +406,91 @@ class EveryNDrawSample(EveryN):
         self.num_sampling_step = num_sampling_step
         self.rank = distributed.get_rank()
         self.fps = fps
+        self.causal_num_blocks = causal_num_blocks
+        self.causal_block_size = causal_block_size
+        self.causal_history_blocks = causal_history_blocks
+        if causal_num_blocks is not None and causal_num_blocks < 1:
+            raise ValueError("causal_num_blocks must be positive")
+        if causal_block_size < 1 or not 1 <= causal_history_blocks <= 16:
+            raise ValueError("causal_block_size must be positive and causal_history_blocks must be in [1,16]")
+
+    @torch.no_grad()
+    def _sample_causal(self, model: Any, data_batch: dict, iteration: int) -> WandbImagePaths | None:
+        """Run lockstep TI2V on sharded weights; GT is only a visualization reference."""
+
+        def move(value, device):
+            if isinstance(value, torch.Tensor):
+                return value.detach().to(device=device).clone()
+            if isinstance(value, dict):
+                return {key: move(item, device) for key, item in value.items()}
+            if isinstance(value, list):
+                return [move(item, device) for item in value]
+            if isinstance(value, tuple):
+                return tuple(move(item, device) for item in value)
+            return deepcopy(value)
+
+        # Every rank must execute identical FSDP collectives, including CFG and block loops.
+        device = next(model.net.parameters()).device
+        results = []
+        for sample_id in range(self.n_viz_sample):
+            payload = [None]
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                count = len(data_batch[model.input_video_key])
+                if sample_id < count:
+                    payload[0] = move(slice_data_batch(data_batch, start=sample_id, limit=sample_id + 1), "cpu")
+            if dist.is_initialized():
+                dist.broadcast_object_list(payload, src=0, device=device)
+            if payload[0] is None:
+                break
+            batch = move(payload[0], device)
+            if len(batch[model.input_video_key]) != 1:
+                raise ValueError("causal online sampling requires exactly one vision item per sample")
+            prompts = batch.get(model.input_caption_key)
+            if not prompts or not isinstance(prompts[0], str) or not prompts[0].strip():
+                log.warning("Skipping causal TI2V preview with an empty training caption (CFG dropout).")
+                continue
+            video = batch[model.input_video_key][0]
+            if not isinstance(video, torch.Tensor) or video.ndim not in (4, 5):
+                raise ValueError("causal online sampling requires one single-view video per sample")
+            tokenizer = model.tokenizer_vision_gen
+            latent_frames = tokenizer.get_latent_num_frames(video.shape[-3])
+            if self.causal_num_blocks is not None:
+                latent_frames = min(latent_frames, 1 + self.causal_num_blocks * self.causal_block_size)
+            if latent_frames < 2:
+                raise ValueError("causal online sampling requires at least two latent frames")
+            num_blocks = math.ceil((latent_frames - 1) / self.causal_block_size)
+            pixel_frames = tokenizer.get_pixel_num_frames(latent_frames)
+            batch[model.input_video_key] = [video.narrow(-3, 0, pixel_frames).clone()]
+            batch["sequence_plan"] = [SequencePlan(has_text=True, has_vision=True, condition_frame_indexes_vision=[0])]
+            # Normalize GT for display only. Inference separately encodes the conditioning prefix.
+            clean = model.get_data_and_condition(batch)
+            reference = clean.raw_state_vision[0]
+            # Only the first real pixel frame is inference input; retain target shape,
+            # but never pass future ground truth to the generation request.
+            inference_video = batch[model.input_video_key][0].clone()
+            inference_video.narrow(-3, 1, pixel_frames - 1).zero_()
+            batch[model.input_video_key] = [inference_video]
+            rows = []
+            for guidance in self.guidance:
+                generated = model.generate_samples_from_batch(
+                    batch,
+                    guidance=guidance,
+                    n_sample=1,
+                    num_steps=self.num_sampling_step,
+                    has_negative_prompt=self.use_negative_prompt,
+                    seed=[iteration + sample_id],
+                    causal_num_blocks=num_blocks,
+                    causal_block_size=self.causal_block_size,
+                    causal_history_blocks=self.causal_history_blocks,
+                )
+                rows.append(model.decode(generated["vision"][0]).float().cpu())
+            rows.extend([model.decode(clean.x0_tokens_vision[0]).float().cpu(), reference.float().cpu()])
+            tag = "ema" if self.is_ema else "reg"
+            name = f"Iter{iteration:09d}/{tag}_TI2V_Sample{sample_id:03d}_Iter{iteration:09d}"
+            # All ranks generate; only rank zero persists the shared result.
+            if self.rank == 0:
+                results.append(self.run_save(rows, 1, name))
+        return {f"sample_{index}": path for index, path in enumerate(results) if path is not None} or None
 
     def on_train_start(self, model: ImaginaireModel, iteration: int = 0) -> None:
         config_job = self.config.job
@@ -664,6 +754,13 @@ class EveryNDrawSample(EveryN):
         loss: Any,
         iteration: int,
     ) -> WandbImagePaths | None:
+        if getattr(model.config, "causal_training_strategy", "none") == "teacher_forcing":
+            was_training = model.net.training
+            try:
+                model.net.eval()
+                return self._sample_causal(model, data_batch, iteration)
+            finally:
+                model.net.train(was_training)
         data_batch = slice_data_batch(data_batch, start=0, limit=self.n_viz_sample)
 
         tag = "ema" if self.is_ema else "reg"

@@ -14,6 +14,9 @@ from cosmos_framework.data.generator.sequence_packing import (
     expand_packed_sequence_for_teacher_forcing,
     sample_teacher_forcing_geometry,
 )
+from cosmos_framework.model.attention.npu_fusion_attention.functions import (
+    NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
+)
 
 
 class _ParallelismConfig(Protocol):
@@ -32,6 +35,7 @@ class TeacherForcingConfig(Protocol):
     teacher_forcing_history_blocks_min: int
     teacher_forcing_history_blocks_max: int
     teacher_forcing_dense_mode: str
+    teacher_forcing_tnd_max_kv_tokens: int
     parallelism: _ParallelismConfig
 
 
@@ -74,9 +78,14 @@ def validate_teacher_forcing_config(config: TeacherForcingConfig) -> None:
             "teacher-forcing history_blocks range must satisfy 1 <= min <= max, "
             f"got {config.teacher_forcing_history_blocks_min}..{config.teacher_forcing_history_blocks_max}"
         )
-    if config.teacher_forcing_dense_mode not in {"global", "per_sample"}:
+    if config.teacher_forcing_dense_mode not in {"global", "per_sample", "grouped_tnd"}:
         raise ValueError(
-            f"teacher_forcing_dense_mode must be 'global' or 'per_sample', got {config.teacher_forcing_dense_mode!r}"
+            f"teacher_forcing_dense_mode must be 'global', 'per_sample' or 'grouped_tnd', got {config.teacher_forcing_dense_mode!r}"
+        )
+    if not 1 <= config.teacher_forcing_tnd_max_kv_tokens <= NPU_FUSION_ATTENTION_TND_MAX_TOKENS:
+        raise ValueError(
+            "teacher_forcing_tnd_max_kv_tokens must be in "
+            f"[1, {NPU_FUSION_ATTENTION_TND_MAX_TOKENS}]"
         )
 
 

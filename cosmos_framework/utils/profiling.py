@@ -18,10 +18,58 @@ MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 
 @contextlib.contextmanager
+def _enable_npu_profiling(config, global_step):
+    import torch_npu
+
+    options = config.trainer.profiling
+    rank = distributed.get_rank()
+    if rank not in options.target_ranks:
+        yield None
+        return
+    active = options.profile_active
+    wait = options.profile_freq - options.profile_warmup - active
+    if active < 1 or wait < 0:
+        raise ValueError("profile_freq must cover profile_warmup + positive active steps")
+    trace_dir = os.path.join(config.job.path_local, "torch_trace")
+    os.makedirs(trace_dir, exist_ok=True)
+    log.info(
+        f"Ascend profiling rank={rank}: wait={wait}, warmup={options.profile_warmup}, active={active}, with_stack={options.with_stack}, with_modules={options.with_modules}, output={trace_dir}"
+    )
+    experimental_config = torch_npu.profiler._ExperimentalConfig(
+        profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+        aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+        export_type=[torch_npu.profiler.ExportType.Text, torch_npu.profiler.ExportType.Db],
+        data_simplification=False,
+    )
+    with torch_npu.profiler.profile(
+        activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+        schedule=torch_npu.profiler.schedule(wait=wait, warmup=options.profile_warmup, active=active, repeat=1),
+        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
+            trace_dir,
+            worker_name=f"rank{rank}",
+            analyse_flag=True,
+            async_mode=False,
+        ),
+        record_shapes=options.record_shape,
+        profile_memory=options.profile_memory,
+        with_stack=options.with_stack,
+        with_modules=options.with_modules,
+        experimental_config=experimental_config,
+    ) as profiler:
+        profiler.step_num = global_step
+        yield profiler
+
+
+@contextlib.contextmanager
 def maybe_enable_profiling(config, *, global_step: int = 0):
     # get user defined profiler settings
     enable_profiling = config.trainer.profiling.enable_profiling
     profile_freq = config.trainer.profiling.profile_freq
+
+    if enable_profiling and os.environ.get("COSMOS_DEVICE", "").lower() == "npu":
+        with _enable_npu_profiling(config, global_step) as profiler:
+            yield profiler
+        return
 
     if enable_profiling:
         trace_dir = os.path.join(config.job.path_local, "torch_trace")

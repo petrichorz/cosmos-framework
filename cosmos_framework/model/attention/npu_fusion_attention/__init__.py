@@ -5,12 +5,20 @@
 
 from importlib.util import find_spec
 
-from cosmos_framework.model.attention.npu_fusion_attention.functions import npu_fusion_attention
-
+from cosmos_framework.model.attention.npu_fusion_attention.functions import (
+    NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES,
+    NPU_FUSION_ATTENTION_TND_MAX_TOKENS,
+    npu_fusion_attention,
+)
 
 # Do not import torch_npu while importing the attention package. Training entrypoints
 # initialise it separately, and CPU/CUDA environments must remain able to import this
 # module without the optional Ascend dependency installed.
 NPU_FUSION_ATTENTION_SUPPORTED: bool = find_spec("torch_npu") is not None
 
-__all__ = ["NPU_FUSION_ATTENTION_SUPPORTED", "npu_fusion_attention"]
+__all__ = [
+    "NPU_FUSION_ATTENTION_SUPPORTED",
+    "NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES",
+    "NPU_FUSION_ATTENTION_TND_MAX_TOKENS",
+    "npu_fusion_attention",
+]

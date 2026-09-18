@@ -11,6 +11,8 @@ from torch import Tensor
 from cosmos_framework.model.attention.checks import assert_universal_tensor_checks
 from cosmos_framework.model.attention.masks import CausalType
 
+NPU_FUSION_ATTENTION_TND_MAX_TOKENS = 1_000_000
+NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES = 1000
 _COMPRESSED_CAUSAL_MASK_SIZE = 2048
 
 
@@ -34,22 +36,26 @@ def _ascend_actual_seq_lengths(cumulative_seqlen: Tensor) -> list[int]:
     """Convert Cosmos ``[0, ...]`` cumulative offsets to Ascend's ``[...]`` list."""
     precomputed = getattr(cumulative_seqlen, "_cosmos_actual_seq_lengths", None)
     if precomputed is not None:
-        return list(precomputed)
+        actual_seq_lengths = list(precomputed)
+    else:
+        values = cumulative_seqlen.tolist()
+        if not values or values[0] != 0:
+            raise ValueError("cumulative sequence lengths must start with 0")
+        actual_seq_lengths = values[1:]
+        # Ascend supports zero-length Q batches, represented by repeated cumulative
+        # offsets (for example [2, 4, 4, 6]). Cosmos does not use the special
+        # trailing-zero "batch not participating" convention, so offsets must remain
+        # monotonically non-decreasing here.
+        if any(end < start for start, end in zip(values[:-1], actual_seq_lengths, strict=True)):
+            raise ValueError("cumulative sequence lengths must be monotonically non-decreasing")
 
-    values = cumulative_seqlen.tolist()
-    if not values or values[0] != 0:
-        raise ValueError("cumulative sequence lengths must start with 0")
-    actual_seq_lengths = values[1:]
     if not actual_seq_lengths:
         raise ValueError("npu_fusion_attention requires at least one packed sequence")
-    # Ascend supports zero-length Q batches, represented by repeated cumulative
-    # offsets (for example [2, 4, 4, 6]). Cosmos does not use the special
-    # trailing-zero "batch not participating" convention, so offsets must remain
-    # monotonically non-decreasing here.
-    if any(end < start for start, end in zip(values[:-1], actual_seq_lengths, strict=True)):
-        raise ValueError("cumulative sequence lengths must be monotonically non-decreasing")
-    if len(actual_seq_lengths) > 1024:
-        raise ValueError("npu_fusion_attention TND supports at most 1024 packed sequences")
+    if len(actual_seq_lengths) > NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES:
+        raise ValueError(
+            "npu_fusion_attention TND supports at most "
+            f"{NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES} packed sequences"
+        )
     return actual_seq_lengths
 
 

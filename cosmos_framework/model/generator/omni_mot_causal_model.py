@@ -130,15 +130,19 @@ class OmniMoTCausalModel(OmniMoTModel):
                 "causal_history_blocks lies outside the supported range "
                 f"[{self.config.teacher_forcing_history_blocks_min}, {history_max}]"
             )
-        if self.parallel_dims is not None and (
-            self.parallel_dims.cp_enabled or self.parallel_dims.cfgp_enabled or self.parallel_dims.dp_shard_enabled
-        ):
-            raise ValueError("GenKVCache causal inference does not yet support CP, CFGP, or FSDP sharding")
+        if self.parallel_dims is not None and (self.parallel_dims.cp_enabled or self.parallel_dims.cfgp_enabled):
+            raise ValueError("GenKVCache causal inference does not yet support CP or CFGP")
         if not getattr(self.tokenizer_vision_gen, "is_causal", False):
             raise ValueError("causal inference requires a causal vision tokenizer")
         full_latent = require_single_vision_5d(gen_data_clean.x0_tokens_vision)
-        if full_latent.shape[2] != target_frames:
-            raise ValueError(f"prepared latent length {full_latent.shape[2]} does not match 1+B*S={target_frames}")
+        minimum_frames = 1 + (causal_num_blocks - 1) * causal_block_size
+        if not minimum_frames < full_latent.shape[2] <= target_frames:
+            raise ValueError(
+                f"prepared latent length {full_latent.shape[2]} must be in "
+                f"({minimum_frames}, {target_frames}] for the requested blocks"
+            )
+        # Training clips can end with a partial block; preserve those frames.
+        target_frames = int(full_latent.shape[2])
         expected_pixel_frames = self.tokenizer_vision_gen.get_pixel_num_frames(target_frames)
         if gen_data_clean.raw_state_vision:
             raw_vision = gen_data_clean.raw_state_vision[0]
@@ -286,7 +290,7 @@ class OmniMoTCausalModel(OmniMoTModel):
         causal_block_size: int,
         causal_history_blocks: int,
     ) -> dict[str, list[torch.Tensor]]:
-        del seed, n_sample, has_negative_prompt
+        del n_sample, has_negative_prompt
         target_frames = self._validate_causal_inference_request(
             data_batch=data_batch,
             sequence_plans=sequence_plans,
@@ -297,6 +301,27 @@ class OmniMoTCausalModel(OmniMoTModel):
             causal_block_size=causal_block_size,
             causal_history_blocks=causal_history_blocks,
         )
+        if self.parallel_dims is not None and self.parallel_dims.dp_shard_enabled:
+            group = self.parallel_dims.dp_shard_mesh.get_group()
+            signature = (
+                tuple(seed),
+                target_frames,
+                causal_block_size,
+                causal_history_blocks,
+                guidance,
+                guidance_interval,
+                num_steps,
+                shift,
+                sigma_max,
+                normalize_cfg,
+                skip_text_tokens_for_cfg,
+                tuple(gen_data_clean.x0_tokens_vision[0].shape),
+                tuple(data_batch[self.input_caption_key]),
+            )
+            signatures = [None] * torch.distributed.get_world_size(group)
+            torch.distributed.all_gather_object(signatures, signature, group=group)
+            if any(other != signature for other in signatures):
+                raise ValueError("FSDP causal sampling requires identical requests on every shard rank")
         assert causal_num_blocks is not None
         if len(initial_noise) != 1 or len(condition_reference) != 1 or len(condition_mask) != 1:
             raise ValueError("causal inference requires one prepared sampler state")
@@ -358,6 +383,7 @@ class OmniMoTCausalModel(OmniMoTModel):
 
             for block_id in range(1, causal_num_blocks + 1):
                 start, end = causal_generated_block_span(block_id, causal_block_size)
+                end = min(end, target_frames)
                 block_shape = slice_vision_time(full_initial, start, end).shape
                 block_initial = slice_vision_time(full_initial, start, end)
                 cond_template = self._make_causal_current_block_template(

@@ -28,7 +28,10 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
 )
 from cosmos_framework.model.attention.backends import BACKEND_CHECK_MAP
 from cosmos_framework.model.attention.frontend import BACKEND_MAP, attention
-from cosmos_framework.model.attention.npu_fusion_attention.functions import _ascend_actual_seq_lengths
+from cosmos_framework.model.attention.npu_fusion_attention.functions import (
+    NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES,
+    _ascend_actual_seq_lengths,
+)
 from cosmos_framework.model.generator.mot.attention import (
     TeacherForcingAttentionInfo,
     build_packed_sequence,
@@ -87,6 +90,16 @@ def test_sequence_pack_offsets_keep_host_lengths():
     assert query_pack["sample_offsets"]._cosmos_actual_seq_lengths == (5, 11)
     assert query_pack["_causal_seq_offsets"]._cosmos_actual_seq_lengths == (1, 3)
     assert _ascend_actual_seq_lengths(query_pack["sample_offsets"]) == [5, 11]
+
+
+def test_precomputed_sequence_lengths_enforce_tnd_sequence_limit():
+    offsets = torch.tensor([0], dtype=torch.int32)
+    offsets._cosmos_actual_seq_lengths = tuple(range(1, NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES + 1))
+    assert len(_ascend_actual_seq_lengths(offsets)) == NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES
+
+    offsets._cosmos_actual_seq_lengths = tuple(range(1, NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES + 2))
+    with pytest.raises(ValueError, match=f"at most {NPU_FUSION_ATTENTION_TND_MAX_SEQUENCES}"):
+        _ascend_actual_seq_lengths(offsets)
 
 
 @pytest.fixture
@@ -456,3 +469,23 @@ def test_build_packed_sequence_rejects_teacher_forcing_layout_geometry_mismatch(
             num_layers=1,
             teacher_forcing_layout=layout,
         )
+
+
+def test_grouped_tnd_dispatch_matches_dense_without_building_masks(cpu_attention, monkeypatch):
+    def reject_mask(*args, **kwargs):
+        raise AssertionError("grouped_tnd must not build a dense mask")
+
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_dense_teacher_forcing_gen_mask", reject_mask
+    )
+    monkeypatch.setattr(
+        "cosmos_framework.model.generator.mot.attention.build_per_sample_teacher_forcing_gen_masks", reject_mask
+    )
+    layout, _, _, _, query, key, value, attention_meta, _ = _make_teacher_forcing_packs("grouped_tnd")
+    result, _ = dispatch_attention(query, key, value, attention_meta)
+    expected = teacher_forcing_dense_attention(
+        get_gen_seq(query), get_all_seq(key), get_all_seq(value), ~build_dense_teacher_forcing_gen_mask(layout)
+    )
+    torch.testing.assert_close(get_gen_seq(result).reshape_as(expected), expected)
+    assert attention_meta.dense_gen_mask is None
+    assert attention_meta.sample_gen_masks == ()

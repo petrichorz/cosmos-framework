@@ -18,6 +18,11 @@ from cosmos_framework.model.generator.mot.teacher_forcing_attention import (
     teacher_forcing_dense_attention,
     teacher_forcing_per_sample_dense_attention,
 )
+from cosmos_framework.model.generator.mot.teacher_forcing_tnd import (
+    TNDPlan,
+    build_tnd_plan,
+    teacher_forcing_tnd_attention,
+)
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryValue
 
 
@@ -75,7 +80,7 @@ class SplitInfo:
 
 
 class TeacherForcingAttentionInfo(SplitInfo):
-    """Split metadata plus global or per-sample Scheme-B GEN masks."""
+    """Split metadata plus Scheme-B GEN masks or an exact-KV grouped plan."""
 
     def __init__(
         self,
@@ -100,6 +105,7 @@ class TeacherForcingAttentionInfo(SplitInfo):
         self.dense_mode = dense_mode
         self.dense_gen_mask = dense_gen_mask
         self.sample_gen_masks = sample_gen_masks
+        self.tnd_plan: TNDPlan | None = None
 
 
 AttentionMaskType = SplitInfo
@@ -282,7 +288,7 @@ def teacher_forcing_attention(
     attention_meta: TeacherForcingAttentionInfo,
     packed_key_states_normalized: SequencePack | None = None,
 ) -> SequencePack:
-    """Run UND causal attention and global or per-sample masked GEN attention."""
+    """Run UND causal attention and exact GEN attention using masks or TND groups."""
 
     causal_q, causal_q_offsets = get_causal_seq(packed_query_states)
     causal_k, causal_k_offsets = get_causal_seq(packed_key_states)
@@ -323,6 +329,15 @@ def teacher_forcing_attention(
             attention_meta.sample_gen_masks,
             sample_lens=attention_meta.layout.sample_lens,
             gen_sample_lens=gen_sample_lens,
+        )
+    elif attention_meta.dense_mode == "grouped_tnd":
+        if attention_meta.tnd_plan is None:
+            raise ValueError("grouped_tnd requires a precomputed TND plan")
+        full_res = teacher_forcing_tnd_attention(
+            full_q[:num_gen_queries],
+            get_all_seq(key_pack_for_gen),
+            get_all_seq(packed_value_states),
+            attention_meta.tnd_plan,
         )
     else:
         raise ValueError(f"Unsupported teacher-forcing dense mode: {attention_meta.dense_mode!r}")
@@ -706,6 +721,7 @@ def build_packed_sequence(
     pad_for_cuda_graphs: bool = False,
     teacher_forcing_layout: TeacherForcingLayout | None = None,
     teacher_forcing_dense_mode: str = "global",
+    teacher_forcing_tnd_max_kv_tokens: int = 131072,
 ) -> tuple[SequencePack, AttentionMaskType, list | None]:
     """
     Build the model input pack and attention meta for joint attention.
@@ -740,10 +756,12 @@ def build_packed_sequence(
             for mask in sample_gen_masks:
                 mask.logical_not_()
             sample_gen_masks = tuple(mask.to(device=device) for mask in sample_gen_masks)
+        elif teacher_forcing_dense_mode == "grouped_tnd":
+            dense_gen_mask = None
+            sample_gen_masks = ()
         else:
             raise ValueError(
-                "teacher_forcing_dense_mode must be 'global' or 'per_sample', "
-                f"got {teacher_forcing_dense_mode!r}"
+                f"teacher_forcing_dense_mode must be 'global', 'per_sample' or 'grouped_tnd', got {teacher_forcing_dense_mode!r}"
             )
         attention_meta = TeacherForcingAttentionInfo(
             layout=teacher_forcing_layout,
@@ -756,6 +774,12 @@ def build_packed_sequence(
             actual_len=int(packed_sequence.shape[0]),
         )
         make_pack = sequence_pack_from_packed_sequence
+        if teacher_forcing_dense_mode == "grouped_tnd":
+            attention_meta.tnd_plan = build_tnd_plan(
+                teacher_forcing_layout,
+                device=device,
+                max_kv_tokens=teacher_forcing_tnd_max_kv_tokens,
+            )
     elif teacher_forcing_layout is not None:
         raise ValueError(
             "teacher_forcing_layout requires joint_attn_implementation='teacher_forcing', "

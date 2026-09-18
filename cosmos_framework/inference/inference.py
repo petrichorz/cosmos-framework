@@ -1667,6 +1667,13 @@ class OmniInference(Inference):
                 )
                 align_num_steps = int(_steps_t.item())
 
+            for sample_idx, sample_args in enumerate(sample_args_list):
+                if self.should_process_sample(sample_args):
+                    prompt = data_batch[self.model.input_caption_key][sample_idx]
+                    if sample_args.output_dir is not None:
+                        sample_args.output_dir.mkdir(parents=True, exist_ok=True)
+                        (sample_args.output_dir / "model_input_prompt.txt").write_text(prompt, encoding="utf-8")
+
             with self._get_timer(f"{self.model.__class__.__name__}.generate_samples_from_batch"):
                 outputs = self.model.generate_samples_from_batch(
                     data_batch,
