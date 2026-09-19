@@ -17,8 +17,10 @@ def main():
     prompt = Path(env["PROMPT_FILE"]).read_text() if env.get("PROMPT_FILE") else env["PROMPT"]
     sample = {
         "name": "ti2v",
-        "model_mode": "image2video",
-        "vision_path": str(Path(env["IMAGE_PATH"]).resolve()),
+        "model_mode": env.get("MODEL_MODE", "image2video"),
+        "vision_path": str(Path(env["IMAGE_PATH"]).resolve())
+        if env.get("MODEL_MODE", "image2video") != "text2video"
+        else None,
         "prompt": prompt,
         "resolution": env["RESOLUTION"],
         "aspect_ratio": env["ASPECT_RATIO"],
@@ -26,6 +28,7 @@ def main():
         "causal_num_blocks": int(env["NUM_BLOCKS"]),
         "causal_block_size": int(env["BLOCK_SIZE"]),
         "causal_history_blocks": int(env["HISTORY_BLOCKS"]),
+        "causal_use_kv_cache": env.get("USE_KV_CACHE", "1") == "1",
         "num_steps": int(env["NUM_STEPS"]),
         "guidance": float(env["GUIDANCE"]),
     }

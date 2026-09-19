@@ -154,21 +154,14 @@ def sample_teacher_forcing_geometry(
 
 
 def build_teacher_forcing_frame_block_ids(num_frames: int, block_size: int) -> torch.LongTensor:
-    """Assign the first latent to a singleton block and chunk the remaining latents."""
+    """Assign consecutive blocks starting at latent frame zero."""
 
     if num_frames < 1:
         raise ValueError(f"num_frames must be >= 1, got {num_frames}")
     if block_size < 1:
         raise ValueError(f"block_size must be >= 1, got {block_size}")
 
-    block_ids = torch.zeros(num_frames, dtype=torch.long)
-    if num_frames > 1:
-        block_ids[1:] = 1 + torch.div(
-            torch.arange(num_frames - 1, dtype=torch.long),
-            block_size,
-            rounding_mode="floor",
-        )
-    return block_ids
+    return torch.arange(num_frames, dtype=torch.long) // block_size
 
 
 def build_teacher_forcing_layout(
@@ -224,9 +217,7 @@ def build_teacher_forcing_layout(
 
         und_source = list(range(original_offset, original_offset + und_count))
         vision_source = list(range(original_offset + und_count, original_offset + original_sample_len))
-        vision_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size).repeat_interleave(
-            spatial_tokens
-        )
+        vision_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size).repeat_interleave(spatial_tokens)
 
         clean_start = new_offset + und_count
         noisy_start = clean_start + vision_count
@@ -620,12 +611,10 @@ def _validate_teacher_forcing_packed_sequence(
             condition_mask.reshape(num_frames, -1).any(dim=1),
             as_tuple=True,
         )[0].tolist()
-        if conditioned_frames:
-            raise ValueError(
-                "causal teacher-forcing training supports only T2V condition []; "
-                f"sample {sample_id} requested {conditioned_frames}. I2V remains an inference-only mode, "
-                "and V2V training is unsupported"
-            )
+        if conditioned_frames != list(range(len(conditioned_frames))):
+            raise ValueError("teacher forcing requires a contiguous conditioning prefix")
+        if len(conditioned_frames) >= num_frames:
+            raise ValueError("teacher forcing requires at least one non-conditioned frame")
         vision_count = num_frames * height * width
         und_count = sample_len - vision_count
         if und_count < 1:

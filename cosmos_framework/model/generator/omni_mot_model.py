@@ -233,7 +233,7 @@ class OmniMoTModel(ImaginaireModel):
                 natten_parameter_list=self.config.natten_parameter_list,
                 video_temporal_causal=self.config.video_temporal_causal,
                 teacher_forcing_dense_mode=self.config.teacher_forcing_dense_mode,
-                teacher_forcing_tnd_max_kv_tokens=self.config.teacher_forcing_tnd_max_kv_tokens,
+                teacher_forcing_tnd_max_kv_tokens=getattr(self.config, "teacher_forcing_tnd_max_kv_tokens", 131072),
                 teacher_forcing_visualize_sdpa_mask=self.config.teacher_forcing_visualize_sdpa_mask,
                 # Sound generation parameters
                 sound_dim=self.config.sound_dim,
@@ -1212,7 +1212,9 @@ class OmniMoTModel(ImaginaireModel):
         ts_sound = timesteps if timesteps_sound is None else timesteps_sound  # [B_items,T_vis] or [n_sound,...]
 
         rf_cfg = self.config.rectified_flow_training_config
-        normalize_by_active = rf_cfg.normalize_loss_by_active
+        normalize_by_active = rf_cfg.normalize_loss_by_active or (
+            self.config.causal_training_strategy == "teacher_forcing"
+        )
         if self.config.vision_gen:
             assert data_batch_packed.vision is not None, "Vision packed data required when vision_gen is True"
             assert isinstance(data_batch_packed.vision.condition_mask, list), (
@@ -1448,7 +1450,7 @@ class OmniMoTModel(ImaginaireModel):
                 )
             # 上取整，计算有多少个block，计算后续sigma采样数量
             block_counts = [
-                1 + math.ceil((num_frames - 1) / block_size)
+                math.ceil(num_frames / block_size)
                 for num_frames, block_size in zip(
                     num_vision_latent_frames,
                     teacher_forcing_geometry.block_sizes,
@@ -1473,9 +1475,9 @@ class OmniMoTModel(ImaginaireModel):
                 )
             ):
                 sample_block_sigmas = block_sigmas[block_offset : block_offset + block_count]
-                frame_block_ids = build_teacher_forcing_frame_block_ids(num_frames, block_size).to(
-                    device=sample_block_sigmas.device
-                )
+                frame_block_ids = build_teacher_forcing_frame_block_ids(
+                    num_frames, block_size
+                ).to(device=sample_block_sigmas.device)
                 sigmas[sample_id, :num_frames] = sample_block_sigmas.index_select(0, frame_block_ids)
                 block_offset += block_count
         elif self.config.causal_training_strategy == "diffusion_forcing":
@@ -2566,6 +2568,7 @@ class OmniMoTModel(ImaginaireModel):
         causal_num_blocks: int | None,
         causal_block_size: int,
         causal_history_blocks: int,
+        causal_use_kv_cache: bool = True,
     ) -> dict[str, list[torch.Tensor]] | None:
         """Subclass hook for causal inference after ordinary input preparation."""
 
@@ -2603,6 +2606,7 @@ class OmniMoTModel(ImaginaireModel):
         causal_num_blocks: int | None = None,
         causal_block_size: int = 1,
         causal_history_blocks: int = 16,
+        causal_use_kv_cache: bool = True,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         """
@@ -2772,6 +2776,7 @@ class OmniMoTModel(ImaginaireModel):
             causal_num_blocks=causal_num_blocks,
             causal_block_size=causal_block_size,
             causal_history_blocks=causal_history_blocks,
+            causal_use_kv_cache=causal_use_kv_cache,
         )
         if causal_result is not None:
             return causal_result

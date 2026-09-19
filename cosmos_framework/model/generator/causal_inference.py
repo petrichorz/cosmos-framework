@@ -7,24 +7,13 @@ import torch
 
 
 def causal_total_latent_frames(num_blocks: int, block_size: int) -> int:
-    """Return singleton C0 plus the requested generated blocks."""
+    """Return the latent length, including the first frame in block zero."""
 
     if num_blocks < 1:
         raise ValueError(f"num_blocks must be >= 1, got {num_blocks}")
     if block_size < 1:
         raise ValueError(f"block_size must be >= 1, got {block_size}")
-    return 1 + num_blocks * block_size
-
-
-def causal_generated_block_span(block_id: int, block_size: int) -> tuple[int, int]:
-    """Return the absolute latent-frame span for a generated block."""
-
-    if block_id < 1:
-        raise ValueError(f"generated block_id must be >= 1, got {block_id}")
-    if block_size < 1:
-        raise ValueError(f"block_size must be >= 1, got {block_size}")
-    start = 1 + (block_id - 1) * block_size
-    return start, start + block_size
+    return num_blocks * block_size
 
 
 def require_single_vision_5d(vision_tokens: list[torch.Tensor] | None) -> torch.Tensor:

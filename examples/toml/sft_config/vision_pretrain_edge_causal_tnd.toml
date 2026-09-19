@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # Template for Cosmos3-Edge causal continued pre-training with grouped TND attention.
-# The paired launcher restricts conditioning to T2V, which is the training mode
-# currently supported by Scheme-B teacher forcing.
+# The paired launcher samples T2V 10% and TI2V 90%; TV2V is supported but not sampled.
 
 [job]
 task         = "vfm"

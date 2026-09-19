@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # Single-Ascend-NPU functional smoke for Scheme-B causal teacher forcing.
-# This deliberately uses T2V-only 17-frame clips and runs three optimizer steps.
+# This deliberately uses T2V/TI2V 17-frame clips and runs three optimizer steps.
 
 TOML_FILE="examples/toml/sft_config/vision_causal_smoke_edge.toml"
 : "${DATASET_PATH:=examples/data/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
@@ -14,7 +14,7 @@ TAIL_OVERRIDES=(
     "model=mot_causal_ddp"
     "dataloader_train.max_sequence_length=null"
     "~dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.7,1:0.2,2:0.1}"
-    "+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:1.0,1:0.0,2:0.0}"
+    "+dataloader_train.dataloader.datasets.video.dataset.conditioning_config={0:0.1,1:0.9,2:0.0}"
     "dataloader_train.dataloader.datasets.video.dataset.num_video_frames=17"
 )
 

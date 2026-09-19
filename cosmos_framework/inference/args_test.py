@@ -97,8 +97,6 @@ def test_build_parallelism(monkeypatch: pytest.MonkeyPatch):
     assert parallelism_args.compile_dynamic is False
 
 
-
-
 def test_checkpoints():
     for name, ckpt in OmniSetupOverrides.CHECKPOINTS.items():
         assert ckpt.hf.repository.split("/")[0] == "nvidia"
@@ -294,7 +292,8 @@ def test_causal_length_is_derived_from_blocks(tmp_path: Path):
         causal_block_size=2,
     ).build_sample(model_config=model_config)
     assert args.causal_history_blocks == 16
-    assert args.num_frames == 25  # latent T = 1 + 3*2 = 7; pixel T = (7-1)*4+1
+    assert args.num_frames == 21
+    assert args.causal_use_kv_cache
 
     with pytest.raises(ValueError, match="does not accept num_frames"):
         OmniSampleOverrides(

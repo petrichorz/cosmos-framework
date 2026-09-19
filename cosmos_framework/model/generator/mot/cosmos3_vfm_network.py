@@ -678,6 +678,19 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 token_shapes=vision.token_shapes,
             )  # [total_vision_patches,hidden_size]
 
+        if getattr(getattr(self, "config", None), "joint_attn_implementation", None) == "teacher_forcing":
+            # Conditions have t=0, not an absent timestep embedding. This also
+            # matches the clean prefill representation used by GenKVCache.
+            condition_tokens = torch.cat(
+                [
+                    mask.reshape(-1).to(device=packed_tokens_vision.device).repeat_interleave(h * w)
+                    for mask, (_, h, w) in zip(vision.condition_mask, vision.token_shapes, strict=True)
+                ]
+            ).to(target_dtype)
+            zero = torch.zeros(1, device=packed_tokens_vision.device, dtype=torch.float32)
+            zero_embed = self._embed_packed_timesteps(zero, packed_seq).to(target_dtype)
+            packed_tokens_vision = packed_tokens_vision + condition_tokens[:, None] * zero_embed
+
         packed_sequence[vision.sequence_indexes] = (
             packed_tokens_vision  # [total_vision_patches,hidden_size] scattered into [N_total,hidden_size]
         )

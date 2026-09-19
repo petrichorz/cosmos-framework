@@ -113,7 +113,7 @@ def test_build_teacher_forcing_layout_maps_both_streams_to_the_original_tokens()
     assert layout.source_sequence_indexes.tolist() == [0, 1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6]
     assert layout.sample_ids.tolist() == [0] * 12
     assert layout.stream_ids.tolist() == [-1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
-    assert layout.block_ids.tolist() == [-1, -1, 0, 1, 1, 2, 2, 0, 1, 1, 2, 2]
+    assert layout.block_ids.tolist() == [-1, -1, 0, 0, 1, 1, 2, 0, 0, 1, 1, 2]
     assert layout.gen_query_indexes.tolist() == list(range(2, 12))
     assert layout.clean_token_indexes.tolist() == list(range(2, 7))
     assert layout.noisy_output_indexes.tolist() == list(range(7, 12))
@@ -159,26 +159,26 @@ def test_build_teacher_forcing_layout_expands_spatial_tokens_and_isolates_sample
         -1,
         0,
         0,
-        1,
-        1,
-        1,
-        1,
         0,
         0,
         1,
         1,
+        0,
+        0,
+        0,
+        0,
         1,
         1,
         -1,
         -1,
         0,
         0,
-        1,
-        1,
         0,
         0,
-        1,
-        1,
+        0,
+        0,
+        0,
+        0,
     ]
     assert layout.sample_ids.tolist() == [0] * 13 + [1] * 10
 
@@ -262,9 +262,9 @@ def test_dense_mask_matches_s1_k1_block_causal_matrix():
     assert not mask[5, 3]
 
 
-def test_teacher_forcing_frame_block_ids_keep_first_latent_in_a_singleton_block():
+def test_teacher_forcing_frame_block_ids_include_first_latent_in_first_block():
     assert build_teacher_forcing_frame_block_ids(1, 4).tolist() == [0]
-    assert build_teacher_forcing_frame_block_ids(8, 3).tolist() == [0, 1, 1, 1, 2, 2, 2, 3]
+    assert build_teacher_forcing_frame_block_ids(8, 3).tolist() == [0, 0, 0, 1, 1, 1, 2, 2]
 
 
 def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
@@ -280,8 +280,8 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
     noisy_columns = layout.noisy_output_indexes
     frame_block_ids = build_teacher_forcing_frame_block_ids(5, 2).repeat_interleave(2)
 
-    # The first latent is a singleton block; the following two latent pairs form ordinary blocks.
-    assert frame_block_ids.tolist() == [0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    # Consecutive pairs start at frame zero; the last block is partial.
+    assert frame_block_ids.tolist() == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]
     for token_id, block_id in enumerate(frame_block_ids.tolist()):
         clean_row = token_id
         noisy_row = frame_block_ids.numel() + token_id
@@ -295,7 +295,7 @@ def test_dense_mask_keeps_blocks_full_and_limits_clean_history_to_k_blocks():
 
 @pytest.mark.parametrize("block_size", [1, 2, 3, 4])
 @pytest.mark.parametrize("history_blocks", [1, 32])
-def test_dense_mask_matches_singleton_first_latent_boundaries(block_size: int, history_blocks: int):
+def test_dense_mask_matches_uniform_block_boundaries(block_size: int, history_blocks: int):
     num_frames = 7
     layout = build_teacher_forcing_layout(
         und_token_counts=[1],
@@ -522,12 +522,16 @@ def test_expand_packed_sequence_rejects_non_t2v_conditioning(condition_mask: tor
     packed.vision.condition_mask[0] = condition_mask
     clean_tokens = [torch.zeros_like(token) for token in packed.vision.tokens]
 
-    with pytest.raises(ValueError, match="only T2V.*I2V"):
-        expand_packed_sequence_for_teacher_forcing(
-            packed,
-            clean_vision_tokens=clean_tokens,
-            geometry=_geometry(1, 1, num_samples=2),
+    if condition_mask[0].item() == 0:
+        with pytest.raises(ValueError, match="contiguous"):
+            expand_packed_sequence_for_teacher_forcing(
+                packed, clean_vision_tokens=clean_tokens, geometry=_geometry(1, 1, num_samples=2)
+            )
+    else:
+        expanded = expand_packed_sequence_for_teacher_forcing(
+            packed, clean_vision_tokens=clean_tokens, geometry=_geometry(1, 1, num_samples=2)
         )
+        torch.testing.assert_close(expanded.vision.condition_mask[0], condition_mask)
 
 
 def test_select_teacher_forcing_noisy_outputs_preserves_order_and_gradient():

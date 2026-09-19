@@ -1688,6 +1688,7 @@ class OmniInference(Inference):
                     causal_num_blocks=_getattr(sample_args_list, "causal_num_blocks"),
                     causal_block_size=_getattr(sample_args_list, "causal_block_size"),
                     causal_history_blocks=_getattr(sample_args_list, "causal_history_blocks"),
+                    causal_use_kv_cache=_getattr(sample_args_list, "causal_use_kv_cache"),
                     has_negative_prompt=neg_key in data_batch,
                     n_sample=n_sample,
                     normalize_cfg=_getattr(sample_args_list, "normalize_cfg"),

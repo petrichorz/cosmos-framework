@@ -95,6 +95,7 @@ class SamplingArgs(ArgsBase):
     causal_num_blocks: pydantic.PositiveInt
     causal_block_size: pydantic.PositiveInt
     causal_history_blocks: CausalHistoryBlocks
+    causal_use_kv_cache: bool = True
 
 
 class SamplingOverrides(OverridesBase):
@@ -113,9 +114,10 @@ class SamplingOverrides(OverridesBase):
     sigma_max: Training[float | None] = None
     """Maximum sigma for the EDM sampler. Ignored when sampler='unipc'."""
     causal_num_blocks: Training[pydantic.PositiveInt | None] = None
-    """Number of causal blocks generated sequentially after singleton condition block 0."""
+    """Total number of blocks, including the block containing frame zero."""
     causal_block_size: Training[pydantic.PositiveInt | None] = None
     """Number of VAE latent frames jointly denoised in each generated causal block."""
+    causal_use_kv_cache: Training[bool | None] = None
     causal_history_blocks: Training[CausalHistoryBlocks | None] = None
     """Number of finalized clean causal blocks retained in GenKVCache. Maximum 16."""
 
@@ -129,6 +131,8 @@ class SamplingOverrides(OverridesBase):
             self.causal_block_size = 1
         if self.causal_history_blocks is None:
             self.causal_history_blocks = 16
+        if self.causal_use_kv_cache is None:
+            self.causal_use_kv_cache = True
         if sample_meta.model_mode.is_reasoner:
             # Diffusion sampling fields are unused by the reasoner but required by
             # OmniSampleArgs validation; fill in inert sentinels.
@@ -1120,7 +1124,9 @@ class OmniSampleOverrides(
             if self.causal_num_blocks is None:
                 raise ValueError("causal inference requires causal_num_blocks")
             block_size = self.causal_block_size or 1
-            latent_frames = 1 + self.causal_num_blocks * block_size
+            from cosmos_framework.model.generator.causal_inference import causal_total_latent_frames
+
+            latent_frames = causal_total_latent_frames(self.causal_num_blocks, block_size)
             temporal_factor = model_config.tokenizer.temporal_compression_factor
             self.num_frames = (latent_frames - 1) * temporal_factor + 1
 

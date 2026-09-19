@@ -3,7 +3,7 @@
 
 # Minimal single-NPU BF16 smoke recipe for Scheme-B causal teacher forcing.
 # Launch with examples/launch_sft_vision_causal_smoke_edge.sh so the
-# mot_causal_ddp model group and T2V-only dataset overrides are applied.
+# mot_causal_ddp model group and T2V/TI2V dataset overrides are applied.
 
 [job]
 task       = "vfm"

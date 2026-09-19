@@ -3,6 +3,7 @@
 
 import math
 import os
+import random
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
@@ -387,6 +388,9 @@ class EveryNDrawSample(EveryN):
         causal_num_blocks: int | None = None,
         causal_block_size: int = 1,
         causal_history_blocks: int = 16,
+        causal_condition_frames: int = 1,
+        causal_use_kv_cache: bool = True,
+        causal_seed: int = 1,
     ) -> None:
         # s3: # files: min(n_sample_to_save, data instance)  # per file: min(batch_size, n_viz_sample)
         # wandb: normal paths log one preview; multiview transfer logs one preview per selected timestamp.
@@ -409,6 +413,12 @@ class EveryNDrawSample(EveryN):
         self.causal_num_blocks = causal_num_blocks
         self.causal_block_size = causal_block_size
         self.causal_history_blocks = causal_history_blocks
+        self.causal_condition_frames = causal_condition_frames
+        self.causal_use_kv_cache = causal_use_kv_cache
+        self.causal_seed = causal_seed
+        self._causal_fixed_samples = {}
+        if causal_condition_frames not in (0, 1, 2):
+            raise ValueError("causal_condition_frames must be 0, 1 or 2")
         if causal_num_blocks is not None and causal_num_blocks < 1:
             raise ValueError("causal_num_blocks must be positive")
         if causal_block_size < 1 or not 1 <= causal_history_blocks <= 16:
@@ -416,7 +426,7 @@ class EveryNDrawSample(EveryN):
 
     @torch.no_grad()
     def _sample_causal(self, model: Any, data_batch: dict, iteration: int) -> WandbImagePaths | None:
-        """Run lockstep TI2V on sharded weights; GT is only a visualization reference."""
+        """Run lockstep causal sampling; GT is only a visualization reference."""
 
         def move(value, device):
             if isinstance(value, torch.Tensor):
@@ -436,8 +446,15 @@ class EveryNDrawSample(EveryN):
             payload = [None]
             if not dist.is_initialized() or dist.get_rank() == 0:
                 count = len(data_batch[model.input_video_key])
-                if sample_id < count:
-                    payload[0] = move(slice_data_batch(data_batch, start=sample_id, limit=sample_id + 1), "cpu")
+                if sample_id in self._causal_fixed_samples:
+                    payload[0] = self._causal_fixed_samples[sample_id]
+                elif sample_id < count:
+                    prompts = data_batch.get(model.input_caption_key, [])
+                    if sample_id < len(prompts) and isinstance(prompts[sample_id], str) and prompts[sample_id].strip():
+                        self._causal_fixed_samples[sample_id] = move(
+                            slice_data_batch(data_batch, start=sample_id, limit=sample_id + 1), "cpu"
+                        )
+                    payload[0] = self._causal_fixed_samples.get(sample_id)
             if dist.is_initialized():
                 dist.broadcast_object_list(payload, src=0, device=device)
             if payload[0] is None:
@@ -455,20 +472,26 @@ class EveryNDrawSample(EveryN):
             tokenizer = model.tokenizer_vision_gen
             latent_frames = tokenizer.get_latent_num_frames(video.shape[-3])
             if self.causal_num_blocks is not None:
-                latent_frames = min(latent_frames, 1 + self.causal_num_blocks * self.causal_block_size)
+                latent_frames = min(latent_frames, self.causal_num_blocks * self.causal_block_size)
             if latent_frames < 2:
                 raise ValueError("causal online sampling requires at least two latent frames")
-            num_blocks = math.ceil((latent_frames - 1) / self.causal_block_size)
+            num_blocks = math.ceil(latent_frames / self.causal_block_size)
+            condition_frames = min(self.causal_condition_frames, latent_frames - 1)
             pixel_frames = tokenizer.get_pixel_num_frames(latent_frames)
             batch[model.input_video_key] = [video.narrow(-3, 0, pixel_frames).clone()]
-            batch["sequence_plan"] = [SequencePlan(has_text=True, has_vision=True, condition_frame_indexes_vision=[0])]
+            batch["sequence_plan"] = [
+                SequencePlan(
+                    has_text=True, has_vision=True, condition_frame_indexes_vision=list(range(condition_frames))
+                )
+            ]
             # Normalize GT for display only. Inference separately encodes the conditioning prefix.
             clean = model.get_data_and_condition(batch)
             reference = clean.raw_state_vision[0]
-            # Only the first real pixel frame is inference input; retain target shape,
+            # Only the real conditioning prefix is inference input; retain target shape,
             # but never pass future ground truth to the generation request.
             inference_video = batch[model.input_video_key][0].clone()
-            inference_video.narrow(-3, 1, pixel_frames - 1).zero_()
+            prefix_pixels = tokenizer.get_pixel_num_frames(condition_frames) if condition_frames else 0
+            inference_video.narrow(-3, prefix_pixels, pixel_frames - prefix_pixels).zero_()
             batch[model.input_video_key] = [inference_video]
             rows = []
             for guidance in self.guidance:
@@ -478,15 +501,17 @@ class EveryNDrawSample(EveryN):
                     n_sample=1,
                     num_steps=self.num_sampling_step,
                     has_negative_prompt=self.use_negative_prompt,
-                    seed=[iteration + sample_id],
+                    seed=[self.causal_seed + sample_id],
                     causal_num_blocks=num_blocks,
                     causal_block_size=self.causal_block_size,
                     causal_history_blocks=self.causal_history_blocks,
+                    causal_use_kv_cache=self.causal_use_kv_cache,
                 )
                 rows.append(model.decode(generated["vision"][0]).float().cpu())
             rows.extend([model.decode(clean.x0_tokens_vision[0]).float().cpu(), reference.float().cpu()])
             tag = "ema" if self.is_ema else "reg"
-            name = f"Iter{iteration:09d}/{tag}_TI2V_Sample{sample_id:03d}_Iter{iteration:09d}"
+            mode = ("T2V", "TI2V", "TV2V")[condition_frames]
+            name = f"Iter{iteration:09d}/{tag}_{mode}_Sample{sample_id:03d}_Iter{iteration:09d}"
             # All ranks generate; only rank zero persists the shared result.
             if self.rank == 0:
                 results.append(self.run_save(rows, 1, name))
@@ -756,11 +781,17 @@ class EveryNDrawSample(EveryN):
     ) -> WandbImagePaths | None:
         if getattr(model.config, "causal_training_strategy", "none") == "teacher_forcing":
             was_training = model.net.training
+            python_rng, numpy_rng = random.getstate(), np.random.get_state()
+            device = next(model.net.parameters()).device
+            devices = [device.index] if device.type != "cpu" else []
             try:
                 model.net.eval()
-                return self._sample_causal(model, data_batch, iteration)
+                with torch.random.fork_rng(devices=devices, device_type=device.type if devices else "cuda"):
+                    return self._sample_causal(model, data_batch, iteration)
             finally:
                 model.net.train(was_training)
+                random.setstate(python_rng)
+                np.random.set_state(numpy_rng)
         data_batch = slice_data_batch(data_batch, start=0, limit=self.n_viz_sample)
 
         tag = "ema" if self.is_ema else "reg"

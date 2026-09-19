@@ -69,7 +69,7 @@ def test_causal_callback_uses_ti2v_without_mutating_training_batch(monkeypatch, 
     if scenario == "empty":
         assert not calls
         return
-    assert calls[0][0]["video"][0].shape[-3] == (17 if scenario == "partial" else 9)
+    assert calls[0][0]["video"][0].shape[-3] == (17 if scenario == "partial" else 5)
     assert calls[0][1]["causal_num_blocks"] == 2
     assert calls[0][1]["seed"] == [1]
     if scenario == "multiple":
@@ -109,7 +109,7 @@ def test_ti2v_prefix_encoding_is_independent_of_future_ground_truth():
     assert torch.count_nonzero(outputs[0][..., 1:, :, :]) == 0
 
 
-@pytest.mark.parametrize(("latent_frames", "valid"), [(3, False), (4, True), (5, True), (6, False)])
+@pytest.mark.parametrize(("latent_frames", "valid"), [(2, False), (3, True), (4, True), (5, False)])
 def test_causal_request_accepts_only_nonempty_partial_final_block(latent_frames, valid):
     model = SimpleNamespace(
         config=SimpleNamespace(
@@ -148,3 +148,69 @@ def test_causal_request_accepts_only_nonempty_partial_final_block(latent_frames,
     else:
         with pytest.raises(ValueError, match="prepared latent length"):
             OmniMoTCausalModel._validate_causal_inference_request(model, **request)
+
+
+@pytest.mark.parametrize("conditions", [0, 1, 2])
+def test_uniform_preview_reuses_sample_and_restores_rng(monkeypatch, conditions):
+    import random
+
+    import numpy as np
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    original = torch.arange(29.0).reshape(1, 1, 29, 1, 1)
+    model = SimpleNamespace(
+        net=torch.nn.Linear(1, 1),
+        config=SimpleNamespace(causal_training_strategy="teacher_forcing"),
+        input_video_key="video",
+        input_caption_key="ai_caption",
+        tokenizer_vision_gen=SimpleNamespace(
+            get_latent_num_frames=lambda n: (n + 3) // 4, get_pixel_num_frames=lambda n: 4 * n - 3
+        ),
+        get_data_and_condition=lambda batch: SimpleNamespace(
+            raw_state_vision=batch["video"], x0_tokens_vision=batch["video"]
+        ),
+        decode=lambda x: x,
+    )
+    calls = []
+
+    def generate(batch, **kwargs):
+        random.random()
+        np.random.rand()
+        torch.rand(1)
+        calls.append((batch, kwargs))
+        return {"vision": batch["video"]}
+
+    model.generate_samples_from_batch = generate
+    callback = EveryNDrawSample(
+        5000,
+        n_viz_sample=1,
+        guidance=[1.0],
+        causal_num_blocks=3,
+        causal_block_size=2,
+        causal_condition_frames=conditions,
+        causal_use_kv_cache=False,
+    )
+    monkeypatch.setattr(callback, "run_save", lambda *args: None)
+    batch = {
+        "video": [original],
+        "ai_caption": ["fixed prompt"],
+        "sequence_plan": [SequencePlan(has_text=True, has_vision=True)],
+    }
+    torch_before = torch.get_rng_state()
+    random_before = random.getstate()
+    numpy_before = np.random.get_state()
+    callback.sample(None, model, batch, None, None, 5000)
+    callback.sample(None, model, {**batch, "video": [original + 100], "ai_caption": ["changed"]}, None, None, 10000)
+    assert torch.equal(torch_before, torch.get_rng_state())
+    assert random_before == random.getstate()
+    assert np.array_equal(numpy_before[1], np.random.get_state()[1])
+    assert model.net.training
+    assert len(calls) == 2
+    for data, args in calls:
+        assert data["ai_caption"] == ["fixed prompt"]
+        assert data["sequence_plan"][0].condition_frame_indexes_vision == list(range(conditions))
+        assert args["seed"] == [1] and not args["causal_use_kv_cache"]
+        prefix = 4 * conditions - 3 if conditions else 0
+        assert data["video"][0].shape[-3] == 21
+        torch.testing.assert_close(data["video"][0][..., :prefix, :, :], original[..., :prefix, :, :])
+        assert data["video"][0][..., prefix:, :, :].count_nonzero() == 0

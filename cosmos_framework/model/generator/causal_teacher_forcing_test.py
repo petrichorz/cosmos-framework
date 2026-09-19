@@ -114,9 +114,9 @@ def test_expand_teacher_forcing_training_sequence_rejects_images():
         )
 
 
-@pytest.mark.parametrize("conditioning", [[[0]], [[0, 1]], [[1]], [[], [0, 1]]])
-def test_validate_teacher_forcing_conditioning_rejects_non_t2v_modes(conditioning):
-    with pytest.raises(ValueError, match="only T2V.*I2V"):
+@pytest.mark.parametrize("conditioning", [[[1]], [[0, 2]], [[1, 0]]])
+def test_validate_teacher_forcing_conditioning_rejects_non_prefix_conditions(conditioning):
+    with pytest.raises(ValueError, match="contiguous"):
         validate_teacher_forcing_conditioning(conditioning)
 
 
@@ -137,15 +137,15 @@ def test_causal_model_prepares_geometry_for_packed_t2v_samples():
     assert len(geometry.history_blocks) == 2
 
 
-def test_teacher_forcing_sigma_uses_singleton_first_block_then_regular_chunks():
+def test_teacher_forcing_sigma_respects_uniform_blocks():
     class _RectifiedFlow:
         noise_scheduler = SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000))
 
         @staticmethod
         def sample_train_time(num_samples, iteration, shifts):
             del iteration
-            assert num_samples == 7
-            assert shifts.shape == (7,)
+            assert num_samples == 5
+            assert shifts.shape == (num_samples,)
             return torch.arange(1, num_samples + 1, dtype=torch.float32) / 10
 
     model = SimpleNamespace(
@@ -171,8 +171,8 @@ def test_teacher_forcing_sigma_uses_singleton_first_block_then_regular_chunks():
         sigmas,
         torch.tensor(
             [
-                [0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4],
-                [0.5, 0.6, 0.6, 0.7, 0.0, 0.0, 0.0, 0.0],
+                [0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3],
+                [0.4, 0.4, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0],
             ]
         ),
     )

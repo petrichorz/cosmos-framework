@@ -11,7 +11,6 @@ import torch
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
 from cosmos_framework.data.generator.sequence_packing import PackedSequence, SequencePlan, TeacherForcingGeometry
 from cosmos_framework.model.generator.causal_inference import (
-    causal_generated_block_span,
     causal_total_latent_frames,
     concat_vision_time,
     flatten_vision_5d,
@@ -107,14 +106,15 @@ class OmniMoTCausalModel(OmniMoTModel):
         if len(sequence_plans) != 1 or gen_data_clean.batch_size != 1:
             raise ValueError("causal inference currently requires batch_size=1")
         plan = sequence_plans[0]
-        if not plan.has_text or not plan.has_vision or plan.condition_frame_indexes_vision != [0]:
-            raise ValueError("causal inference requires Text+Image input with condition_frame_indexes_vision=[0]")
+        if not plan.has_text or not plan.has_vision:
+            raise ValueError("causal inference requires text and vision")
+        validate_teacher_forcing_conditioning([plan.condition_frame_indexes_vision])
         if plan.has_action or plan.has_sound or has_noisy_actions or self.config.action_gen or self.config.sound_gen:
             raise ValueError("causal inference does not support action or sound")
         if has_velocity_postprocess_builder:
             raise ValueError("causal inference does not support velocity postprocessing")
         if gen_data_clean.is_image_batch:
-            raise ValueError("causal inference requires a video target conditioned on one image")
+            raise ValueError("causal inference requires a video target")
         if not (
             self.config.teacher_forcing_block_size_min
             <= causal_block_size
@@ -135,7 +135,7 @@ class OmniMoTCausalModel(OmniMoTModel):
         if not getattr(self.tokenizer_vision_gen, "is_causal", False):
             raise ValueError("causal inference requires a causal vision tokenizer")
         full_latent = require_single_vision_5d(gen_data_clean.x0_tokens_vision)
-        minimum_frames = 1 + (causal_num_blocks - 1) * causal_block_size
+        minimum_frames = (causal_num_blocks - 1) * causal_block_size
         if not minimum_frames < full_latent.shape[2] <= target_frames:
             raise ValueError(
                 f"prepared latent length {full_latent.shape[2]} must be in "
@@ -143,6 +143,8 @@ class OmniMoTCausalModel(OmniMoTModel):
             )
         # Training clips can end with a partial block; preserve those frames.
         target_frames = int(full_latent.shape[2])
+        if len(plan.condition_frame_indexes_vision) >= target_frames:
+            raise ValueError("causal inference requires at least one non-conditioned frame")
         expected_pixel_frames = self.tokenizer_vision_gen.get_pixel_num_frames(target_frames)
         if gen_data_clean.raw_state_vision:
             raw_vision = gen_data_clean.raw_state_vision[0]
@@ -175,7 +177,15 @@ class OmniMoTCausalModel(OmniMoTModel):
     ) -> PackedSequence:
         """Pack only current vision tokens, then install their absolute request mRoPE IDs."""
 
-        plan = replace(source_plan, condition_frame_indexes_vision=[])
+        end_frame = start_latent_frame + current_latent.shape[2]
+        plan = replace(
+            source_plan,
+            condition_frame_indexes_vision=[
+                i - start_latent_frame
+                for i in source_plan.condition_frame_indexes_vision
+                if start_latent_frame <= i < end_frame
+            ],
+        )
         temporal_positions = None
         if source_data.temporal_positions_vision is not None:
             end = start_latent_frame + current_latent.shape[2]
@@ -289,6 +299,7 @@ class OmniMoTCausalModel(OmniMoTModel):
         causal_num_blocks: int | None,
         causal_block_size: int,
         causal_history_blocks: int,
+        causal_use_kv_cache: bool = True,
     ) -> dict[str, list[torch.Tensor]]:
         del n_sample, has_negative_prompt
         target_frames = self._validate_causal_inference_request(
@@ -305,6 +316,8 @@ class OmniMoTCausalModel(OmniMoTModel):
             group = self.parallel_dims.dp_shard_mesh.get_group()
             signature = (
                 tuple(seed),
+                causal_use_kv_cache,
+                tuple(sequence_plans[0].condition_frame_indexes_vision),
                 target_frames,
                 causal_block_size,
                 causal_history_blocks,
@@ -329,6 +342,7 @@ class OmniMoTCausalModel(OmniMoTModel):
         full_shape = require_single_vision_5d(gen_data_clean.x0_tokens_vision).shape
         full_initial = unflatten_vision_5d(initial_noise[0], full_shape)
         full_reference = unflatten_vision_5d(condition_reference[0], full_shape)
+        full_mask = unflatten_vision_5d(condition_mask[0].expand_as(initial_noise[0]), full_shape)
         full_data = replace(gen_data_clean, raw_state_vision=None)
         full_plan = replace(sequence_plans[0], condition_frame_indexes_vision=[])
         cond_full_template = self._pack_input_sequence(
@@ -361,31 +375,36 @@ class OmniMoTCausalModel(OmniMoTModel):
         cond_cache = GenKVCache(num_layers, causal_history_blocks, max_clean_tokens)
         uncond_cache = GenKVCache(num_layers, causal_history_blocks, max_clean_tokens) if use_cfg else None
         selected_sampler = sampler or self.sampler
-        finalized = [slice_vision_time(full_reference, 0, 1)]
+        finalized = []
+        spans = [(i, min(i + causal_block_size, target_frames)) for i in range(0, target_frames, causal_block_size)]
 
         previous_dispatch = install_gen_kv_cache_attention_dispatch(target_net)
         try:
-            self._run_causal_prefill(
-                net=net,
-                latent=finalized[0],
-                start_latent_frame=0,
-                block_id=0,
-                cond_tokens=cond_tokens,
-                uncond_tokens=uncond_tokens,
-                skip_text_tokens_for_cfg=skip_text_tokens_for_cfg,
-                source_plan=sequence_plans[0],
-                source_data=gen_data_clean,
-                cond_full_template=cond_full_template,
-                uncond_full_template=uncond_full_template,
-                cond_cache=cond_cache,
-                uncond_cache=uncond_cache,
-            )
-
-            for block_id in range(1, causal_num_blocks + 1):
-                start, end = causal_generated_block_span(block_id, causal_block_size)
-                end = min(end, target_frames)
+            for block_id, (start, end) in enumerate(spans):
                 block_shape = slice_vision_time(full_initial, start, end).shape
+                block_mask = slice_vision_time(full_mask, start, end)
+                block_reference = slice_vision_time(full_reference, start, end)
                 block_initial = slice_vision_time(full_initial, start, end)
+                block_initial = block_initial * (1 - block_mask) + block_reference * block_mask
+                if bool(block_mask.all()):
+                    finalized.append(block_reference)
+                    if causal_use_kv_cache and end < target_frames:
+                        self._run_causal_prefill(
+                            net=net,
+                            latent=block_reference,
+                            start_latent_frame=start,
+                            block_id=block_id,
+                            cond_tokens=cond_tokens,
+                            uncond_tokens=uncond_tokens,
+                            skip_text_tokens_for_cfg=skip_text_tokens_for_cfg,
+                            source_plan=sequence_plans[0],
+                            source_data=gen_data_clean,
+                            cond_full_template=cond_full_template,
+                            uncond_full_template=uncond_full_template,
+                            cond_cache=cond_cache,
+                            uncond_cache=uncond_cache,
+                        )
+                    continue
                 cond_template = self._make_causal_current_block_template(
                     text_tokens=cond_tokens,
                     skip_text_tokens=False,
@@ -410,18 +429,50 @@ class OmniMoTCausalModel(OmniMoTModel):
 
                 def velocity_fn(noise_x: list[torch.Tensor], timestep: torch.Tensor) -> list[torch.Tensor]:
                     current = unflatten_vision_5d(noise_x[0], block_shape)
+                    current = current * (1 - block_mask) + block_reference * block_mask
 
                     def branch(template: PackedSequence, cache: GenKVCache) -> list[torch.Tensor]:
-                        self._update_inference_pack_template(template, [current], None, None, timestep)
-                        output = self.denoise(
-                            net=net,
-                            data_batch_packed=template,
-                            memory=cache.new_state(GenKVCacheMode.READONLY),
-                        )
+                        if causal_use_kv_cache:
+                            self._update_inference_pack_template(template, [current], None, None, timestep)
+                            output = self.denoise(
+                                net=net,
+                                data_batch_packed=template,
+                                memory=cache.new_state(GenKVCacheMode.READONLY) if cache.is_initialized else None,
+                            )
+                        else:
+                            # Recompute the complete clean prefix with the training mask.
+                            # Truncating raw history to H blocks would lose older information
+                            # already embedded in cached per-layer representations.
+                            prefix = concat_vision_time([*finalized, current])
+                            conditional = cache is cond_cache
+                            replay_plan = replace(
+                                sequence_plans[0],
+                                condition_frame_indexes_vision=list(range(start))
+                                + [i for i in sequence_plans[0].condition_frame_indexes_vision if start <= i < end],
+                            )
+                            replay = self._make_causal_current_block_template(
+                                text_tokens=cond_tokens if conditional else uncond_tokens,
+                                skip_text_tokens=False if conditional else skip_text_tokens_for_cfg,
+                                source_plan=replay_plan,
+                                source_data=gen_data_clean,
+                                current_latent=prefix,
+                                full_position_template=cond_full_template if conditional else uncond_full_template,
+                                start_latent_frame=0,
+                            )
+                            self._update_inference_pack_template(replay, [prefix], None, None, timestep)
+                            replay = expand_teacher_forcing_training_sequence(
+                                replay,
+                                clean_vision_tokens=[prefix.to(dtype=self.precision)],
+                                config=self.config,
+                                geometry=TeacherForcingGeometry((causal_block_size,), (causal_history_blocks,)),
+                            )
+                            output = self.denoise(net=net, data_batch_packed=replay)
                         prediction = output["preds_vision"][0]
                         if prediction.ndim == 4:
                             prediction = prediction.unsqueeze(0)
-                        return [flatten_vision_5d(prediction)]
+                        if not causal_use_kv_cache:
+                            prediction = slice_vision_time(prediction, start, end)
+                        return [flatten_vision_5d(prediction * (1 - block_mask))]
 
                     needs_cfg = use_cfg
                     if needs_cfg and guidance_interval is not None:
@@ -448,8 +499,8 @@ class OmniMoTCausalModel(OmniMoTModel):
                         num_steps=len(selected_sampler.t_list) - 1,
                         shift=0.0,
                         seed=[None],
-                        condition_reference=[torch.zeros_like(sampler_state[0])],
-                        condition_mask=[torch.zeros_like(sampler_state[0])],
+                        condition_reference=[flatten_vision_5d(block_reference)],
+                        condition_mask=[flatten_vision_5d(block_mask)],
                     )
                 elif self.config.rectified_flow_inference_config.scheduler_type == "unipc":
                     sampled = selected_sampler(
@@ -472,8 +523,9 @@ class OmniMoTCausalModel(OmniMoTModel):
                         )
                     ]
                 block_clean = unflatten_vision_5d(sampled[0], block_shape)
+                block_clean = block_clean * (1 - block_mask) + block_reference * block_mask
                 finalized.append(block_clean)
-                if block_id != causal_num_blocks:
+                if causal_use_kv_cache and end < target_frames:
                     self._run_causal_prefill(
                         net=net,
                         latent=block_clean,

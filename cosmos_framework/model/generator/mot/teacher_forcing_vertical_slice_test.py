@@ -13,6 +13,7 @@ from cosmos_framework.data.generator.sequence_packing.teacher_forcing import (
     TeacherForcingGeometry,
     expand_packed_sequence_for_teacher_forcing,
 )
+from cosmos_framework.model.attention.frontend import attention
 from cosmos_framework.model.generator.mot.attention import dispatch_attention
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import (
     Cosmos3VFMNetwork,
@@ -130,7 +131,11 @@ def _make_sequence() -> tuple[PackedSequence, torch.Tensor, torch.Tensor]:
     return expanded, clean, noisy
 
 
-def test_teacher_forcing_network_vertical_slice_backpropagates_through_both_streams():
+def test_teacher_forcing_network_vertical_slice_backpropagates_through_both_streams(monkeypatch):
+    def cpu_attention(*args, backend=None, **kwargs):
+        return attention(*args, backend="sdpa", **kwargs)
+
+    monkeypatch.setattr("cosmos_framework.model.generator.mot.attention.attention", cpu_attention)
     torch.manual_seed(1234)
     network = _make_network()
     packed_sequence, clean, noisy = _make_sequence()

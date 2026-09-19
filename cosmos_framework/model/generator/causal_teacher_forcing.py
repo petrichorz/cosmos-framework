@@ -111,16 +111,11 @@ def prepare_teacher_forcing_geometry(
 def validate_teacher_forcing_conditioning(
     condition_frame_indexes_vision: Sequence[Sequence[int]],
 ) -> None:
-    """Restrict causal teacher-forcing training to T2V (``[]``)."""
+    """Accept T2V and contiguous latent-frame image/video prefixes."""
 
-    for sample_id, indexes in enumerate(condition_frame_indexes_vision):
-        normalized = list(indexes)
-        if normalized:
-            raise ValueError(
-                "causal teacher-forcing training supports only T2V condition []; "
-                f"sample {sample_id} requested {normalized}. I2V remains an inference-only mode, "
-                "and V2V training is unsupported"
-            )
+    for indexes in condition_frame_indexes_vision:
+        if list(indexes) != list(range(len(indexes))):
+            raise ValueError("teacher forcing requires a contiguous conditioning prefix")
 
 
 def expand_teacher_forcing_training_sequence(
