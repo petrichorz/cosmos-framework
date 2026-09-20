@@ -11,6 +11,8 @@ import torch
 from cosmos_framework.data.generator.local_datasets.sft_dataset_lerobot3 import (
     _build_balanced_video_windows,
     _limit_temporal_interval_by_fps,
+    _select_resolution_tier,
+    _validate_resolution_tiers,
 )
 from lerobot.datasets import video_utils as _vu
 
@@ -78,3 +80,21 @@ def test_torchcodec_requests_expected_frame_indices(monkeypatch):
 
     assert calls == [[3, 6, 9, 12]]
     assert frames.shape[0] == 4
+
+
+def test_single_resolution_tier_is_fixed_even_for_smaller_input() -> None:
+    assert _select_resolution_tier(("480",), video_min_edge=256) == "480"
+
+
+def test_multiple_resolution_tiers_select_from_eligible_tiers() -> None:
+    assert _select_resolution_tier(("256", "480"), video_min_edge=300) == "256"
+
+
+def test_multiple_resolution_tiers_fall_back_to_smallest_configured_tier() -> None:
+    assert _select_resolution_tier(("480", "720"), video_min_edge=256) == "480"
+
+
+@pytest.mark.parametrize("tiers", [(), ("480", "480"), ("unknown",)])
+def test_invalid_resolution_tiers_raise(tiers: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="resolution_tiers"):
+        _validate_resolution_tiers(tiers)

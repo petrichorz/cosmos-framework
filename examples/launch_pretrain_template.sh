@@ -36,5 +36,6 @@ export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-/path/to/Cosmos3-Edge-DCP}"
 export COSMOS3_EDGE_PROCESSOR_PATH="${COSMOS3_EDGE_PROCESSOR_PATH:-/path/to/Cosmos3-Edge}"
 export WAN_VAE_PATH="${WAN_VAE_PATH:-/path/to/Wan2.2_VAE.pth}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-/path/to/output/vision_causal_edge_tnd_pretrain}"
+export MROPE_BASE_FPS="${MROPE_BASE_FPS:-24}"
 
 exec bash "$SCRIPT_DIR/launch_pretrain_vision_causal.sh" "$@"
