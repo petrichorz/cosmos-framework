@@ -84,6 +84,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         use_filter_dict: bool = False,
         filter_dict_path: str | None = None,
         enable_fast_init: bool = False,
+        dataset_version: str | None = None,
         max_num_history_actions: int = 0,
         use_image_augmentation: bool = False,
     ) -> None:
@@ -119,7 +120,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         self._is_val_temp_seg = split == "val_temp_seg"
         self._to_opencv = _DROID_TO_OPENCV
 
-        version = os.path.basename(root)
+        version = dataset_version or os.path.basename(root)
         try:
             lerobot_roots = LEROBOT_ROOTS[version]
             self._image_features = IMAGE_FEATURES[version]
@@ -131,6 +132,8 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
         except KeyError as e:
             raise ValueError(f"Unknown version: {version!r}. Supported: {list(LEROBOT_ROOTS.keys())}") from e
 
+        if dataset_version is not None and os.path.isfile(os.path.join(root, "meta", "info.json")):
+            lerobot_roots = None  # Explicit schema, direct LeRobot root (including success/).
         if self._use_success_only and lerobot_roots:
             lerobot_roots = [x for x in lerobot_roots if x.split("/", 1)[0] == "success"]
 
