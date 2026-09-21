@@ -263,6 +263,10 @@ def build_dense_teacher_forcing_gen_mask(
 ) -> torch.BoolTensor:
     """Build the reference GEN-query mask over all dual-stream KV tokens."""
 
+    if getattr(layout, "includes_action", False):
+        from .causal_action import dense_action_mask
+
+        return dense_action_mask(layout)
     num_queries = layout.gen_query_indexes.numel()
 
     query_indexes = layout.gen_query_indexes[:, None]
@@ -310,6 +314,14 @@ def build_per_sample_teacher_forcing_gen_masks(
 ) -> tuple[torch.BoolTensor, ...]:
     """Build one GEN-query dense mask per packed sample without a global 2D allocation."""
 
+    if getattr(layout, "includes_action", False):
+        from .causal_action import dense_action_mask
+
+        full = dense_action_mask(layout)
+        return tuple(
+            full[layout.sample_ids[layout.gen_query_indexes] == i][:, layout.sample_ids == i]
+            for i in range(len(layout.sample_lens))
+        )
     masks: list[torch.BoolTensor] = []
     num_keys = layout.source_sequence_indexes.numel()
     sample_offset = 0
