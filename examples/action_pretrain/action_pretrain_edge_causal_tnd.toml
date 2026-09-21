@@ -1,0 +1,21 @@
+[job]
+task = "vfm"
+experiment = "action_causal_droid_edge"
+project = "cosmos3_action"
+group = "causal_tnd"
+name = "action_causal_droid_edge"
+wandb_mode = "disabled"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100
+
+[trainer]
+max_iter = 100
+logging_iter = 1
+
+[trainer.callbacks.compile_tokenizer]
+enabled = false
