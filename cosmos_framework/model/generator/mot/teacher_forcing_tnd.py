@@ -42,6 +42,10 @@ def build_tnd_plan(
     gradients must accumulate into the original tokens. Chunking limits each
     operator's TND length, but does not itself bound autograd's saved tensors.
     """
+    if getattr(layout, "includes_action", False):
+        from .causal_action_tnd import build_action_tnd_plan
+
+        return build_action_tnd_plan(layout, device=device, max_kv_tokens=max_kv_tokens)
     if not 1 <= max_kv_tokens <= NPU_FUSION_ATTENTION_TND_MAX_TOKENS:
         raise ValueError(f"max_kv_tokens must be in [1, {NPU_FUSION_ATTENTION_TND_MAX_TOKENS}]")
     blocks = layout.block_ids.cpu().tolist()

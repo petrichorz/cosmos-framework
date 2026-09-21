@@ -241,7 +241,7 @@ class OmniMoTModel(ImaginaireModel):
                 enable_input_bias=self.config.enable_input_bias,
             )
             network_config._attn_implementation_internal = "eager"
-            net = Cosmos3VFMNetwork(
+            net = getattr(self, "network_cls", Cosmos3VFMNetwork)(
                 language_model=language_model,
                 config=network_config,
             )

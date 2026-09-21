@@ -1029,7 +1029,11 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             assert packed_seq.vision.token_shapes is not None
             assert isinstance(packed_seq.vision.sequence_indexes, torch.Tensor)
             all_gen_indexes.append(packed_seq.vision.sequence_indexes)
-        if packed_seq.action is not None and isinstance(packed_seq.action.sequence_indexes, torch.Tensor):
+        if (
+            packed_seq.action is not None
+            and isinstance(packed_seq.action.sequence_indexes, torch.Tensor)
+            and not getattr(getattr(packed_seq.teacher_forcing, "layout", None), "includes_action", False)
+        ):
             all_gen_indexes.append(packed_seq.action.sequence_indexes)
         if packed_seq.sound is not None and isinstance(packed_seq.sound.sequence_indexes, torch.Tensor):
             all_gen_indexes.append(packed_seq.sound.sequence_indexes)
