@@ -422,6 +422,7 @@ class JointDataLoader(webdataset.WebLoader):
             frames_per_view = None
 
         # iterate over all the media in the batch
+        causal_generation_tokens = 0
         for media in input_images_or_videos if isinstance(input_images_or_videos, list) else [input_images_or_videos]:
             if is_image_batch:
                 _, H, W = media.shape
@@ -448,6 +449,7 @@ class JointDataLoader(webdataset.WebLoader):
                 latent_t_shape = self._compute_vision_latent_t_shape(T, H, W)
 
             num_vision_tokens = patch_h_shape * patch_w_shape * latent_t_shape
+            causal_generation_tokens += num_vision_tokens
             if has_text_tokens:
                 num_vision_tokens += 2
             num_tokens += num_vision_tokens
@@ -477,6 +479,12 @@ class JointDataLoader(webdataset.WebLoader):
                     num_sound_tokens = int(audio_duration * self.sound_latent_fps)
                     num_tokens += num_sound_tokens
 
+        plans = data_batch.get("sequence_plan", [])
+        for plan in plans if isinstance(plans, list) else [plans]:
+            metadata = getattr(plan, "causal_action_metadata", None)
+            if metadata is not None:
+                # Clean visual history plus one independent state per block.
+                num_tokens += causal_generation_tokens + len(metadata.states)
         return num_tokens
 
     # Keys whose value per sample is a list of tensors to be flattened into one list in the batch
