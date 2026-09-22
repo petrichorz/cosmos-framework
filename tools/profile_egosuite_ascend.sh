@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # Four-rank Ascend profiling with Python stacks. Activate the CANN/torch_npu
-# environment and configure the paths documented by launch_pretrain_template.sh.
+# environment and configure the paths documented by examples/video_pretrain/launch_pretrain_template.sh.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -n "${PROFILE_RUN_DIR:-}" ]] && export OUTPUT_ROOT="$PROFILE_RUN_DIR"
 
-exec bash "$REPO_ROOT/examples/launch_pretrain_vision_causal.sh" \
+exec bash "$REPO_ROOT/examples/video_pretrain/launch_pretrain_vision_causal.sh" \
   trainer.max_iter=9 trainer.profiling.enable_profiling=true \
   trainer.profiling.profile_freq=8 trainer.profiling.profile_warmup=2 \
   trainer.profiling.profile_active=2 \

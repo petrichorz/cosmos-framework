@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # Copy this file, replace the /path/to placeholders, and use it as the
-# machine-specific entrypoint for causal TND pre-training.
+# machine-specific entrypoint for causal video TND pre-training.
 
 set -euo pipefail
 
