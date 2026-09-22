@@ -100,6 +100,21 @@ class JobConfig(BaseModel):
     )
 
 
+# ---------------------------------------------------------------- action
+class ActionConfig(BaseModel):
+    """Action-only data geometry shared by the registered training sources."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    video_stride: Literal[1, 2, 4] = Field(
+        default=1,
+        description=(
+            "Fixed temporal stride applied to action-training video while the action/state grid "
+            "remains at the source FPS. Statistics must be generated for the same stride."
+        ),
+    )
+
+
 # ---------------------------------------------------------------- model
 class EMAConfig(BaseModel):
     """Exponential Moving Average of the generation-pathway weights.
@@ -839,6 +854,7 @@ class SFTExperimentConfig(BaseModel):
     model_config = _PYDANTIC_MODEL_CONFIG
 
     job: JobConfig = Field(default_factory=JobConfig)
+    action: ActionConfig = Field(default_factory=ActionConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
