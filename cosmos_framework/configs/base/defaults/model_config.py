@@ -243,6 +243,7 @@ class OmniMoTModelConfig:
     # Scheme-B teacher-forcing block geometry. One base chunk is one VAE latent
     # temporal frame and all of its spatial tokens. Ranges are inclusive and one
     # S/K pair is sampled for the entire forward.
+    causal_action_debug_noise_seed: int | None = None
     teacher_forcing_block_size_min: int = 1
     teacher_forcing_block_size_max: int = 4
     teacher_forcing_history_blocks_min: int = 1

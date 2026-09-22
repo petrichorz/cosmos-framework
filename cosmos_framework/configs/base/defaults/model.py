@@ -5,6 +5,7 @@ from hydra.core.config_store import ConfigStore
 
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
 from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
+from cosmos_framework.model.generator.omni_mot_causal_action_model import OmniMoTCausalActionModel
 from cosmos_framework.model.generator.omni_mot_causal_model import OmniMoTCausalModel
 from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
 from cosmos_framework.utils.lazy_config import LazyCall as L
@@ -65,9 +66,28 @@ MOT_CAUSAL_FSDP_CONFIG = dict(
 )
 
 
+MOT_CAUSAL_ACTION_FSDP_CONFIG = dict(
+    trainer=dict(
+        distributed_parallelism="fsdp",
+    ),
+    model=L(OmniMoTCausalActionModel)(
+        config=OmniMoTModelConfig(
+            causal_training_strategy="teacher_forcing",
+            joint_attn_implementation="teacher_forcing",
+            action_gen=True,
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=8,
+            ),
+        ),
+        _recursive_=False,
+    ),
+)
+
+
 def register_model():
     cs = ConfigStore.instance()
     cs.store(group="model", package="_global_", name="mot_ddp", node=MOT_DDP_CONFIG)
     cs.store(group="model", package="_global_", name="mot_fsdp", node=MOT_FSDP_CONFIG)
     cs.store(group="model", package="_global_", name="mot_causal_ddp", node=MOT_CAUSAL_DDP_CONFIG)
     cs.store(group="model", package="_global_", name="mot_causal_fsdp", node=MOT_CAUSAL_FSDP_CONFIG)
+    cs.store(group="model", package="_global_", name="mot_causal_action_fsdp", node=MOT_CAUSAL_ACTION_FSDP_CONFIG)

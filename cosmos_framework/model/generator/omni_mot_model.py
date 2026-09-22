@@ -241,7 +241,7 @@ class OmniMoTModel(ImaginaireModel):
                 enable_input_bias=self.config.enable_input_bias,
             )
             network_config._attn_implementation_internal = "eager"
-            net = Cosmos3VFMNetwork(
+            net = getattr(self, "network_cls", Cosmos3VFMNetwork)(
                 language_model=language_model,
                 config=network_config,
             )
@@ -815,6 +815,9 @@ class OmniMoTModel(ImaginaireModel):
         """
         return memory_info
 
+    def prepare_teacher_forcing_geometry_from_plans(self, num_frames, plans):
+        return self.prepare_teacher_forcing_geometry(num_frames, [p.condition_frame_indexes_vision for p in plans])
+
     def prepare_teacher_forcing_geometry(
         self,
         num_vision_latent_frames: list[int],
@@ -912,9 +915,8 @@ class OmniMoTModel(ImaginaireModel):
         # Sample a random noise level (sigma) and corresponding interpolation coefficient ("timesteps" in RF)
         # Apply shift per sample based on each sample's resolution
         num_vision_latent_frames = [x.shape[2] for x in gen_data_clean.x0_tokens_vision]
-        teacher_forcing_geometry = self.prepare_teacher_forcing_geometry(
-            num_vision_latent_frames,
-            [plan.condition_frame_indexes_vision for plan in sequence_plans],
+        teacher_forcing_geometry = self.prepare_teacher_forcing_geometry_from_plans(
+            num_vision_latent_frames, sequence_plans
         )
         timesteps_vision, sigmas_vision = self._get_train_noise_level_vision(
             batch_size=gen_data_clean.batch_size,
