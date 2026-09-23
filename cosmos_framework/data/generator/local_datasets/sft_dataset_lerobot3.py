@@ -19,6 +19,7 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +33,13 @@ from lerobot.datasets.video_utils import FrameTimestampError
 
 from cosmos_framework.data.generator.local_datasets.helper import (
     get_aspect_ratio,
+)
+from cosmos_framework.data.generator.local_datasets.lerobot_meta_cache import (
+    SCHEMA_VERSION,
+    compute_fingerprint,
+    read_cache,
+    resolve_cache_path,
+    write_cache,
 )
 from cosmos_framework.data.generator.local_datasets.sft_dataset import (
     _MAX_CAPTION_TOKENS,
@@ -113,7 +121,7 @@ class _LerobotSource:
     """
 
     root: Path
-    meta: LeRobotDatasetMetadata
+    meta: Optional[LeRobotDatasetMetadata]
     video_key: str
     width: int
     height: int
@@ -123,9 +131,15 @@ class _LerobotSource:
     caption_key: str
     root_hash: str
     name: str
-    # 每个 episode 的 clip 帧范围列表（与 meta.episodes 对齐）：未切分时每项为 [(start, end)]，
+    # 每个 episode 的 clip 帧范围列表（与 episodes 对齐）：未切分时每项为 [(start, end)]，
     # long_video_policy="split" 时每项为多个连续窗口。
     episode_clips: list[list[tuple[int, int]]]
+    # 全量原始 episode 字段（缓存命中时来自 index.json，不经过 meta.episodes）。
+    # 每条含：episode_index / data_chunk / data_file / video_chunk / video_file /
+    # caption（已归一化）/ from_ts / to_ts。
+    episodes: list[dict]
+    # 视频路径格式串（来自 info.json 的 video_path），采样期据此现算视频文件路径。
+    video_path_format: str
 
 
 def _select_lerobot_video_key(
@@ -181,6 +195,39 @@ def _discover_lerobot_roots(lerobot_root: str) -> list[str]:
     return dataset_roots
 
 
+def _extract_raw_episodes(
+    meta: LeRobotDatasetMetadata,
+    video_key: str,
+    caption_key: str,
+) -> list[dict]:
+    """从 ``meta.episodes`` 提取全量原始 episode 字段（含会被过滤掉的）。
+
+    每条只保留采样期 + 过滤期需要的字段，caption 在此一步归一化
+    （优先 caption_key 列，取不到回退官方 tasks 列第一个任务名）。后续加载期
+    过滤与采样期取值都走这份 list[dict]，不再碰 ``meta.episodes``。
+    """
+    episodes: list[dict] = []
+    for ep in meta.episodes:
+        caption = ep.get(caption_key)
+        if not caption:
+            tasks = ep.get("tasks")
+            # tasks 列是官方 episodes 表原生列，实际类型为 numpy.ndarray（非 list），
+            # 用 hasattr(x, "__len__") 判断，取第一个任务名作为 caption。
+            if tasks is not None and hasattr(tasks, "__len__") and len(tasks) > 0:
+                caption = str(tasks[0])
+        episodes.append(
+            {
+                "episode_index": int(ep["episode_index"]),
+                "data_chunk": int(ep.get("data/chunk_index", 0)),
+                "data_file": int(ep.get("data/file_index", 0)),
+                "video_chunk": int(ep.get(f"videos/{video_key}/chunk_index", 0)),
+                "video_file": int(ep.get(f"videos/{video_key}/file_index", 0)),
+                "caption": caption,
+                "from_ts": float(ep.get(f"videos/{video_key}/from_timestamp", 0.0)),
+                "to_ts": float(ep.get(f"videos/{video_key}/to_timestamp", 0.0)),
+            }
+        )
+    return episodes
 def _build_balanced_video_windows(
     start_frame: int,
     end_frame: int,
@@ -240,12 +287,14 @@ def _build_lerobot_source(
     video_feature_keywords: list[str] | None = None,
     long_video_policy: str = "drop",
     video_window_overlap_s: float = 0.0,
+    cache_path: Optional[Path] = None,
 ) -> tuple[_LerobotSource, list[tuple[int, int]]]:
     """读【单个】LeRobot 数据集，产出 (source 描述符, 有效 clip 索引列表)。
 
-    惰性化加载：这里只解析数据集级常量（宽高/fps/aspect_ratio/total_frames 等）
-    并跑一遍过滤，收集「有效 clip 的索引」``(ep_idx, clip_idx)``，**不物化任何
-    episode dict**。episode 级字段在采样期由 ``process_one_sample`` 现算。
+    惰性化加载 + 索引缓存：数据集级常量（宽高/fps/aspect_ratio/total_frames 等）与
+    全量原始 episode 字段优先从 ``cache_path`` 读（命中则不再构造
+    ``LeRobotDatasetMetadata`` / 读 parquet）；miss 时读 parquet 提取并原子写回缓存。
+    过滤始终在内存里的 ``source.episodes``（list[dict]）上做，与缓存无关。
 
     long_video_policy="split" 时，超长 episode 切成多个 clip，每个 clip 独立成为
     一条训练样本；``source.episode_clips[ep_idx]`` 存该 episode 的全部 clip 帧范围。
@@ -257,24 +306,69 @@ def _build_lerobot_source(
         )
 
     root = Path(lerobot_root)
-    # repo_id="local" + revision="local"：本地数据集，避开 HF Hub 联网（"local" 不是合法 version）
-    meta = LeRobotDatasetMetadata(repo_id="local", root=str(root), revision="local")
-    fps = float(meta.fps)
 
-    video_key = _select_lerobot_video_key(meta, video_feature_key, video_feature_keywords)
-    # 直接读该 video feature 的 shape/names（用 .get 兜底），避免用 meta.names / meta.shapes
-    # 这两个官方 property——它们用 ft["names"] / ft["shape"] 方括号遍历【所有】feature，
-    # 任一标量列（如 frame_index/timestamp）缺 names 字段就会整体 KeyError。
-    ft = meta.features[video_key]
-    shape = ft["shape"]  # [H, W, C]（或 [H, W]）
-    names = ft.get("names")  # 通常是 ["height", "width", "channels"]，可能为 None
-    if names and "width" in names and "height" in names:
-        width = shape[names.index("width")]
-        height = shape[names.index("height")]
+    # ---- 读取缓存：文件存在 + schema_version/fingerprint 都匹配才算命中 ----
+    cached: Optional[dict] = None
+    fingerprint: Optional[str] = None
+    if cache_path is not None:
+        fingerprint = compute_fingerprint(root, video_feature_key, caption_key, video_feature_keywords)
+        cached = read_cache(cache_path)
+        if (
+            cached is not None
+            and cached.get("schema_version") == SCHEMA_VERSION
+            and cached.get("fingerprint") == fingerprint
+        ):
+            log.info(f"LeRobot metadata 缓存命中: {cache_path}")
+        else:
+            cached = None
+            log.info(f"LeRobot metadata 缓存未命中，重建: {cache_path}")
+
+    if cached is not None:
+        # 缓存命中：从缓存 payload 恢复数据集级常量与全量原始 episode 字段
+        meta = None
+        width = cached["width"]
+        height = cached["height"]
+        fps = float(cached["fps"])
+        total_frames = int(cached["total_frames"])
+        video_key = cached["video_key"]
+        video_path_format = cached["video_path_format"]
+        episodes = cached["episodes"]
     else:
-        height, width = shape[0], shape[1]
+        # 缓存 miss：读 parquet + 提取全量原始字段，并原子写回缓存
+        # repo_id="local" + revision="local"：本地数据集，避开 HF Hub 联网（"local" 不是合法 version）
+        meta = LeRobotDatasetMetadata(repo_id="local", root=str(root), revision="local")
+        fps = float(meta.fps)
+        video_key = _select_lerobot_video_key(meta, video_feature_key, video_feature_keywords)
+        # 直接读该 video feature 的 shape/names（用 .get 兜底），避免用 meta.names / meta.shapes
+        # 这两个官方 property——它们用 ft["names"] / ft["shape"] 方括号遍历【所有】feature，
+        # 任一标量列（如 frame_index/timestamp）缺 names 字段就会整体 KeyError。
+        ft = meta.features[video_key]
+        shape = ft["shape"]  # [H, W, C]（或 [H, W]）
+        names = ft.get("names")  # 通常是 ["height", "width", "channels"]，可能为 None
+        if names and "width" in names and "height" in names:
+            width = shape[names.index("width")]
+            height = shape[names.index("height")]
+        else:
+            height, width = shape[0], shape[1]
+        total_frames = int(meta.total_frames)
+        video_path_format = meta.video_path
+        episodes = _extract_raw_episodes(meta, video_key, caption_key)
 
-    # 数据集级常量只存一份（原来每个 episode dict 都重复存一份）
+        if cache_path is not None:
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "fingerprint": fingerprint,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "total_frames": total_frames,
+                "video_key": video_key,
+                "caption_key": caption_key,
+                "video_path_format": video_path_format,
+                "episodes": episodes,
+            }
+            write_cache(cache_path, payload)
+
     source = _LerobotSource(
         root=root,
         meta=meta,
@@ -283,11 +377,13 @@ def _build_lerobot_source(
         height=height,
         fps=fps,
         aspect_ratio=get_aspect_ratio(width, height),
-        total_frames=int(meta.total_frames),
+        total_frames=total_frames,
         caption_key=caption_key,
         root_hash=hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8],
         name=root.name,
         episode_clips=[],
+        episodes=episodes,
+        video_path_format=video_path_format,
     )
 
     # 数据集级过滤：短边不满足时整个数据集所有 episode 都无效
@@ -299,10 +395,10 @@ def _build_lerobot_source(
         return source, []
 
     valid_clips: list[tuple[int, int]] = []
-    # meta.episodes 是 HF Dataset（pyarrow 内存映射，load_episodes 已自动 drop 掉 stats/ 列）
-    for ep_pos, ep in enumerate(meta.episodes):
-        from_ts = float(ep.get(f"videos/{video_key}/from_timestamp", 0.0))
-        to_ts = float(ep.get(f"videos/{video_key}/to_timestamp", 0.0))
+    # source.episodes 是提取后的 list[dict]（缓存命中时来自 index.json，miss 时来自 meta.episodes）
+    for ep_pos, ep in enumerate(source.episodes):
+        from_ts = float(ep["from_ts"])
+        to_ts = float(ep["to_ts"])
         duration = to_ts - from_ts
         start_frame = round(from_ts * fps)
         end_frame = round(to_ts * fps) - 1
@@ -362,6 +458,7 @@ def _load_lerobot_metadata(
     sources: list[_LerobotSource] = []
     episode_index: list[tuple[int, int, int]] = []
     for root in roots:
+        cache_path = resolve_cache_path(lerobot_root, root)
         source, valid_clips = _build_lerobot_source(
             root,
             min_video_frames=min_video_frames,
@@ -372,6 +469,7 @@ def _load_lerobot_metadata(
             video_feature_keywords=video_feature_keywords,
             long_video_policy=long_video_policy,
             video_window_overlap_s=video_window_overlap_s,
+            cache_path=cache_path,
         )
         ds_idx = len(sources)
         sources.append(source)
@@ -619,39 +717,39 @@ class LeRobotSFTDataset(torch.utils.data.IterableDataset):
         """Process a single LeRobot SFT sample.
 
         惰性化采样：传入扁平索引 ``(ds_idx, ep_idx, clip_idx)``，从 ``self.sources[ds_idx]``
-        取数据集级常量，从 ``meta.episodes[ep_idx]`` 现算 episode 级字段（caption、uuid、
+        取数据集级常量，从 ``source.episodes[ep_idx]`` 取 episode 级字段（caption、uuid、
         vision_path），clip 帧区间取自 ``source.episode_clips[ep_idx][clip_idx]``。随后依次
         做：分辨率选择 → 抽帧 → 按 backend/resize_mode 解码 → 空间/时间裁剪 → caption
         生成 → tokenize → 组装返回 dict。
         """
         source = self.sources[ds_idx]
-        meta = source.meta
-        ep = meta.episodes[ep_idx]
+        ep = source.episodes[ep_idx]
 
-        # ---- episode 级字段现算（原加载期物化的 dict 字段） ----
+        # ---- episode 级字段（提取期已归一化到 source.episodes，无需再碰 meta） ----
         video_key = source.video_key
         episode_index = int(ep["episode_index"])
-        data_chunk = int(ep.get("data/chunk_index", 0))
-        data_file = int(ep.get("data/file_index", 0))
+        data_chunk = int(ep["data_chunk"])
+        data_file = int(ep["data_file"])
 
         # clip 帧区间直接取自加载期算好的 episode_clips（long_video_policy="split" 时一个
         # episode 可能对应多个 clip，clip_idx 定位到具体的连续窗口）
         window_start, window_end = source.episode_clips[ep_idx][clip_idx]
 
-        # caption：优先读 episodes 表新增的 caption_key 列；取不到回退官方 tasks 列（任务名）。
-        caption = ep.get(source.caption_key)
-        if not caption:
-            tasks = ep.get("tasks")
-            # tasks 列是官方 episodes 表原生列，实际类型为 numpy.ndarray（非 list），
-            # 用 hasattr(x, "__len__") 判断，取第一个任务名作为 caption。
-            if tasks is not None and hasattr(tasks, "__len__") and len(tasks) > 0:
-                caption = str(tasks[0])
+        # caption 已在提取期归一化（caption_key 列，取不到回退 tasks[0]）
+        caption = ep["caption"]
 
         num_clips = len(source.episode_clips[ep_idx])
         uuid = f"{source.name}_{source.root_hash}_chunk_{data_chunk}_file_{data_file}_episode_{episode_index}"
         if num_clips > 1:
             uuid = f"{uuid}_clip_{clip_idx:03d}_of_{num_clips:03d}"
-        input_video_path = str(source.root / meta.get_video_file_path(ep_idx, video_key))
+        input_video_path = str(
+            source.root
+            / source.video_path_format.format(
+                video_key=video_key,
+                chunk_index=ep["video_chunk"],
+                file_index=ep["video_file"],
+            )
+        )
 
         # window 为单元素（一个 clip = 一段帧区间 + 一个 caption）
         t2w_window = {"start_frame": window_start, "end_frame": window_end, "temporal_interval": 1}
@@ -943,6 +1041,9 @@ def get_sft_dataset_from_lerobot(
     # 加载 metadata 前就确保 HF 离线，避免 LeRobotDatasetMetadata 触发 HF Hub 联网
     _ensure_hf_hub_offline()
 
+    # 数据加载整体计时：定位 metadata 加载（读 parquet / 读 index / 提取 / 过滤）的总耗时
+    t_start = time.perf_counter()
+
     if dataset_path.endswith(".jsonl"):
         sources, episode_index = _load_lerobot_metadata_from_manifest(
             dataset_path,
@@ -970,9 +1071,12 @@ def get_sft_dataset_from_lerobot(
         )
         source = dataset_path
 
+    t_elapsed = time.perf_counter() - t_start
+
     log.info(
         f"Finished loading LeRobot metadata from {source}. "
-        f"Total datasets: {len(sources)}, total clips: {len(episode_index)}"
+        f"Total datasets: {len(sources)}, total clips: {len(episode_index)}, "
+        f"elapsed: {t_elapsed:.2f}s"
     )
 
     dataset = LeRobotSFTDataset(
