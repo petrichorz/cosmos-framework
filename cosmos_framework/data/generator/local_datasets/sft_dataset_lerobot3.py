@@ -14,6 +14,7 @@
 #     decode_video_frames 按时间戳解码视频（torchcodec + LRU decoder cache）。
 #   - LeRobotSFTDataset 是独立 IterableDataset，自实现 __init__/__len__/__iter__/
 #     _tokenize_caption/process_one_sample，保留多分辨率/多 fps 的扩展。
+import contextlib
 import hashlib
 import json
 import math
@@ -478,6 +479,30 @@ def _load_lerobot_metadata(
     return sources, episode_index
 
 
+def _serial_thread_map(fn, *iterables, **kwargs):
+    """串行版 ``thread_map``，替代 datasets 内部用于并行 stat parquet 的 tqdm thread_map。
+
+    datasets 读取 parquet 元信息时会调 ``tqdm.contrib.concurrent.thread_map`` 并行 stat，
+    与外层 ``ThreadPoolExecutor``（manifest 并发加载）形成嵌套线程，触发 tqdm ``ensure_lock``
+    竞态（``AttributeError: tqdm has no attribute '_lock'``）。这里把它串行化——该操作只是
+    对每个文件 ``fs.info`` 拿 mtime/etag，极轻，串行化无感。
+    """
+    return list(map(fn, *iterables))
+
+
+@contextlib.contextmanager
+def _disable_datasets_nested_threading():
+    """临时把 ``datasets.data_files.thread_map`` 替换为串行版，退出时恢复。"""
+    import datasets.data_files as _dd
+
+    orig = _dd.thread_map
+    _dd.thread_map = _serial_thread_map
+    try:
+        yield
+    finally:
+        _dd.thread_map = orig
+
+
 def _load_lerobot_metadata_from_manifest(
     manifest_path: str,
     min_video_frames: int = 61,
@@ -500,9 +525,13 @@ def _load_lerobot_metadata_from_manifest(
 
     三个参数可**逐行覆盖**；某行没写时回退到函数参数（config 传入的全局值）。
 
-    并行策略：每个 path 的加载用 ``ThreadPoolExecutor`` 并行（``pd.read_parquet``
-    是 I/O + C++ 密集、会释放 GIL，多线程即可并行，无需多进程的 pickle 开销）。
-    ``manifest_max_workers`` 默认 ``min(len(tasks), 8)``。
+    并行策略：每个 path 的加载用 ``ThreadPoolExecutor`` 并行（``pd.read_parquet`` 是
+    I/O + C++ 密集、会释放 GIL，多线程即可并行）。``manifest_max_workers`` 默认
+    ``min(len(tasks), 8)``。
+
+    并发期间通过 ``_disable_datasets_nested_threading`` 把 datasets 内部的 tqdm
+    ``thread_map`` 串行化，规避「外层线程池 + 内层 thread_map」嵌套线程触发 tqdm
+    ``ensure_lock`` 竞态（``AttributeError: tqdm has no attribute '_lock'``）。
     """
     # 第 1 步：解析 manifest → 任务列表（纯 json 解析，串行很快）
     tasks: list[tuple[str, str | None, list[str] | None, str]] = []
@@ -558,9 +587,11 @@ def _load_lerobot_metadata_from_manifest(
         from concurrent.futures import ThreadPoolExecutor
 
         log.info(f"[manifest] 并行加载 {len(tasks)} 个数据集，max_workers={manifest_max_workers}")
-        with ThreadPoolExecutor(max_workers=manifest_max_workers) as ex:
-            # ex.map 保持输入顺序返回，结果顺序与 manifest 行顺序一致
-            results = list(ex.map(_load_one, tasks))
+        # 并发期间串行化 datasets 内部的 thread_map，规避嵌套线程竞态
+        with _disable_datasets_nested_threading():
+            with ThreadPoolExecutor(max_workers=manifest_max_workers) as ex:
+                # ex.map 保持输入顺序返回，结果顺序与 manifest 行顺序一致
+                results = list(ex.map(_load_one, tasks))
 
     return _merge(results)
 
