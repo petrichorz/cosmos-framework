@@ -313,9 +313,9 @@ class BaseActionLeRobotDataset(Dataset):
         split_seed: int,
         split_val_ratio: float,
         split: str,
-        mode: str,
-        embodiment_type: str,
-        viewpoint: Viewpoint,
+        mode: str | None = None,
+        embodiment_type: str | None,
+        viewpoint: Viewpoint | None,
         pose_convention: str | None = None,
         rotation_format: str | None = None,
         action_normalization: ActionNormalization | None = None,
@@ -347,7 +347,7 @@ class BaseActionLeRobotDataset(Dataset):
             self._split = _normalize_split(split)
             self._mode = mode
             self._embodiment_type = embodiment_type
-            self._viewpoint: Viewpoint = viewpoint
+            self._viewpoint: Viewpoint | None = viewpoint
             self._pose_convention = pose_convention
             self._rotation_format = rotation_format
             self._action_normalizer: ActionNormalizer | None = None
@@ -373,7 +373,7 @@ class BaseActionLeRobotDataset(Dataset):
             self._delta_timestamps: dict[str, list[float]] = {}
             self._to_opencv: np.ndarray | dict[str, np.ndarray] = np.eye(3, dtype=np.float32)
 
-            if pose_convention is None:
+            if pose_convention is None and embodiment_type is not None:
                 log.warning(
                     f"{self.__class__.__name__}: pose_convention is not set. "
                     "Consider specifying 'backward_framewise' or 'backward_anchored'."
@@ -399,7 +399,8 @@ class BaseActionLeRobotDataset(Dataset):
             self._episode_records: list[tuple[int, int, int, int]] = []
             self._episode_cum_ends: list[int] = []
             self._num_valid_indices = 0
-            self._domain_id = get_domain_id(self._embodiment_type)
+            # 原始模板样本尚未分配模型 domain，不依赖旧 embodiment 的固定维度表。
+            self._domain_id = get_domain_id(self._embodiment_type) if embodiment_type is not None else None
 
             # Deferred-init shard roots — a list of root paths.
             # Subclasses populate this in __init__; _register_sources()
@@ -427,15 +428,15 @@ class BaseActionLeRobotDataset(Dataset):
         return self._split
 
     @property
-    def mode(self) -> str:
+    def mode(self) -> str | None:
         return self._mode
 
     @mode.setter
-    def mode(self, value: str) -> None:
+    def mode(self, value: str | None) -> None:
         self._mode = value
 
     @property
-    def domain_id(self) -> int:
+    def domain_id(self) -> int | None:
         return self._domain_id
 
     # -- source registration -------------------------------------------------
@@ -738,13 +739,13 @@ class BaseActionLeRobotDataset(Dataset):
         row_idx = row_start + frame_offset * self._sample_stride
         return dataset_idx, row_idx, episode_id, frame_offset
 
-    def _choose_mode(self) -> str:
+    def _choose_mode(self) -> str | None:
         """Resolve the active mode for one sample request."""
         if self._mode == "joint":
             return random.choice(("forward_dynamics", "inverse_dynamics", "policy"))
         return self._mode
 
-    def _fetch_sample(self, idx: int) -> tuple[str, int, int, dict[str, Any]]:
+    def _fetch_sample(self, idx: int) -> tuple[str | None, int, int, dict[str, Any]]:
         """Resolve index, pick a mode, and load the sample from the dataset.
 
         Returns ``(mode, dataset_idx, row_idx, sample_dict)``.
@@ -988,7 +989,7 @@ class BaseActionLeRobotDataset(Dataset):
     def _build_result(
         self,
         *,
-        mode: str,
+        mode: str | None,
         video: torch.Tensor | None,
         action: torch.Tensor,
         ai_caption: str,
@@ -1022,7 +1023,7 @@ class BaseActionLeRobotDataset(Dataset):
             "action": action,
             "conditioning_fps": torch.tensor(self._fps, dtype=torch.long),
             "mode": mode,
-            "domain_id": torch.tensor(self._domain_id, dtype=torch.long),
+            "domain_id": torch.tensor(self._domain_id, dtype=torch.long) if self._domain_id is not None else None,
             "viewpoint": self._viewpoint,
             **extras,
         }

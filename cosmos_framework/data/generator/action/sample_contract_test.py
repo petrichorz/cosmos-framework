@@ -14,7 +14,7 @@ from cosmos_framework.data.generator.action.action_state_template import (
 )
 from cosmos_framework.data.generator.action.sample_contract import (
     ActionReadOptions,
-    RawActionSample,
+    validate_raw_action_sample,
 )
 
 
@@ -145,7 +145,7 @@ class ScalarTemplate(ActionStateTemplate):
 
 
 def make_sample(template):
-    return RawActionSample(
+    return dict(
         state_trajectory=torch.zeros(4, template.width),
         action_target=torch.ones(3, template.width),
         state_mask=torch.ones(template.width, dtype=torch.bool),
@@ -155,25 +155,28 @@ def make_sample(template):
         action_state_indexes=torch.arange(3),
         source_contract=make_contract(template),
         conditioning_fps=10,
+        video=None,
     )
 
 
-def test_state_derived_target_requires_state_mask():
+def test_per_sample_validation_does_not_recheck_dataset_contract(monkeypatch):
     template = ScalarTemplate()
-    sample = make_sample(template)
-    sample.read_options = ActionReadOptions(action_from_state=True, action_time_offset_steps=1)
-    sample.validate(template)
-    sample.action_mask[1] = False
-    with pytest.raises(ValueError, match="state mask"):
-        sample.validate(template)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Dataset-level checks must not run per sample")
+
+    monkeypatch.setattr(template, "validate_source_contract", unexpected)
+    monkeypatch.setattr(template, "validate_valid_mask", unexpected)
+    monkeypatch.setattr(template, "sanitize", unexpected)
+    validate_raw_action_sample(make_sample(template), template)
 
 
 def test_raw_contract_accepts_another_template_and_independent_masks():
     template = resolve_action_template(ScalarTemplate)
     sample = make_sample(template)
-    sample.action_mask[1] = False
-    sample.action_target[:, 1] = float("nan")
-    sample.validate(template)  # No block geometry or minimum of 33 belongs in C01.
+    sample["action_mask"][1] = False
+    sample["action_target"][:, 1] = float("nan")
+    validate_raw_action_sample(sample, template)  # No block geometry or minimum of 33 belongs in C01.
     assert resolve_action_template(template) is template
 
 
@@ -185,11 +188,11 @@ def test_raw_contract_accepts_another_template_and_independent_masks():
         ("action_state_indexes", torch.tensor([1, 2, 3])),
         ("action_timestamps", torch.tensor([0.0, 0.1, 0.1])),
         ("action_timestamps", torch.tensor([0.1, 0.2, 0.3])),
-        ("conditioning_fps", 0),
+        ("state_timestamps", torch.tensor([0.0, 0.1, 0.2, float("nan")])),
         ("video", torch.zeros(3, 3, 8, 8)),
     ],
 )
 def test_raw_contract_rejects_misalignment(field, value):
     template = ScalarTemplate()
     with pytest.raises(ValueError):
-        replace(make_sample(template), **{field: value}).validate(template)
+        validate_raw_action_sample({**make_sample(template), field: value}, template)
