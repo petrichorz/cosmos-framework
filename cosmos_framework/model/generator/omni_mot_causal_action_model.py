@@ -48,8 +48,6 @@ class OmniMoTCausalActionModel(OmniMoTModel):
     def _pack_input_sequence(self, sequence_plans, input_text_indexes, gen_data_clean, input_timesteps, **kwargs):
         if any(not p.has_action or not p.has_vision or p.has_sound for p in sequence_plans):
             raise ValueError("Use separate jobs for video-only and action samples")
-        if self.tokenizer_vision_gen.temporal_compression_factor != 4:
-            raise ValueError("Causal action interval geometry requires temporal compression 4")
         input_timesteps = input_timesteps.reshape(len(sequence_plans), -1)
         packed = super()._pack_input_sequence(
             sequence_plans, input_text_indexes, gen_data_clean, input_timesteps[:, :1], **kwargs

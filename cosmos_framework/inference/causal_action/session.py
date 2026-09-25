@@ -15,25 +15,26 @@ class CausalActionSession:
     """A caller supplies its model/data-adapter planning callable.
 
     ``planner`` receives measured state, image and observed visual blocks, and
-    returns a [N,80] absolute target tensor. Feedback confirms a complete block
+    returns a [N,D] absolute target tensor in the selected template. Feedback confirms a complete block
     and supplies its observations; no historical action or state is retained.
     The next call always requires a fresh measured state and image.
     """
 
-    def __init__(self, contract, planner, history_blocks=8):
+    def __init__(self, contract, planner, history_blocks=8, *, template):
         if history_blocks < 1:
             raise ValueError("history_blocks must be positive")
         self.contract, self.planner, self.history_blocks = contract, planner, history_blocks
+        self.template = template
         self.history, self.pending = [], None
         self.revision = 0
 
     @classmethod
-    def for_model(cls, contract, model, batch_builder, *, history_blocks=8, **sampling_options):
+    def for_model(cls, contract, model, batch_builder, *, template, history_blocks=8, **sampling_options):
         """Connect Cosmos to an execution adapter's batch construction.
 
         ``batch_builder`` receives measured state/image and ObservedBlock
         history. It must preserve the current measurement and build the same
-        80D normalized SequencePlan metadata as training, with visual history
+        template-normalized SequencePlan metadata as training, with visual history
         marked clean. Historical action/state slots may be zero placeholders.
         """
         from cosmos_framework.inference.causal_action.outputs import real_actions
@@ -60,27 +61,32 @@ class CausalActionSession:
             )
             return real_actions(generated, batch)[0]
 
-        return cls(contract, planner, history_blocks=history_blocks)
+        return cls(contract, planner, history_blocks=history_blocks, template=template)
 
     def generate_current_block(self, *, state, state_mask, image, action_mask):
         if self.pending is not None:
             raise RuntimeError("Commit complete execution feedback before planning the next block")
-        if state.shape != (80,) or state_mask.shape != (80,) or action_mask.shape != (80,):
-            raise ValueError("State and masks must use the 80D source contract")
-        if (action_mask & ~state_mask).any() or not state_mask.any():
+        if state.shape != (self.template.width,):
+            raise ValueError("State must match the action template width")
+        state_mask = self.template.validate_valid_mask(state_mask).to(state.device)
+        action_mask = self.template.validate_valid_mask(action_mask).to(state.device)
+        # 绝对目标不依赖同维 state；只要求相对字段具有有效 anchor。
+        if (self.template.required_anchor_mask(action_mask) & ~state_mask).any() or not state_mask.any():
             raise ValueError("Current targets require valid measured anchor channels")
+        state = self.template.sanitize(state, state_mask)
         history = self.history[-self.history_blocks :]
         # Fresh invocation invalidates all request-local attention/CFG caches.
         proposed = self.planner(
             state=state.clone(),
             state_mask=state_mask.clone(),
+            action_mask=action_mask.clone(),
             image=image,
             history=history,
             revision=self.revision,
             contract=self.contract,
         )
-        if proposed.ndim != 2 or proposed.shape[1] != 80 or not len(proposed):
-            raise ValueError("Planner must return a complete real action block [N,80]")
+        if proposed.ndim != 2 or proposed.shape[1] != self.template.width or not len(proposed):
+            raise ValueError("Planner must return a complete real action block [N,template.width]")
         self.pending = len(proposed)
         return proposed.masked_fill(~action_mask.to(proposed.device), 0)
 

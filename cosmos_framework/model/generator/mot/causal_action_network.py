@@ -18,11 +18,10 @@ class SharedActionLinear(nn.Linear):
 
 class CausalActionNetwork(Cosmos3VFMNetwork):
     def _create_action_interfaces(self):
-        if self.action_dim != 80:
-            raise ValueError("Causal mid-training requires the shared OpenWAM 80D layout")
-        self.action2llm = SharedActionLinear(80, self.hidden_size)
-        self.llm2action = SharedActionLinear(self.hidden_size, 80)
-        self.state2llm = nn.Linear(80, self.hidden_size)
+        # action_dim 由模板宽度配置；模型不解释字段语义。
+        self.action2llm = SharedActionLinear(self.action_dim, self.hidden_size)
+        self.llm2action = SharedActionLinear(self.hidden_size, self.action_dim)
+        self.state2llm = nn.Linear(self.action_dim, self.hidden_size)
         self.state_modality_embed = nn.Parameter(torch.zeros(self.hidden_size))
 
     def _init_action_interfaces(self):
