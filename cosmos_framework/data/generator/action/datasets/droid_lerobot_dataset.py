@@ -4,7 +4,6 @@
 import json
 import os
 import random
-from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -105,12 +104,8 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             tolerance_s=tolerance_s,
             enable_fast_init=enable_fast_init,
         )
-        self._causal_data_version = (
-            str(Path(root).resolve())
-            + ":"
-            + str(dataset_version)
-            + f":split_seed={split_seed}:val_ratio={split_val_ratio}"
-        )
+        if action_space == "causal_eef":
+            raise ValueError("causal_eef was retired; causal training requires a template SegmentLeRobotDataset")
         self._use_success_only = use_success_only
         self._video_mode = video_mode
         self._action_space = action_space
@@ -168,7 +163,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
             if self._use_state or self._max_num_history_actions > 0:
                 self._delta_timestamps[_JOINT_STATE_FEATURE] = observation_ts_ext
                 self._delta_timestamps[_GRIPPER_STATE_FEATURE] = observation_ts_ext
-        if (self._use_state or self._action_space == "causal_eef") and self._action_space != "joint_pos":
+        if self._use_state and self._action_space != "joint_pos":
             self._delta_timestamps[_GRIPPER_STATE_FEATURE] = observation_ts
 
         if self._use_filter_dict:
@@ -389,44 +384,6 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
 
         extras: dict[str, Any] = {}
 
-        if self._action_space == "causal_eef":
-            from cosmos_framework.data.generator.action.block_state import SourceContract, rotation_6d
-
-            # This source's measured Cartesian pose is Panda link8 in robot base.
-            # Pose targets are achieved next observations, not inferred joint commands.
-            observed = sample[self._state_features].float()
-            rot = torch.from_numpy(R.from_euler("xyz", observed[:, 3:6].numpy()).as_matrix()).float()
-            states = torch.zeros(len(observed), 80)
-            states[:, :3] = observed[:, :3]
-            states[:, 3:9] = rotation_6d(rot)
-            grip = sample[_GRIPPER_STATE_FEATURE].reshape(-1).float()
-            states[:, 9] = 1 - grip if self._is_gripper_action_flipped else grip
-            target = states[1:].clone()
-            command = sample[self._action_features].reshape(-1).float()
-            target[:, 9] = 1 - command if self._is_gripper_action_flipped else command
-            state_mask = torch.zeros_like(states, dtype=torch.bool)
-            state_mask[:, :10] = True
-            extras.update(
-                state_trajectory=states,
-                action_target=target,
-                state_mask=state_mask,
-                action_mask=state_mask[1:].clone(),
-                action_state_indexes=torch.arange(len(target)),
-                state_timestamps=torch.arange(len(states), dtype=torch.float64) / self._fps,
-                action_timestamps=torch.arange(len(target), dtype=torch.float64) / self._fps,
-                source_contract=SourceContract(
-                    source="droid",
-                    robot="franka_panda",
-                    frame="robot_base",
-                    endpoint="panda_link8",
-                    target_semantics="achieved_next_cartesian_pose+command_gripper_position",
-                    data_version=self._causal_data_version,
-                    split=self._split,
-                    side_mapping="single_arm_left_0:10",
-                ),
-            )
-            action = target[:, :10]
-
         if self._action_space == "midtrain":
             pose_convention = cast(PoseConvention, self._pose_convention)
             state = sample[self._state_features]  # [T+1, state_dim] or [H+T+1, state_dim]
@@ -533,8 +490,6 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
                 "The bottom row contains two horizontally concatenated third-person perspective views of the scene from opposite sides, with the robot visible."
             )
 
-        if self._skip_video_loading and self._action_space == "causal_eef":
-            return dict(action=action, conditioning_fps=torch.tensor(self._fps), **extras)
         return self._build_result(
             mode=mode,
             video=video,

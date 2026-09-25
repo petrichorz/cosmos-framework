@@ -8,11 +8,9 @@ Quaternion results are unit length with a deterministic sign (q and -q are
 the same rotation). No angle wrapping or coordinate-frame conversion is implicit.
 """
 
-import hashlib
 import importlib
-import json
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
@@ -36,7 +34,6 @@ class TemplateSourceContract:
     ``units`` and ``scalar_semantics`` are keyed by field name. Scalars can
     only use block subtraction when declared ``absolute``. In particular,
     velocity commands must not be silently interpreted as mobile pose.
-    This contract does not reuse the existing OpenWAM80 SourceContract.
     """
 
     template_id: str
@@ -53,19 +50,6 @@ class TemplateSourceContract:
     fps: float = 0.0
     valid_dimensions: tuple[int, ...] = ()
     sampling_signature: str = ""
-
-    def statistics_key(self, block_sizes, video_stride, chunk_length):
-        """统计绑定来源、模板及实际采样几何，不能跨契约误用。"""
-        payload = dict(
-            contract=asdict(self),
-            block_sizes=list(block_sizes),
-            video_stride=video_stride,
-            chunk_length=chunk_length,
-            compression=4,
-            layout="independent_first_frame_short_final_block_v1",
-            sampling="uniform_windows_uniform_block_sizes",
-        )
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 class ActionStateTemplate(ABC):
@@ -97,6 +81,10 @@ class ActionStateTemplate(ABC):
     def mock_quantiles(self, state_stats, delta_stats, valid_mask):
         """返回模板表示的模拟范围；具体字段映射只能由模板定义。"""
         raise ValueError("This template does not define an AgiBot mock statistics mapping")
+
+    def required_anchor_mask(self, action_mask):
+        """默认每个有效目标都需要 anchor；含绝对字段的模板可覆盖此规则。"""
+        return self.validate_valid_mask(action_mask)
 
     @abstractmethod
     def validate_valid_mask(self, valid_mask, *, template_id=None) -> torch.Tensor:
@@ -149,6 +137,13 @@ class ActionStateTemplate55(ActionStateTemplate):
     rotation_groups = (tuple(range(17, 21)), tuple(range(24, 28)))
     valid_mask_spec = ValidMaskSpec(width=55)
     absolute_fields = ("left_gripper", "right_gripper", "left_hand", "right_hand")
+
+    def required_anchor_mask(self, action_mask):
+        """夹爪与灵巧手是绝对目标，不要求对应的 state 维度有效。"""
+        mask = self.validate_valid_mask(action_mask).clone()
+        for name in self.absolute_fields:
+            mask[self.fields[name]] = False
+        return mask
 
     def validate_valid_mask(self, valid_mask, *, template_id=None):
         """校验 55D mask、模板版本、保留位及四元数组完整性。"""
