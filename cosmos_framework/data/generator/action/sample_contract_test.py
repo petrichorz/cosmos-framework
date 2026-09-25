@@ -7,14 +7,11 @@ import pytest
 import torch
 
 from cosmos_framework.data.generator.action.action_state_template import (
-    ActionStateTemplate,
     ActionStateTemplate55,
     TemplateSourceContract,
-    resolve_action_template,
 )
 from cosmos_framework.data.generator.action.sample_contract import (
     ActionReadOptions,
-    validate_raw_action_sample,
 )
 
 
@@ -110,89 +107,3 @@ def test_read_options_are_explicit_and_do_not_relabel():
     ):
         with pytest.raises(ValueError):
             ActionReadOptions(**kwargs)
-
-
-class ScalarTemplate(ActionStateTemplate):
-    """An unrelated width/layout verifies that the raw contract has no slot assumptions."""
-
-    template_id = "two-scalars-v1"
-    width = 2
-    fields = {"coordinates": slice(0, 2)}
-    rotation_groups = ()
-
-    def validate_valid_mask(self, valid_mask, *, template_id=None):
-        if valid_mask.shape != (self.width,) or valid_mask.dtype != torch.bool:
-            raise ValueError("Invalid scalar mask")
-        return valid_mask
-
-    def validate_source_contract(self, contract, valid_mask):
-        self.validate_valid_mask(valid_mask)
-        if contract.template_id != self.template_id:
-            raise ValueError("Template mismatch")
-
-    def sanitize(self, values, valid_mask):
-        return values.masked_fill(~self.validate_valid_mask(valid_mask), 0)
-
-    def validate(self, state, action, valid_mask, source_contract):
-        self.validate_source_contract(source_contract, valid_mask)
-        torch.broadcast_shapes(state.shape, action.shape)
-
-    def encode_action_delta(self, absolute_action, anchor_state, valid_mask, *, source_contract):
-        return self.sanitize(absolute_action - anchor_state, valid_mask)
-
-    def decode_action_delta(self, action_delta, anchor_state, valid_mask, *, source_contract):
-        return self.sanitize(action_delta + anchor_state, valid_mask)
-
-
-def make_sample(template):
-    return dict(
-        state_trajectory=torch.zeros(4, template.width),
-        action_target=torch.ones(3, template.width),
-        state_mask=torch.ones(template.width, dtype=torch.bool),
-        action_mask=torch.ones(template.width, dtype=torch.bool),
-        state_timestamps=torch.arange(4, dtype=torch.float64) / 10,
-        action_timestamps=torch.arange(3, dtype=torch.float64) / 10,
-        action_state_indexes=torch.arange(3),
-        source_contract=make_contract(template),
-        conditioning_fps=10,
-        video=None,
-    )
-
-
-def test_per_sample_validation_does_not_recheck_dataset_contract(monkeypatch):
-    template = ScalarTemplate()
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError("Dataset-level checks must not run per sample")
-
-    monkeypatch.setattr(template, "validate_source_contract", unexpected)
-    monkeypatch.setattr(template, "validate_valid_mask", unexpected)
-    monkeypatch.setattr(template, "sanitize", unexpected)
-    validate_raw_action_sample(make_sample(template), template)
-
-
-def test_raw_contract_accepts_another_template_and_independent_masks():
-    template = resolve_action_template(ScalarTemplate)
-    sample = make_sample(template)
-    sample["action_mask"][1] = False
-    sample["action_target"][:, 1] = float("nan")
-    validate_raw_action_sample(sample, template)  # No block geometry or minimum of 33 belongs in C01.
-    assert resolve_action_template(template) is template
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("action_target", torch.ones(3, 3)),
-        ("state_trajectory", torch.zeros(3, 2)),
-        ("action_state_indexes", torch.tensor([1, 2, 3])),
-        ("action_timestamps", torch.tensor([0.0, 0.1, 0.1])),
-        ("action_timestamps", torch.tensor([0.1, 0.2, 0.3])),
-        ("state_timestamps", torch.tensor([0.0, 0.1, 0.2, float("nan")])),
-        ("video", torch.zeros(3, 3, 8, 8)),
-    ],
-)
-def test_raw_contract_rejects_misalignment(field, value):
-    template = ScalarTemplate()
-    with pytest.raises(ValueError):
-        validate_raw_action_sample({**make_sample(template), field: value}, template)

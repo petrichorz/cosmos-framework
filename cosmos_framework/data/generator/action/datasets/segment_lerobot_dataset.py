@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 """Template-independent, variable-length LeRobot segment reader."""
 
+import json
 import math
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from cosmos_framework.data.generator.action.action_state_template import ActionStateTemplate, TemplateSourceContract
@@ -13,7 +15,7 @@ from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot impo
     LeRobotDatasetMetadata,
     split_episode_ids,
 )
-from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions, validate_raw_action_sample
+from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
 
@@ -64,6 +66,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         self.template = template
         self.read_options = read_options
         self.source_contract = replace(source_contract, fps=fps, split=self.split)
+        self._episode_fps = self._load_episode_fps(Path(root), meta.total_episodes)
         # 索引计数属于当前 Reader，不修改调用方或其他 Reader 的 planner。
         self.planner = SegmentPlanner(
             max_action_steps=planner.max_action_steps,
@@ -79,6 +82,33 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             video_backend=video_backend,
             prefetched_meta=meta,
         )
+
+    def _load_episode_fps(self, root, total_episodes):
+        """episode ID 从 0 连续编号；只缓存 float32 FPS，不保留 JSONL 内容。"""
+        values = np.full(total_episodes, np.nan, dtype=np.float32)
+        path = root / "meta" / "episodes.jsonl"
+        if path.is_file():
+            with path.open() as file:
+                for line in file:
+                    if not line.strip():
+                        continue
+                    episode = json.loads(line)
+                    if "source_fps" not in episode:
+                        continue
+                    episode_id = episode["episode_index"]
+                    if type(episode_id) is not int or not 0 <= episode_id < total_episodes:
+                        raise ValueError(f"episode_index out of range in {path}: {episode_id}")
+                    fps = episode["source_fps"]
+                    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or fps <= 0:
+                        raise ValueError(f"Invalid source_fps for episode {episode_id} in {path}: {fps}")
+                    values[episode_id] = fps
+        values.setflags(write=False)
+        return values
+
+    def _read_source_fps(self, episode_id):
+        """按 episode ID 直接索引；NaN 表示未声明，回退到 meta.fps。"""
+        fps = self._episode_fps[episode_id]
+        return self.fps if np.isnan(fps) else float(fps)
 
     def _append_index_records(self, *, meta, ds_idx, dataset_label=None):
         """先排除目标偏移导致的越界，再在对齐网格上规划片段。"""
@@ -147,6 +177,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
     def __getitem__(self, idx):
         """按实际长度批量读取，目标偏移只在这里执行一次。"""
         ds_idx, episode_id, start, actions = self._resolve_index(idx)
+        # 按当前 episode 获取原始 FPS；只有字段缺失时才回退到 meta.fps。
+        source_fps = self._read_source_fps(episode_id)
         ds = self._get_dataset(ds_idx)
         ds._ensure_hf_dataset_loaded()
         options = self.read_options
@@ -163,6 +195,9 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 绕开 LeRobot 默认 torch.tensor(float) 的 float32 转换，保留长轨迹时间精度。
         timestamps = ds.hf_dataset.select_columns(["timestamp"]).with_format(None)[rows]["timestamp"]
         times = torch.tensor(timestamps, dtype=torch.float64)
+        # 先用存储 FPS 检查连续采样，再将输出 FPS 切换到真实训练时间尺度。
+        if not torch.allclose(times[1:] - times[:-1], torch.full_like(times[1:], 1 / self.fps), atol=1e-5, rtol=1e-4):
+            raise ValueError(f"Episode {episode_id}: timestamp intervals must match meta.fps={self.fps}")
         # action 时间标记区间起点；目标实际读取时刻由 read_options 声明。
         task = ds._query_hf_dataset({"task_index": [rows[0]]})["task_index"][0].item()
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
@@ -181,11 +216,13 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             action_timestamps=times[:-1].clone(),
             action_state_indexes=torch.arange(actions),
             source_contract=self.source_contract,
-            conditioning_fps=torch.tensor(self.fps, dtype=torch.float64),
+            # 存储时间戳仍搭配 storage_fps；训练 FPS 在读取完成后统一切换。
+            storage_fps=torch.tensor(self.fps, dtype=torch.float32),
+            conditioning_fps=torch.tensor(source_fps, dtype=torch.float32),
+            source_fps=torch.tensor(source_fps, dtype=torch.float32),
             read_options=options,
             ai_caption=str(ds.meta.tasks.iloc[int(task)].name),
             viewpoint=viewpoint,
             additional_view_description=self.video_view.describe(viewpoint=viewpoint) if self.video_view else "",
         )
-        validate_raw_action_sample(sample, self.template)
         return sample

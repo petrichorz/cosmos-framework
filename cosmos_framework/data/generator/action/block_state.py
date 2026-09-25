@@ -262,10 +262,11 @@ def build_block_sample(raw, *, block_size, history_blocks, video_stride, statist
         raise ValueError("State must be measured before or at the action interval start")
     if (st[1:] < st[:-1]).any() or (at[1:] <= at[:-1]).any():
         raise ValueError("Timestamps must be ordered")
-    fps = float(raw["conditioning_fps"])
+    # 旧 Reader 仅提供 conditioning_fps；新 Reader 显式区分存储与训练 FPS。
+    fps = float(raw.get("storage_fps", raw["conditioning_fps"]))
     if not fps > 0 or not torch.isfinite(torch.tensor(fps)):
         raise ValueError("Source fps must be finite and positive")
-    if "conditioning_fps_action" in raw and float(raw["conditioning_fps_action"]) != fps:
+    if "conditioning_fps_action" in raw and float(raw["conditioning_fps_action"]) != float(raw["conditioning_fps"]):
         raise ValueError("Adapters must align video and action onto the same interval grid")
     if not torch.allclose(at[1:] - at[:-1], torch.full_like(at[1:], 1 / fps), atol=1e-5, rtol=1e-4):
         raise ValueError("Action timestamps must match the declared synchronized video interval grid")
@@ -308,7 +309,7 @@ def build_block_sample(raw, *, block_size, history_blocks, video_stride, statist
         state_clip,
         action_clip,
         statistics,
-        (st[chosen] - at[0]) * float(raw["conditioning_fps"]),
+        (st[chosen] - at[0]) * fps,
     )
     result = dict(raw, action=actions, video=raw["video"][:, ::video_stride].contiguous())
     source_fps = torch.as_tensor(raw["conditioning_fps"]).float()

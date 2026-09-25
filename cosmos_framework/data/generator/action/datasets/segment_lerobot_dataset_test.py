@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 """Reader boundary and alignment checks without video/model dependencies."""
 
+import json
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -15,7 +17,7 @@ from cosmos_framework.data.generator.action.sample_contract import ActionReadOpt
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 
 
-def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False):
+def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, root="synthetic"):
     template = ActionStateTemplate55()
     size = sum(lengths)
     state = torch.arange(size, dtype=torch.float32)[:, None].expand(-1, template.width).clone()
@@ -39,7 +41,7 @@ def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False):
         features={key: {"shape": list(value.shape[1:])} for key, value in columns.items()},
         episodes=episodes,
         total_episodes=len(lengths),
-        root="synthetic",
+        root=root,
         tasks=pd.DataFrame({"task_index": [0]}, index=["test task"]),
     )
     monkeypatch.setattr(module, "LeRobotDatasetMetadata", lambda **kwargs: meta)
@@ -57,7 +59,7 @@ def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False):
     )
     monkeypatch.setattr(module.SegmentLeRobotDataset, "_get_dataset", lambda self, index: ds)
     reader = module.SegmentLeRobotDataset(
-        root="synthetic",
+        root=root,
         template=template,
         source_contract=template.source_contract("agibot", source="test", info={}, target_semantics="absolute"),
         planner=SegmentPlanner(
@@ -153,3 +155,51 @@ def test_result_uses_parent_video_format_and_keeps_absolute_targets(monkeypatch)
     torch.testing.assert_close(sample["action_target"], sample["state_trajectory"][1:])
     torch.testing.assert_close(sample["action_mask"], sample["state_mask"])
     assert sample["mode"] is None and sample["domain_id"] is None
+
+
+def test_source_fps_uses_dense_array_with_missing_field_fallback(monkeypatch, tmp_path):
+    path = tmp_path / "meta" / "episodes.jsonl"
+    path.parent.mkdir()
+    # 故意打乱 JSONL 顺序，必须按 episode_index 而非行号关联。
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"episode_index": 2},
+                {"episode_index": 1, "source_fps": 29.97},
+                {"episode_index": 0, "source_fps": 25},
+            ]
+        )
+    )
+    reader, _ = make_reader(monkeypatch, root=tmp_path, lengths=(100, 100, 100))
+    assert reader._episode_fps.dtype == np.float32
+    assert reader._episode_fps.nbytes == 3 * 4
+    assert np.isnan(reader._episode_fps[2])
+    assert not reader._episode_fps.flags.writeable
+    path.unlink()  # getitem 只查数组，不再打开 JSONL。
+    for index, (_, episode, _, _) in enumerate(reader._segments):
+        sample = reader[index]
+        assert sample["source_fps"].item() == pytest.approx({0: 25, 1: 29.97, 2: 30}[episode])
+        assert sample["conditioning_fps"].item() == sample["source_fps"].item()
+        assert sample["storage_fps"].item() == 30
+    other, _ = make_reader(monkeypatch)  # 不同根目录独立读取。
+    assert other[0]["source_fps"].item() == 30
+
+
+def test_reader_rejects_nonuniform_storage_timestamps(monkeypatch):
+    reader, _ = make_reader(monkeypatch, lengths=(65,))
+    ds = reader._get_dataset(0)
+    times = [i / 30 for i in range(65)]
+    times[12] += 0.01
+    ds.hf_dataset = Dataset.from_dict({"timestamp": times})
+    with pytest.raises(ValueError, match="timestamp intervals must match meta.fps"):
+        reader[0]
+
+
+@pytest.mark.parametrize("fps", [0, -1, None, True, float("nan"), float("inf")])
+def test_invalid_source_fps_does_not_fall_back(monkeypatch, tmp_path, fps):
+    path = tmp_path / "meta" / "episodes.jsonl"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"episode_index": 0, "source_fps": fps}))
+    with pytest.raises(ValueError, match="Invalid source_fps"):
+        make_reader(monkeypatch, root=tmp_path, lengths=(65,))
