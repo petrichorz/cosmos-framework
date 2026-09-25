@@ -91,6 +91,7 @@ class CausalActionSFTDataset(ActionSFTDataset):
             "action_state_indexes",
             "state_timestamps",
             "action_timestamps",
+            "storage_fps",
             "source_contract",
         ):
             raw.pop(key, None)

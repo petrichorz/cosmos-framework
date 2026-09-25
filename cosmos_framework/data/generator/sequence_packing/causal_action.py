@@ -116,7 +116,7 @@ def build_action_layout(
             indexes = list(range(len(source), len(source) + ns))
             state_indexes.extend(indexes)
             gen.extend(indexes)
-            # Source indexes only seed positional fields; time is set from measurements below.
+            # 保留 action 的其他位置分量；时间分量在下方绑定视频边界 latent。
             source.extend(old + u + nv + int(j) for j in m.state_action_indexes)
             samples.extend([i] * ns)
             streams.extend([3] * ns)
@@ -207,14 +207,14 @@ def expand_action_sequence(packed, clean_vision_tokens, geometry):
         )
 
     positions = packed.position_ids[:, layout.source_sequence_indexes].clone()
-    action_offset = state_offset = 0
-    for m, length in zip(packed.causal_action_metadata, na, strict=True):
-        original_action_indexes = a.sequence_indexes[action_offset : action_offset + length]
-        step = packed.position_ids[0, original_action_indexes[1]] - packed.position_ids[0, original_action_indexes[0]]
-        origin = packed.position_ids[0, original_action_indexes[0]] - step
+    video_offset = state_offset = 0
+    for m, (t, h, w) in zip(packed.causal_action_metadata, v.token_shapes, strict=True):
+        # 同一 latent 的空间 token 共享时间坐标，取第一个；复用已有 FPS 缩放和前缀偏移。
+        latent_starts = m.state_latent_indexes.to(v.sequence_indexes.device) * (h * w)
+        video_indexes = v.sequence_indexes[video_offset + latent_starts]
         indexes = layout.state_indexes[state_offset : state_offset + len(m.states)]
-        positions[0, indexes] = origin + m.state_frame_times.to(positions) * step
-        action_offset += length
+        positions[0, indexes] = packed.position_ids[0, video_indexes]
+        video_offset += t * h * w
         state_offset += len(m.states)
 
     return replace(

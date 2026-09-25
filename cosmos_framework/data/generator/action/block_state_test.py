@@ -70,7 +70,6 @@ def test_geometry_anchors_and_absolute_fields(offset, steps, stride):
     assert result["conditioning_fps"].item() == 25 / stride
     assert result["conditioning_fps_action"].item() == 25
     assert raw["conditioning_fps"].item() == 25
-    torch.testing.assert_close(m.state_frame_times, m.state_action_indexes.double())
     decoded = template.decode_action_delta(
         result["action"],
         m.anchors.repeat_interleave(steps, 0),
@@ -260,3 +259,4 @@ def test_sft_adapter_uses_fixed_geometry_and_template(mode):
     assert plan.causal_action_metadata.block_size == 2
     assert len(plan.condition_frame_indexes_action) == (96 if mode == "forward_dynamics" else 0)
     assert result["action"].shape[-1] == template.width
+    assert not {"state_timestamps", "action_timestamps", "storage_fps"} & result.keys()

@@ -79,7 +79,7 @@ def packed_batch(width, mode):
                 state_mask=sm,
                 action_mask=mask,
                 state_action_indexes=torch.arange(0, n, 32),
-                state_frame_times=torch.arange(0, n, 32).float(),
+                state_latent_indexes=torch.arange(0, n // 16, 2),
             )
         )
         pos = torch.zeros(3, 1 + t + n)

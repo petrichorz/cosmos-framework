@@ -110,11 +110,10 @@ class BlockStateMetadata:
     state_action_indexes: torch.Tensor
     anchors: torch.Tensor
     contract: TemplateSourceContract
+    state_latent_indexes: torch.Tensor
     state_clip_fraction: torch.Tensor | None = None
     action_clip_fraction: torch.Tensor | None = None
     statistics: BlockStatistics | None = None
-    state_frame_times: torch.Tensor | None = None
-    state_latent_indexes: torch.Tensor | None = None
     template: ActionStateTemplate | None = None
 
     def __post_init__(self):
@@ -183,8 +182,6 @@ def build_block_sample(raw, *, template, planner, history_blocks, statistics=Non
         state_clip_fraction=state_clip,
         action_clip_fraction=action_clip,
         statistics=statistics,
-        # C07a 再删除旧位置消费者；此处保留其原始时间步单位。
-        state_frame_times=(raw["state_timestamps"][starts] - raw["action_timestamps"][0]) * raw["storage_fps"],
         state_latent_indexes=latent_indexes,
         template=template,
     )

@@ -72,9 +72,6 @@ def test_model_session_decodes_with_current_template():
         state_mask=data["state_mask"],
         action_mask=data["action_mask"],
         source_contract=contract,
-        state_timestamps=torch.arange(33).double() / 30,
-        action_timestamps=torch.arange(32).double() / 30,
-        storage_fps=30.0,
         conditioning_fps=30.0,
     )
     low, high = torch.full((template.width,), -100.0), torch.full((template.width,), 100.0)
