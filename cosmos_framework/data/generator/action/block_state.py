@@ -24,6 +24,8 @@ class Quantiles:
     low: torch.Tensor
     high: torch.Tensor
     valid: torch.Tensor
+    # 可选实测统计；与训练读取的 low/high 分开保存，旧文件仍可加载。
+    metrics: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if (
@@ -59,7 +61,7 @@ class Quantiles:
         return ((values + 1) * 0.5 * (hi - lo) + lo).masked_fill(~mask, 0)
 
     def as_dict(self):
-        return {k: getattr(self, k).tolist() for k in ("low", "high", "valid")}
+        return dict(self.metrics, **{k: getattr(self, k).tolist() for k in ("low", "high", "valid")})
 
 
 @dataclass
@@ -86,7 +88,12 @@ class BlockStatistics:
 
         def read(name):
             q = data[name]
-            return Quantiles(torch.tensor(q["low"]), torch.tensor(q["high"]), torch.tensor(q["valid"]).bool())
+            return Quantiles(
+                torch.tensor(q["low"]),
+                torch.tensor(q["high"]),
+                torch.tensor(q["valid"]).bool(),
+                metrics={k: v for k, v in q.items() if k not in ("low", "high", "valid")},
+            )
 
         return cls(read("state"), read("action"), data.get("provenance", {}))
 

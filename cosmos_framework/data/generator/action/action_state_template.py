@@ -115,7 +115,7 @@ class ActionStateTemplate55(ActionStateTemplate):
     Invalid values are cleared by sanitize/encode/decode, including NaNs.
     """
 
-    template_id = "unified55-xyzw-absolute-gripper-hand-v3"
+    template_id = "unified55-xyzw-absolute-gripper-hand-v4"
     width = 55
     fields = MappingProxyType(
         {
@@ -187,7 +187,7 @@ class ActionStateTemplate55(ActionStateTemplate):
                 raise ValueError(f"{name} must declare absolute semantics for block-anchor deltas")
 
     def sanitize(self, values, valid_mask):
-        """返回无效维清零后的张量，并拒绝有效维中的非有限值或零四元数。"""
+        """清零无效维，拒绝非法数值，并统一 state/target 四元数的长度和符号。"""
         mask = self.validate_valid_mask(valid_mask)
         if not isinstance(values, torch.Tensor) or not values.is_floating_point():
             raise ValueError("Template values must be floating-point tensors")
@@ -202,6 +202,8 @@ class ActionStateTemplate55(ActionStateTemplate):
                 q = result[..., list(group)]
                 if (torch.linalg.vector_norm(q, dim=-1) < 1e-8).any():
                     raise ValueError("Active quaternion must be nonzero")
+                # state 也进入模型；与 action 编码共用单位四元数及确定性符号约定。
+                result[..., list(group)] = self._unit_quaternion(q)
         return result
 
     def validate(self, state, action, valid_mask, source_contract):
