@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 # Cosmos3-Edge causal action mid-training with grouped-TND attention.
-# This file owns task-wide model/training knobs. Dataset-specific geometry,
-# normalization, sampling weights, and FD/ID/Policy ratios stay in each source
-# registered by the action_causal_midtrain_edge experiment.
+# 公共模板、geometry 和训练参数放在此处。
+# 来源路径、读取规则、统计文件及采样权重放在 sources/*.json。
 
 [job]
 task                      = "vfm"
@@ -16,15 +15,25 @@ wandb_mode                = "disabled"
 upload_reproducible_setup = false
 
 [action]
-video_stride = 1
+# 公共模板与时序配置；来源差异单独放在 sources/*.json。
+template = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+sources_file = "${oc.env:ACTION_SOURCES_FILE}"
+actions_per_block = 32
+video_stride = 4
+max_action_steps = 96
+overlap_action_steps = 16
+resolution = "480"
+mode = "joint"
+seed = 42
+allow_mock_statistics = false
+mock_state_stats_path = "${oc.env:AGIBOT_STATE_STATS_PATH,}"
+mock_delta_stats_path = "${oc.env:AGIBOT_DELTA_STATS_PATH,}"
 
 [model]
 precision                           = "bfloat16"
 max_num_tokens_after_packing        = -1
 joint_attn_implementation           = "teacher_forcing"
 causal_training_strategy            = "teacher_forcing"
-teacher_forcing_block_size_min      = 1
-teacher_forcing_block_size_max      = 4
 teacher_forcing_history_blocks_min  = 1
 teacher_forcing_history_blocks_max  = 8
 teacher_forcing_dense_mode          = "grouped_tnd"
@@ -120,5 +129,5 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter = 5000
 
 [dataloader_train]
-max_sequence_length = 65535
-num_workers          = 12
+max_sequence_length = 16384
+num_workers          = 1

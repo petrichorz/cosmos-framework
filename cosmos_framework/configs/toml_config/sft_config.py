@@ -106,13 +106,18 @@ class ActionConfig(BaseModel):
 
     model_config = _PYDANTIC_MODEL_CONFIG
 
-    video_stride: Literal[1, 2, 4] = Field(
-        default=1,
-        description=(
-            "Fixed temporal stride applied to action-training video while the action/state grid "
-            "remains at the source FPS. Statistics must be generated for the same stride."
-        ),
-    )
+    video_stride: int = Field(default=4, ge=1)
+    template: str = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+    sources_file: str = "examples/action_pretrain/sources/mixed.json"
+    actions_per_block: int = Field(default=32, ge=1)
+    max_action_steps: int = Field(default=96, ge=1)
+    overlap_action_steps: int = Field(default=16, ge=0)
+    resolution: str = "480"
+    mode: Literal["joint", "policy", "forward_dynamics", "inverse_dynamics"] = "joint"
+    seed: int = 42
+    allow_mock_statistics: bool = False
+    mock_state_stats_path: str = ""
+    mock_delta_stats_path: str = ""
 
 
 # ---------------------------------------------------------------- model

@@ -1,0 +1,26 @@
+{
+  "sources": [
+    {
+      "reader": "egosuite",
+      "root": "${EGOSUITE_ROOT}/EgoStandard-body__Add_Syrup_to_Coffee",
+      "viewpoint": "ego_view",
+      "target_semantics": "preprocessed_next_state",
+      "read_options": {
+        "action_from_state": false,
+        "action_time_offset_steps": 0
+      },
+      "weight": 0.5
+    },
+    {
+      "reader": "egosuite",
+      "root": "${EGOSUITE_ROOT}/EgoStandard-body__Adhesive_Roller_Paper_Roll_Replacement",
+      "viewpoint": "ego_view",
+      "target_semantics": "preprocessed_next_state",
+      "read_options": {
+        "action_from_state": false,
+        "action_time_offset_steps": 0
+      },
+      "weight": 0.5
+    }
+  ]
+}

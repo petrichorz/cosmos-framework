@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {
+      "reader": "agibot",
+      "root": "${AGIBOT_ROOT}",
+      "viewpoint": "concat_view",
+      "target_semantics": "next_state",
+      "read_options": {
+        "action_from_state": true,
+        "action_time_offset_steps": 1
+      },
+      "weight": 1.0
+    }
+  ]
+}

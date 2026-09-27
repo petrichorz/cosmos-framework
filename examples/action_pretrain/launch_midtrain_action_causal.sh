@@ -11,22 +11,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
-: "${DROID_ROOT:=/path/to/Cosmos3-DROID/success}"
+: "${SOURCE_SET:=mixed}"
+: "${AGIBOT_ROOT:=/path/to/agibot/canonical_55d}"
+: "${EGOSUITE_ROOT:=/path/to/egosuite_processed}"
+: "${ACTION_SOURCES_FILE:=$SCRIPT_DIR/sources/$SOURCE_SET.json}"
 : "${BASE_CHECKPOINT_PATH:=/path/to/Cosmos3-Edge-DCP}"
 : "${COSMOS3_EDGE_PROCESSOR_PATH:=/path/to/Cosmos3-Edge}"
 : "${WAN_VAE_PATH:=/path/to/Wan2.2_VAE.pth}"
 : "${OUTPUT_ROOT:=outputs/causal_action/midtrain}"
 : "${MROPE_BASE_FPS:=24}"
-: "${MODE:=joint}"
-: "${ACTION_STATISTICS_PATH:?Set ACTION_STATISTICS_PATH to state/delta statistics matching block geometry}"
-: "${DATASET_CONFIG_KEY:=dataloader_train.dataloader.datasets.robots.dataset.datasets.0}"
 TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/action_midtrain_edge_causal_tnd.toml}"
 
-for path_var in DROID_ROOT BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH ACTION_STATISTICS_PATH OUTPUT_ROOT TOML_PATH; do
+for path_var in AGIBOT_ROOT EGOSUITE_ROOT ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT TOML_PATH; do
     [[ "${!path_var}" = /* ]] || printf -v "$path_var" '%s/%s' "$PWD" "${!path_var}"
 done
 
-export DROID_ROOT BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH ACTION_STATISTICS_PATH
+export AGIBOT_ROOT EGOSUITE_ROOT ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH
 export IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export COSMOS_DEVICE="${COSMOS_DEVICE:-npu}"
@@ -48,9 +48,11 @@ CMD=(
     model.config.vlm_config.tokenizer.repository=null
     model.config.vlm_config.tokenizer.revision=null
     "+model.config.vlm_config.tokenizer.tokenizer_type=$COSMOS3_EDGE_PROCESSOR_PATH"
-    "$DATASET_CONFIG_KEY.mode=$MODE"
-    "$@"
 )
+# 只覆盖用户显式提供的选项；默认沿用 TOML，命令行 overrides 最后生效。
+[[ -n "${MODE:-}" ]] && CMD+=("data_setting.action.mode=$MODE")
+[[ -n "${ALLOW_MOCK_STATISTICS:-}" ]] && CMD+=("data_setting.action.allow_mock_statistics=$ALLOW_MOCK_STATISTICS")
+CMD+=("$@")
 
 printf 'Repository: %s\nTOML: %s\nOutput: %s\n' "$REPO_ROOT" "$TOML_PATH" "$OUTPUT_ROOT"
 printf 'Command: '

@@ -10,13 +10,24 @@ from cosmos_framework.callbacks.causal_action_stats import CausalActionStats
 from cosmos_framework.callbacks.every_n_draw_sample import EveryNDrawSample
 from cosmos_framework.callbacks.memory_trace import MemoryTrace
 from cosmos_framework.configs.base.experiment.sft.models.edge_model_config import EDGE_MODEL_CONFIG
-from cosmos_framework.data.generator.action.datasets.causal_action_mixture import CausalActionMixture
-from cosmos_framework.data.generator.action.datasets.causal_action_sft_dataset import (
-    get_causal_action_droid_sft_dataset,
+from cosmos_framework.data.generator.action.datasets.causal_action_factory import (
+    get_causal_action_dataset,
+    latent_block_size,
+    template_width,
+    video_durations,
 )
 from cosmos_framework.data.generator.joint_dataloader import PackingDataLoader, RankPartitionedDataLoader
 from cosmos_framework.utils.lazy_config import LazyCall as L
 from cosmos_framework.utils.lazy_config import LazyDict
+
+# 维度和 VAE 输入长度均从同一 action 配置推导，不在 recipe 复制常量。
+for name, resolver in (
+    ("causal.width", template_width),
+    ("causal.latents", latent_block_size),
+    ("causal.durations", video_durations),
+):
+    if not OmegaConf.has_resolver(name):
+        OmegaConf.register_new_resolver(name, resolver)
 
 cfg = LazyDict(
     dict(
@@ -41,24 +52,43 @@ cfg = LazyDict(
             name="action_causal_midtrain_edge",
             wandb_mode="disabled",
         ),
+        data_setting=dict(
+            action=dict(
+                template="cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55",
+                sources_file="examples/action_pretrain/sources/mixed.json",
+                actions_per_block=32,
+                video_stride=4,
+                max_action_steps=96,
+                overlap_action_steps=16,
+                resolution="480",
+                mode="joint",
+                seed=42,
+                allow_mock_statistics=False,
+                mock_state_stats_path="",
+                mock_delta_stats_path="",
+            )
+        ),
         model=dict(
             config=OmegaConf.merge(
                 LazyDict(EDGE_MODEL_CONFIG, flags={"allow_objects": True}),
                 dict(
-                    max_action_dim=80,
+                    max_action_dim="${causal.width:${data_setting.action.template}}",
                     causal_action_debug_noise_seed=None,
                     causal_training_strategy="teacher_forcing",
                     joint_attn_implementation="teacher_forcing",
                     teacher_forcing_dense_mode="grouped_tnd",
                     teacher_forcing_tnd_max_kv_tokens=131072,
-                    teacher_forcing_block_size_min=1,
-                    teacher_forcing_block_size_max=4,
+                    teacher_forcing_block_size_min="${causal.latents:${data_setting.action.actions_per_block},${data_setting.action.video_stride}}",
+                    teacher_forcing_block_size_max="${model.config.teacher_forcing_block_size_min}",
                     teacher_forcing_history_blocks_min=8,
                     teacher_forcing_history_blocks_max=8,
                     max_num_tokens_after_packing=-1,
                     compile=dict(enabled=False),
                     ema=dict(enabled=False),
-                    tokenizer=dict(encode_exact_durations=[5, 9, 17, 33]),
+                    tokenizer=dict(
+                        encode_exact_durations="${causal.durations:${data_setting.action.max_action_steps},${data_setting.action.actions_per_block},${data_setting.action.video_stride}}"
+                    ),
+                    diffusion_expert_config=dict(enable_fps_modulation=True),
                     parallelism=dict(
                         data_parallel_shard_degree=-1,
                         fsdp_mixed_precision_enabled=True,
@@ -193,50 +223,23 @@ cfg = LazyDict(
                 datasets=dict(
                     robots=dict(
                         ratio=1,
-                        dataset=L(CausalActionMixture)(
-                            # DROID is the first registered source, not the parent training recipe.
-                            datasets=[
-                                L(get_causal_action_droid_sft_dataset)(
-                                    root="${oc.env:DROID_ROOT}",
-                                    fps=15.0,
-                                    chunk_length=32,
-                                    video_stride="${data_setting.action.video_stride}",
-                                    action_space="causal_eef",
-                                    statistics_path="${oc.env:ACTION_STATISTICS_PATH}",
-                                    block_size_min="${model.config.teacher_forcing_block_size_min}",
-                                    block_size_max="${model.config.teacher_forcing_block_size_max}",
-                                    history_blocks_min="${model.config.teacher_forcing_history_blocks_min}",
-                                    history_blocks_max="${model.config.teacher_forcing_history_blocks_max}",
-                                    mode="joint",
-                                    use_state=True,
-                                    iterable_shuffle=False,
-                                    episode_shuffle_seed=42,
-                                    use_image_augmentation=False,
-                                    use_filter_dict=False,
-                                    filter_dict_path=None,
-                                    action_normalization=None,
-                                    viewpoint="concat_view",
-                                    resolution="480",
-                                    max_action_dim="${model.config.max_action_dim}",
-                                    cfg_dropout_rate=0.1,
-                                    tokenizer_config="${model.config.vlm_config.tokenizer}",
-                                    format_prompt_as_json=True,
-                                    append_viewpoint_info=True,
-                                    append_duration_fps_timestamps=True,
-                                    append_resolution_info=True,
-                                    append_idle_frames=False,
-                                    use_success_only=True,
-                                    dataset_version=None,
-                                    debug_fixed_index=None,
-                                    joint_mode_weights=dict(
-                                        forward_dynamics=1.0,
-                                        inverse_dynamics=1.0,
-                                        policy=1.0,
-                                    ),
-                                )
-                            ],
-                            weights=[1.0],
-                            seed=42,
+                        dataset=L(get_causal_action_dataset)(
+                            sources_file="${data_setting.action.sources_file}",
+                            template="${data_setting.action.template}",
+                            actions_per_block="${data_setting.action.actions_per_block}",
+                            video_stride="${data_setting.action.video_stride}",
+                            max_action_steps="${data_setting.action.max_action_steps}",
+                            overlap_action_steps="${data_setting.action.overlap_action_steps}",
+                            mode="${data_setting.action.mode}",
+                            seed="${data_setting.action.seed}",
+                            resolution="${data_setting.action.resolution}",
+                            history_blocks_min="${model.config.teacher_forcing_history_blocks_min}",
+                            history_blocks_max="${model.config.teacher_forcing_history_blocks_max}",
+                            tokenizer_config="${model.config.vlm_config.tokenizer}",
+                            cfg_dropout_rate=0.1,
+                            allow_mock_statistics="${data_setting.action.allow_mock_statistics}",
+                            mock_state_stats_path="${data_setting.action.mock_state_stats_path}",
+                            mock_delta_stats_path="${data_setting.action.mock_delta_stats_path}",
                         ),
                     ),
                 ),
