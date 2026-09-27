@@ -31,8 +31,9 @@ class CausalActionStats(Callback):
             return
         record = dict(
             iteration=iteration,
-            vision_loss=float(output_batch["flow_matching_loss_vision"]),
-            action_loss=float(output_batch["flow_matching_loss_action"]),
+            modes=list(data_batch["causal_action_mode"]),
+            vision_loss=float(output_batch["flow_matching_loss_vision"].detach()),
+            action_loss=float(output_batch["flow_matching_loss_action"].detach()),
             peak_gib=torch.cuda.max_memory_allocated() / 2**30,
             grad_norms=getattr(self, "grad_norms", {}),
         )
@@ -43,6 +44,8 @@ class CausalActionStats(Callback):
                 dict(
                     source=m.contract.source,
                     block_size=m.block_size,
+                    action_steps=int(m.action_mask.shape[0]),
+                    state_blocks=int(m.anchors.shape[0]),
                     state=m.state_clip_fraction.tolist(),
                     action=m.action_clip_fraction.tolist(),
                 )
