@@ -35,6 +35,8 @@ class AgiBotSegmentLeRobotDataset(SegmentLeRobotDataset):
     默认使用原始 action；state 下一步目标需显式传入 read_options。
     """
 
+    default_read_options = _DEFAULT_READ_OPTIONS
+
     def __init__(
         self,
         *,

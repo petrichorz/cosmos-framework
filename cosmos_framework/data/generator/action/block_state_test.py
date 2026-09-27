@@ -259,4 +259,9 @@ def test_sft_adapter_uses_fixed_geometry_and_template(mode):
     assert plan.causal_action_metadata.block_size == 2
     assert len(plan.condition_frame_indexes_action) == (96 if mode == "forward_dynamics" else 0)
     assert result["action"].shape[-1] == template.width
-    assert not {"state_timestamps", "action_timestamps", "storage_fps"} & result.keys()
+    assert not {"state_timestamps", "action_timestamps", "storage_fps", "read_options"} & result.keys()
+    # Reader 配置对象不进入 tensor collate；metadata 留在 sequence_plan 中。
+    from cosmos_framework.data.generator.joint_dataloader import custom_collate_fn
+
+    batch = custom_collate_fn([result])
+    assert batch["sequence_plan"][0].causal_action_metadata is plan.causal_action_metadata

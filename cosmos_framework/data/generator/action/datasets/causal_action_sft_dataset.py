@@ -93,6 +93,7 @@ class CausalActionSFTDataset(ActionSFTDataset):
             "action_timestamps",
             "storage_fps",
             "source_contract",
+            "read_options",
         ):
             raw.pop(key, None)
         raw["mode"] = mode

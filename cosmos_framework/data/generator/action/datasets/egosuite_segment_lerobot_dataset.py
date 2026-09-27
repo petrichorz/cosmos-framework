@@ -32,6 +32,8 @@ class EgoSuiteSegmentLeRobotDataset(SegmentLeRobotDataset):
     当前导出的 action 已是下一步 state，默认直接读取，不重复移位。
     """
 
+    default_read_options = _DEFAULT_READ_OPTIONS
+
     def __init__(
         self,
         *,
