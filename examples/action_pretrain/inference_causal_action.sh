@@ -6,13 +6,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 : "${CHECKPOINT_ROOT:=/path/to/trained/checkpoint}"
-: "${DROID_ROOT:=/path/to/Cosmos3-DROID/success}"
+: "${ACTION_SOURCES_FILE:=$SCRIPT_DIR/sources/mixed.json}"
 : "${COSMOS3_EDGE_PROCESSOR_PATH:=/path/to/Cosmos3-Edge}"
 : "${WAN_VAE_PATH:=/path/to/Wan2.2_VAE.pth}"
-: "${ACTION_STATISTICS_PATH:?Set matching state/delta statistics}"
 : "${OUTPUT_ROOT:=outputs/causal_action/inference}"
 
-for path_var in CHECKPOINT_ROOT DROID_ROOT COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH ACTION_STATISTICS_PATH OUTPUT_ROOT; do
+for path_var in CHECKPOINT_ROOT ACTION_SOURCES_FILE COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT; do
     [[ "${!path_var}" = /* ]] || printf -v "$path_var" '%s/%s' "$PWD" "${!path_var}"
 done
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -22,17 +21,19 @@ CMD=(
     torchrun --standalone --nproc_per_node=1
     -m cosmos_framework.inference.causal_action.cli
     --checkpoint "$CHECKPOINT_ROOT"
-    --dataset-root "$DROID_ROOT"
+    --sources-file "$ACTION_SOURCES_FILE"
+    --source-index "${SOURCE_INDEX:-0}"
     --processor "$COSMOS3_EDGE_PROCESSOR_PATH"
     --vae "$WAN_VAE_PATH"
-    --statistics "$ACTION_STATISTICS_PATH"
     --output "$OUTPUT_ROOT"
     --mode "${MODE:-policy}"
-    --video-stride 1
+    --video-stride "${VIDEO_STRIDE:-4}"
     --index "${SAMPLE_INDEX:-0}"
     --steps "${NUM_STEPS:-20}"
     --guidance "${GUIDANCE:-3}"
-    --block "${BLOCK_SIZE:-1}"
+    --actions-per-block "${ACTIONS_PER_BLOCK:-32}"
+    --max-action-steps "${MAX_ACTION_STEPS:-96}"
+    --overlap-action-steps "${OVERLAP_ACTION_STEPS:-16}"
     --history "${HISTORY_BLOCKS:-8}"
     "$@"
 )
