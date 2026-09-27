@@ -19,7 +19,6 @@ Quaternion low/high are fixed at -1/+1; measured statistics remain unchanged.
 import argparse
 import json
 import logging
-import os
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -29,35 +28,9 @@ import torch
 from cosmos_framework.data.generator.action.action_state_template import TemplateSourceContract, resolve_action_template
 from cosmos_framework.data.generator.action.block_state import BlockStatistics, Quantiles, build_block_sample
 from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
+from cosmos_framework.data.generator.action.lerobot_discovery import discover_dataset_roots
 from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
-
-
-def discover_dataset_roots(paths):
-    """递归发现 v3 数据集；找到根目录后不再遍历它的数据/视频目录，重叠输入去重。"""
-    roots = set()
-    for path in paths:
-        path = Path(path).resolve()
-        if not path.is_dir():
-            raise FileNotFoundError(f"Dataset directory does not exist: {path}")
-        found = False
-        for directory, children, _ in os.walk(path):
-            children.sort()
-            root = Path(directory)
-            info_path = root / "meta/info.json"
-            if not info_path.is_file():
-                continue
-            info = json.loads(info_path.read_text())
-            if not str(info.get("codebase_version", "")).startswith("v3."):
-                raise ValueError(f"Expected LeRobot v3 metadata: {info_path}")
-            if not (root / "data").is_dir():
-                raise ValueError(f"Missing data directory: {root}")
-            roots.add(root.resolve())
-            found = True
-            children[:] = []
-        if not found:
-            raise ValueError(f"No LeRobot v3 datasets found under {path}")
-    return sorted(roots)
 
 
 class QuantileAccumulator:
