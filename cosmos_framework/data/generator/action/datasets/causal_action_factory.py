@@ -9,11 +9,14 @@ from pathlib import Path
 from cosmos_framework.data.generator.action.action_state_template import resolve_action_template
 from cosmos_framework.data.generator.action.block_statistics import mock_template_statistics
 from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
+from cosmos_framework.data.generator.action.lerobot_discovery import discover_dataset_roots
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
+from cosmos_framework.utils import log
 
 from .action_sft_dataset import ActionSFTDataset
 from .agibot_segment_lerobot_dataset import AgiBotSegmentLeRobotDataset
+from .causal_action_dataset_group import CausalActionDatasetGroup
 from .causal_action_mixture import CausalActionMixture
 from .causal_action_sft_dataset import CausalActionSFTDataset
 from .egosuite_segment_lerobot_dataset import EgoSuiteSegmentLeRobotDataset
@@ -81,49 +84,54 @@ def get_causal_action_dataset(
         format_prompt_as_json=True,
     )
     for source in sources:
-        root = Path(source["root"])
-        profile = source["reader"]
-        info = json.loads((root / "meta/info.json").read_text())
-        options = replace(READERS[profile].default_read_options, **source.get("read_options", {}))
-        reader = READERS[profile](
-            root=root,
-            template=template,
-            planner=planner,
-            source_contract=template.source_contract(
-                profile, source=str(root), info=info, target_semantics=source["target_semantics"]
-            ),
-            read_options=options,
-            viewpoint=source["viewpoint"],
-            split="train",
-            split_seed=seed,
-            split_val_ratio=source.get("split_val_ratio", 0.0),
-            tolerance_s=source.get("tolerance_s", 1e-4),
-            video_backend=source.get("video_backend", "pyav"),
-        )
-        if not len(reader):
-            raise ValueError(f"No complete training segments: {root}")
-        statistics_path = source.get("statistics_path")
-        statistics = None
-        if not statistics_path:
-            if not allow_mock_statistics:
-                raise ValueError(f"{root}: specify statistics_path or explicitly enable mock statistics")
-            statistics = mock_template_statistics(
-                reader[0],
+        children = []
+        roots = discover_dataset_roots([source["root"]])
+        log.info(f"Action source group: {source['root']}; datasets={len(roots)}")
+        for root in roots:
+            profile = source["reader"]
+            info = json.loads((root / "meta/info.json").read_text())
+            options = replace(READERS[profile].default_read_options, **source.get("read_options", {}))
+            reader = READERS[profile](
+                root=root,
                 template=template,
-                planner=reader.planner,
-                state_stats_path=mock_state_stats_path,
-                delta_stats_path=mock_delta_stats_path,
+                planner=planner,
+                source_contract=template.source_contract(
+                    profile, source=str(root), info=info, target_semantics=source["target_semantics"]
+                ),
+                read_options=options,
+                viewpoint=source["viewpoint"],
+                split="train",
+                split_seed=seed,
+                split_val_ratio=source.get("split_val_ratio", 0.0),
+                tolerance_s=source.get("tolerance_s", 1e-4),
+                video_backend=source.get("video_backend", "pyav"),
             )
-        dataset = CausalActionSFTDataset(
-            ActionSFTDataset(reader, transform, resolution),
-            mode=source.get("mode", mode),
-            statistics_path=statistics_path,
-            statistics=statistics,
-            allow_mock_statistics=allow_mock_statistics,
-            history_blocks_min=history_blocks_min,
-            history_blocks_max=history_blocks_max,
-            joint_mode_weights=source.get("joint_mode_weights"),
-        )
-        datasets.append(dataset)
+            if not len(reader):
+                raise ValueError(f"No complete training segments: {root}")
+            statistics_path = source.get("statistics_path")
+            statistics = None
+            if not statistics_path:
+                if not allow_mock_statistics:
+                    raise ValueError(f"{root}: specify statistics_path or explicitly enable mock statistics")
+                statistics = mock_template_statistics(
+                    reader[0],
+                    template=template,
+                    planner=reader.planner,
+                    state_stats_path=mock_state_stats_path,
+                    delta_stats_path=mock_delta_stats_path,
+                )
+            dataset = CausalActionSFTDataset(
+                ActionSFTDataset(reader, transform, resolution),
+                mode=source.get("mode", mode),
+                statistics_path=statistics_path,
+                statistics=statistics,
+                allow_mock_statistics=allow_mock_statistics,
+                history_blocks_min=history_blocks_min,
+                history_blocks_max=history_blocks_max,
+                joint_mode_weights=source.get("joint_mode_weights"),
+            )
+            children.append(dataset)
+            log.info(f"Action dataset: {root}; segments={len(dataset)}")
+        datasets.append(CausalActionDatasetGroup(children))
         weights.append(source.get("weight", 1.0))
     return CausalActionMixture(datasets, weights, seed=seed)

@@ -104,7 +104,7 @@ def main():
     )
     dataset = mixture.datasets[args.source_index]
     # 离线任务由命令行显式选择，不沿用训练来源清单中的 joint 模式覆盖。
-    dataset.mode = args.mode
+    dataset.set_mode(args.mode)
     batch = custom_collate_fn([dataset[args.index]])
     batch["causal_action_preview"] = args.preview_ground_truth_states
     batch["causal_action_current_block"] = args.current_block if args.current_block is not None else 0
