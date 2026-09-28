@@ -21,10 +21,12 @@ Windows keep their original anchors; neither option changes the sampling stride.
 import argparse
 import json
 import logging
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from dataclasses import asdict, replace
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -270,6 +272,7 @@ def compute_statistics(
             source["source_contract"] = asdict(dataset.source_contract)
         if hasattr(dataset, "read_options"):
             source["read_options"] = asdict(dataset.read_options)
+        source_started = time.monotonic()
         logging.info("Scanning source %d: %d/%d blocks", len(sources) + 1, stop, len(dataset))
         if stop:
             # 在线程启动前完成惰性 parquet / mask 初始化，避免并发初始化同一个 Reader。
@@ -286,12 +289,26 @@ def compute_statistics(
             action.update(actions, action_mask)
             previous, processed = processed, processed + count
             if log_every and (processed // log_every > previous // log_every or processed == stop):
+                elapsed = time.monotonic() - source_started
+                rate = processed / max(elapsed, 1e-9)
+                # ETA 仅估计当前子集的扫描时间，不包含最后的分位数计算和写盘。
                 logging.info(
-                    "Blocks %d/%d; merged state rows %d; action rows %d", processed, stop, state.count, action.count
+                    "Source %d: %d/%d blocks (%.1f%%); %.1f blocks/s; elapsed %s; scan ETA %s; "
+                    "merged state rows %d; action rows %d",
+                    len(sources) + 1,
+                    processed,
+                    stop,
+                    100 * processed / stop,
+                    rate,
+                    timedelta(seconds=int(elapsed)),
+                    timedelta(seconds=int((stop - processed) / rate)),
+                    state.count,
+                    action.count,
                 )
         sources.append(source)
     if template is None:
         raise ValueError("No datasets supplied")
+    logging.info("Scan complete; finalizing quantiles and normalization bounds")
     rotations = getattr(template, "rotation_groups", ())
     statistics = BlockStatistics(state.finalize(rotations, bounds=bounds), action.finalize(rotations, bounds=bounds))
     blocks = sum(s["blocks"] for s in sources)
@@ -377,6 +394,7 @@ def parse_args():
 
 
 def main():
+    started = time.monotonic()
     args = parse_args()
     # 外层线程并行，避免每个任务再启动大量 PyTorch 算子线程。
     torch.set_num_threads(1)
@@ -398,7 +416,8 @@ def main():
 
     def readers():
         # 顺序构造子集，避免同时保留全部来源的 parquet 缓存与片段索引。
-        for root in roots:
+        for source_index, root in enumerate(roots, 1):
+            logging.info("Preparing source %d/%d: %s", source_index, len(roots), root)
             if args.source_contract:
                 contract = replace(
                     TemplateSourceContract(**json.loads(args.source_contract.read_text())), source=str(root)
@@ -450,10 +469,11 @@ def main():
     # 写一个独立 JSON；不修改任何子集的 meta/stats.json，也不改训练配置。
     statistics.save(args.output)
     logging.info(
-        "Wrote %s; blocks=%d; partial=%s",
+        "Wrote %s; blocks=%d; partial=%s; total elapsed %s",
         args.output,
         statistics.provenance["blocks"],
         statistics.provenance["partial"],
+        timedelta(seconds=int(time.monotonic() - started)),
     )
 
 
