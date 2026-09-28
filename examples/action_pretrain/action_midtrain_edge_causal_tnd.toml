@@ -29,6 +29,8 @@ seed = 42
 allow_mock_statistics = false
 
 [model]
+# 开启后单独记录 rank 0 的 Policy / ID / FD loss；关闭时跳过新增统计。
+causal_action_log_loss_by_mode      = false
 precision                           = "bfloat16"
 max_num_tokens_after_packing        = -1
 joint_attn_implementation           = "teacher_forcing"

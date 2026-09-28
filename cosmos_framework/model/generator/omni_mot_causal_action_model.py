@@ -141,6 +141,8 @@ class OmniMoTCausalActionModel(OmniMoTModel):
         is_image_batch,
         timesteps_action=None,
         timesteps_sound=None,
+        causal_action_modes=None,
+        action_sample_indices=None,
     ):
         action = data_batch_packed.action
         original_mask = action.condition_mask
@@ -157,6 +159,8 @@ class OmniMoTCausalActionModel(OmniMoTModel):
                 is_image_batch,
                 timesteps_action=aligned_action_schedule(timesteps, data_batch_packed),
                 timesteps_sound=timesteps_sound,
+                causal_action_modes=causal_action_modes,
+                action_sample_indices=action_sample_indices,
             )
         finally:
             action.condition_mask = original_mask

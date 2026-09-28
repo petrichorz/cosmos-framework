@@ -73,6 +73,7 @@ from cosmos_framework.model.generator.utils.safetensors_loader import (
     load_language_model as load_language_model_safetensors,
 )
 from cosmos_framework.utils import log, misc
+from cosmos_framework.utils.causal_action_metrics import collect_mode_metrics
 from cosmos_framework.utils.count_params import count_params
 from cosmos_framework.utils.device_backend import DEVICE_TYPE
 from cosmos_framework.utils.flags import DEVICE, TRAINING, Device
@@ -1090,6 +1091,8 @@ class OmniMoTModel(ImaginaireModel):
             is_image_batch=gen_data_clean.is_image_batch,
             timesteps_action=timesteps_action,
             timesteps_sound=timesteps_sound,
+            causal_action_modes=data_batch.get("causal_action_mode"),
+            action_sample_indices=action_sample_indices,
         )
 
         # Pixel-space video shapes for VAE FLOPs estimation in callbacks (e.g. MFU).
@@ -1195,6 +1198,8 @@ class OmniMoTModel(ImaginaireModel):
         is_image_batch: bool,
         timesteps_action: torch.Tensor | None = None,
         timesteps_sound: torch.Tensor | None = None,
+        causal_action_modes: list[str] | None = None,
+        action_sample_indices: list[int] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute flow matching loss and auxiliary load balancing losses.
 
@@ -1208,6 +1213,11 @@ class OmniMoTModel(ImaginaireModel):
         """
         total_loss = 0.0
         losses_dict = {}
+        # 模式指标沿用 rank 0 本地日志口径，其他 rank 不构造额外统计。
+        if causal_action_modes is not None and (
+            not self.config.causal_action_log_loss_by_mode or (dist.is_initialized() and dist.get_rank() != 0)
+        ):
+            causal_action_modes = None
         # ts_action shape: vision fallback [B_items, T_vis] (legacy) or [n_action, 1] (independent).
         ts_action = timesteps if timesteps_action is None else timesteps_action  # [B_items,T_vis] or [n_action,1]
         # ts_sound shape: vision fallback [B_items,T_vis] or dense sound schedule [n_sound,...].
@@ -1246,7 +1256,7 @@ class OmniMoTModel(ImaginaireModel):
                     "Action condition mask must be a list of tensors for loss computation"
                 )
                 assert gen_data_noised.vt_target_action is not None, "Action targets required when action_gen is True"
-                fm_loss_action, _ = self._compute_flow_matching_loss(
+                fm_loss_action, fm_loss_action_per_instance = self._compute_flow_matching_loss(
                     pred=out_net["preds_action"],
                     target=gen_data_noised.vt_target_action,
                     condition_mask=data_batch_packed.action.condition_mask,
@@ -1301,6 +1311,33 @@ class OmniMoTModel(ImaginaireModel):
                 losses_dict["flow_matching_loss_sound"] = dummy_loss
         else:
             losses_dict["flow_matching_loss_sound"] = torch.tensor(0.0, **self.tensor_kwargs_fp32)
+
+        if causal_action_modes is not None:
+            modalities = []
+            # 整个模态无预测目标时只返回单个占位零值，不参与逐样本统计。
+            if self.config.vision_gen and has_noisy_tokens(data_batch_packed.vision):
+                modalities.append(
+                    (
+                        list(range(len(causal_action_modes))),
+                        fm_loss_vision_per_instance,
+                        data_batch_packed.vision.condition_mask,
+                        rf_cfg.image_loss_scale
+                        if is_image_batch and rf_cfg.image_loss_scale is not None
+                        else rf_cfg.loss_scale,
+                    )
+                )
+            if self.config.action_gen and has_noisy_tokens(data_batch_packed.action):
+                modalities.append(
+                    (
+                        action_sample_indices,
+                        fm_loss_action_per_instance,
+                        data_batch_packed.action.condition_mask,
+                        rf_cfg.action_loss_weight,
+                    )
+                )
+            losses_dict["causal_action_metrics"] = collect_mode_metrics(
+                causal_action_modes, modalities, timesteps.device
+            )
 
         # 2. Load balancing auxiliary losses
         for load_balancing_type in ["und", "gen"]:

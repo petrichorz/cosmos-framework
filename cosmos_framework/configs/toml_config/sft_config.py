@@ -392,6 +392,10 @@ class ModelConfig(BaseModel):
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
     )
+    causal_action_log_loss_by_mode: bool = Field(
+        default=False,
+        description="Record separate Policy/ID/FD losses on rank 0 without cross-rank reduction.",
+    )
     teacher_forcing_dense_mode: Literal["global", "per_sample", "grouped_tnd"] = Field(
         default="global",
         description=(

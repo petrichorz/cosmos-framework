@@ -5,12 +5,34 @@ import json
 
 import torch
 import torch.distributed as dist
+import wandb
 
 from cosmos_framework.utils import log
 from cosmos_framework.utils.callback import Callback
+from cosmos_framework.utils.causal_action_metrics import mode_metric_means
 
 
 class CausalActionStats(Callback):
+    def __init__(self):
+        super().__init__()
+        self.mode_metrics = None
+
+    def on_training_step_batch_end(self, model, data_batch, output_batch, loss, iteration=0):
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+        # 只累计 rank 0 的全部微批次，不做跨卡汇总。
+        stats = output_batch.get("causal_action_metrics")
+        if stats is not None:
+            if self.mode_metrics is None:
+                self.mode_metrics = stats.detach().clone()
+            else:
+                self.mode_metrics += stats.detach()
+
+    def _flush_mode_metrics(self):
+        stats = self.mode_metrics
+        self.mode_metrics = None
+        return {} if stats is None else mode_metric_means(stats)
+
     def on_before_optimizer_step(self, model, optimizer, scheduler, grad_scaler, iteration=0):
         norms = {}
         for group in ("state2llm", "action2llm", "llm2action"):
@@ -29,6 +51,9 @@ class CausalActionStats(Callback):
     def on_training_step_end(self, model, data_batch, output_batch, loss, iteration=0):
         if dist.is_initialized() and dist.get_rank() != 0:
             return
+        mode_losses = None
+        if self.mode_metrics is not None and iteration % self.config.trainer.logging_iter == 0:
+            mode_losses = self._flush_mode_metrics()
         record = dict(
             iteration=iteration,
             modes=list(data_batch["causal_action_mode"]),
@@ -51,4 +76,8 @@ class CausalActionStats(Callback):
                 )
             )
         record["clipping"] = clipping
+        if mode_losses is not None:
+            record["mode_losses"] = mode_losses
+            if mode_losses and wandb.run is not None:
+                wandb.log(mode_losses, step=iteration)
         log.info("CAUSAL_ACTION_METRICS " + json.dumps(record))

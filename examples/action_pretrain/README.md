@@ -245,3 +245,19 @@ bash examples/action_pretrain/launch_midtrain_template.sh \
 - `launch_midtrain_action_causal.sh`：构造并执行 torchrun 命令，末尾传入的命令行参数优先。
 
 统计文件在 `$RUN_DIR/stats`；生成的 mix 清单在 `$RUN_DIR/config/mixed.json`；启动日志在 `$OUTPUT_ROOT/launcher_rank0.log`，训练 checkpoint 位于该输出目录的任务子目录中。恢复训练复用输出目录，新实验使用新目录。
+
+## 按任务模式记录训练 loss
+
+默认关闭分模式统计。需要分别记录时，在训练 TOML 的 `[model]` 下设置 `causal_action_log_loss_by_mode = true`，或启动时覆盖：
+
+```bash
+bash examples/action_pretrain/launch_midtrain_local.sh model.config.causal_action_log_loss_by_mode=true
+```
+
+local、template 和公共启动脚本均支持该命令行覆盖。关闭时不收集模式统计，也不输出三条模式曲线及 `mode_losses` 字段；原有训练 loss 和日志照常保留。
+
+开启后，causal action 训练额外记录 `train_mode/policy_loss`、`train_mode/id_loss` 和 `train_mode/fd_loss`。仅在 rank 0 按 `trainer.logging_iter` 的窗口累计该卡全部微批次，以本地 loss 总和除以有效样本数，不增加跨卡同步。曲线只代表 rank 0 的样本；该卡窗口内没有出现的模式不写数据点，不补 0。单模式和任意模式组合使用相同逻辑。
+
+模式 loss 复用现有逐样本 loss，沿用 condition mask、归一化方式及视觉/动作 loss 权重，不包含无法按样本归属的辅助 loss。原有总 loss、vision/action loss 和反向传播保持不变。终端的 `CAUSAL_ACTION_METRICS` 在记录窗口结束时增加 `mode_losses` 字段。
+
+模板默认 `[job].wandb_mode = "disabled"`，只输出终端日志；需要 W&B 曲线时，将所用 TOML 的该字段改为 `"online"`，并配置 W&B 登录信息。
