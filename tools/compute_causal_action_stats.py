@@ -14,11 +14,16 @@ All discovered datasets feed shared accumulators and produce ONE output JSON.
 Mean/std/min/max use all valid values; only quantiles may be sampled.
 --bounds selects q01_q99 (default) or min_max for ordinary-channel low/high.
 Quaternion low/high are fixed at -1/+1; measured statistics remain unchanged.
+The CLI defaults to --batch-size 512 --num-workers 4. Use 1/1 for serial reads.
+Windows keep their original anchors; neither option changes the sampling stride.
 """
 
 import argparse
 import json
 import logging
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -143,8 +148,88 @@ class QuantileAccumulator:
         }
 
 
+def _iter_encoded_batches(dataset, stop, *, batch_size, num_workers):
+    """批量读取相邻滑窗，并按原顺序返回编码结果；线程不修改统计累积器。"""
+    from cosmos_framework.data.generator.action.datasets.segment_lerobot_dataset import SegmentLeRobotDataset
+
+    batched_reader = isinstance(dataset, SegmentLeRobotDataset) and dataset.video_view is None
+
+    def ranges():
+        # 不跨 episode 合并；limit 仍按原始窗口计数，最后一批可不足 batch_size。
+        if batched_reader:
+            for start, count in dataset.get_shuffle_blocks():
+                end = min(start + count, stop)
+                for index in range(start, end, batch_size):
+                    yield index, min(batch_size, end - index)
+                if end == stop:
+                    break
+        else:
+            for index in range(stop):
+                yield index, 1
+
+    def encode(item):
+        index, count = item
+        if batched_reader:
+            records = dataset._segments[index : index + count]
+            ds, episode, first, width = records[0]
+            # 每个任务使用独立索引视图，共享只读 parquet；不改原 Reader 的索引和 LRU。
+            view = copy(dataset)
+            view._loaded_lru = dataset._loaded_lru.copy()
+            view._segments = [(ds, episode, first, records[-1][2] - first + width)]
+            raw = view[0]
+            offsets = torch.tensor([record[2] - first for record in records])
+            indexes = offsets[:, None] + torch.arange(width)[None, :]
+            # 重叠窗口分别展开为 block，保留各自 anchor；最后一帧只满足 T+1 契约。
+            state = raw["state_trajectory"]
+            raw = dict(
+                state_trajectory=torch.cat((state[indexes].flatten(0, 1), state[-1:])),
+                action_target=raw["action_target"][indexes].flatten(0, 1),
+                state_mask=raw["state_mask"],
+                action_mask=raw["action_mask"],
+                source_contract=raw["source_contract"],
+                conditioning_fps=raw["conditioning_fps"],
+            )
+        else:
+            raw = dataset[index]
+        if raw["source_contract"].split != "train":
+            raise ValueError("Statistics must be fitted on the training split")
+        data, metadata = build_block_sample(raw, template=dataset.template, planner=dataset.planner, history_blocks=1)
+        return count, metadata.states, metadata.state_mask, data["action"], metadata.action_mask
+
+    items = iter(ranges())
+    if num_workers == 1:
+        for item in items:
+            yield encode(item)
+        return
+    # 最多保留 num_workers 个任务，避免把全数据集的 Future/编码张量积存在内存。
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        pending = deque()
+        try:
+            for _ in range(num_workers):
+                item = next(items, None)
+                if item is not None:
+                    pending.append(pool.submit(encode, item))
+            while pending:
+                yield pending.popleft().result()
+                item = next(items, None)
+                if item is not None:
+                    pending.append(pool.submit(encode, item))
+        finally:
+            for future in pending:
+                future.cancel()
+
+
 def compute_statistics(
-    datasets, *, method="reservoir", reservoir_size=50_000, seed=42, limit=None, log_every=1000, bounds="q01_q99"
+    datasets,
+    *,
+    method="reservoir",
+    reservoir_size=50_000,
+    seed=42,
+    limit=None,
+    log_every=1000,
+    bounds="q01_q99",
+    batch_size=1,
+    num_workers=1,
 ):
     """每个子集遍历一次，共用两套累积器；limit 是每个子集的调试 block 上限。"""
     if bounds not in ("q01_q99", "min_max"):
@@ -153,6 +238,8 @@ def compute_statistics(
         datasets = (datasets,)
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
+    if batch_size < 1 or num_workers < 1:
+        raise ValueError("batch_size and num_workers must be positive")
     state = QuantileAccumulator(method=method, capacity=reservoir_size, seed=seed)
     action = QuantileAccumulator(method=method, capacity=reservoir_size, seed=seed + 1)
     sources = []
@@ -184,22 +271,23 @@ def compute_statistics(
         if hasattr(dataset, "read_options"):
             source["read_options"] = asdict(dataset.read_options)
         logging.info("Scanning source %d: %d/%d blocks", len(sources) + 1, stop, len(dataset))
-        for index in range(stop):
-            raw = dataset[index]
-            if raw["source_contract"].split != "train":
-                raise ValueError("Statistics must be fitted on the training split")
-            if index == 0:
-                source["state_mask"] = raw["state_mask"].tolist()
-                source["action_mask"] = raw["action_mask"].tolist()
-            # 不传 statistics：统计和训练调用同一编码，采集归一化前的 state/action。
-            data, metadata = build_block_sample(
-                raw, template=dataset.template, planner=dataset.planner, history_blocks=1
-            )
-            state.update(metadata.states, metadata.state_mask)
-            action.update(data["action"], metadata.action_mask)
-            if log_every and (index + 1) % log_every == 0:
+        if stop:
+            # 在线程启动前完成惰性 parquet / mask 初始化，避免并发初始化同一个 Reader。
+            raw = dataset[0]
+            source["state_mask"] = raw["state_mask"].tolist()
+            source["action_mask"] = raw["action_mask"].tolist()
+            del raw
+        processed = 0
+        for count, states, state_mask, actions, action_mask in _iter_encoded_batches(
+            dataset, stop, batch_size=batch_size, num_workers=num_workers
+        ):
+            # 累积器和随机抽样只在主线程按窗口顺序更新；exact/reservoir 共用此路径。
+            state.update(states, state_mask)
+            action.update(actions, action_mask)
+            previous, processed = processed, processed + count
+            if log_every and (processed // log_every > previous // log_every or processed == stop):
                 logging.info(
-                    "Blocks %d/%d; merged state rows %d; action rows %d", index + 1, stop, state.count, action.count
+                    "Blocks %d/%d; merged state rows %d; action rows %d", processed, stop, state.count, action.count
                 )
         sources.append(source)
     if template is None:
@@ -233,6 +321,8 @@ def compute_statistics(
         "bounds": bounds,
         "quaternion_bounds": [-1, 1],
         "rotation_groups": [list(g) for g in rotations],
+        "batch_size": batch_size,
+        "num_workers": num_workers,
         "state": state.summary(),
         "action": action.summary(),
     }
@@ -271,6 +361,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, help="Debug only: first N blocks PER dataset; output marked partial")
     parser.add_argument("--log-every", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=512, help="Adjacent windows per read, within one episode")
+    parser.add_argument("--num-workers", type=int, default=4, help="Read/encode threads; accumulation stays ordered")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not 0 <= args.split_val_ratio < 1:
@@ -279,11 +371,15 @@ def parse_args():
         parser.error("reservoir size must be positive; seed and log interval must be nonnegative")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
+    if args.batch_size < 1 or args.num_workers < 1:
+        parser.error("--batch-size and --num-workers must be positive")
     return args
 
 
 def main():
     args = parse_args()
+    # 外层线程并行，避免每个任务再启动大量 PyTorch 算子线程。
+    torch.set_num_threads(1)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     from cosmos_framework.data.generator.action.datasets.segment_lerobot_dataset import SegmentLeRobotDataset
 
@@ -341,6 +437,8 @@ def main():
         limit=args.limit,
         log_every=args.log_every,
         bounds=args.bounds,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
     statistics.provenance.update(
         dataset_roots=[str(p) for p in roots],

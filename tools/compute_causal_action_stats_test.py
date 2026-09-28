@@ -248,3 +248,48 @@ def test_bounds_cli(monkeypatch, value):
         argv += ["--bounds", value]
     monkeypatch.setattr(sys, "argv", argv)
     assert parse_args().bounds == (value or "q01_q99")
+
+
+@pytest.mark.parametrize("method", ["exact", "reservoir"])
+@pytest.mark.parametrize("offset,from_state", [(0, False), (1, True), (-1, False)])
+def test_parallel_batches_preserve_episode_anchors_and_limit(monkeypatch, method, offset, from_state):
+    from cosmos_framework.data.generator.action.datasets.segment_lerobot_dataset_test import make_reader
+
+    reader, queries = make_reader(monkeypatch, lengths=(39, 38), offset=offset, from_state=from_state)
+    reader.source_contract = replace(reader.source_contract, split="train")
+    reader.planner = SegmentPlanner(max_action_steps=32, overlap_action_steps=31, geometry=reader.planner.geometry)
+    reader._segments.clear()
+    reader._episode_cum_ends.clear()
+    reader._append_index_records(meta=reader._get_dataset(0).meta, ds_idx=0)
+    original_segments = list(reader._segments)
+    kwargs = dict(method=method, reservoir_size=7, seed=42, limit=10)
+    reference = compute_statistics(reader, **kwargs)
+    queries.clear()
+    actual = compute_statistics(reader, batch_size=4, num_workers=3, **kwargs)
+    for kind in ("state", "action"):
+        got, expected = getattr(actual, kind), getattr(reference, kind)
+        for key in expected.metrics:
+            np.testing.assert_allclose(got.metrics[key], expected.metrics[key], rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(got.low, expected.low)
+        torch.testing.assert_close(got.high, expected.high)
+    for key in ("sources", "blocks", "available_blocks", "partial", "state", "action"):
+        assert actual.provenance[key] == reference.provenance[key]
+    assert actual.provenance["blocks"] == 10
+    assert actual.provenance["partial"]
+    assert reader._segments == original_segments
+    state_reads = [q["observation.state"] for q in queries if "observation.state" in q]
+    assert len(state_reads) < 10
+    assert all(rows[-1] < 39 or rows[0] >= 39 for rows in state_reads)
+
+
+def test_parallel_encoding_propagates_reader_error():
+    class BrokenBlocks(SyntheticBlocks):
+        def __getitem__(self, index):
+            if index == 2:
+                raise RuntimeError("broken input window")
+            return super().__getitem__(index)
+
+    with pytest.warns(UserWarning):
+        dataset = BrokenBlocks()
+    with pytest.raises(RuntimeError, match="broken input window"):
+        compute_statistics(dataset, num_workers=3)
