@@ -61,6 +61,8 @@ CMD=(
 CMD+=("$@")
 
 printf 'Repository: %s\nTOML: %s\nOutput: %s\n' "$REPO_ROOT" "$TOML_PATH" "$OUTPUT_ROOT"
+printf 'Sources: %s\nAgiBot statistics: %s\nEgoSuite statistics: %s\n' \
+    "$ACTION_SOURCES_FILE" "$AGIBOT_GROUP_STATS_PATH" "$EGOSUITE_GROUP_STATS_PATH"
 printf 'Command: '
 printf '%q ' "${CMD[@]}"
 printf '\n'

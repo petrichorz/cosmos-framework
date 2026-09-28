@@ -265,3 +265,29 @@ def test_sft_adapter_uses_fixed_geometry_and_template(mode):
 
     batch = custom_collate_fn([result])
     assert batch["sequence_plan"][0].causal_action_metadata is plan.causal_action_metadata
+
+
+def test_normalization_extended_clip_range_and_fraction():
+    stats = Quantiles(torch.tensor([0.0, 4.0, 0.0]), torch.tensor([4.0, 4.0, 4.0]), torch.tensor([True, True, False]))
+    # 第 0 维映射为 -2,-1.5,-1.25,-1,0,1,1.25,1.5,2。
+    values = torch.tensor(
+        [
+            [-2.0, 9.0, 99.0],
+            [-1.0, 9.0, 99.0],
+            [-0.5, 9.0, 99.0],
+            [0.0, 9.0, 99.0],
+            [2.0, 9.0, 99.0],
+            [4.0, 9.0, 99.0],
+            [4.5, 9.0, 99.0],
+            [5.0, 9.0, 99.0],
+            [6.0, 9.0, 99.0],
+        ]
+    )
+    mask = stats.valid.expand_as(values)
+    normalized, clipping = stats.normalize(values, mask)
+    torch.testing.assert_close(normalized[:, 0], torch.tensor([-1.5, -1.5, -1.25, -1.0, 0.0, 1.0, 1.25, 1.5, 1.5]))
+    torch.testing.assert_close(clipping, torch.tensor([2 / 9, 0.0, 0.0]))
+    assert (normalized[:, 1:] == 0).all()
+    # 未发生截断的尾部仍能反归一化；low/high 本身映射到 ±1 而非 ±1.5。
+    restored = stats.denormalize(normalized, mask)
+    torch.testing.assert_close(restored[1:-1, 0], values[1:-1, 0])

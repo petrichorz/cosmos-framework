@@ -52,8 +52,10 @@ class Quantiles:
         lo, hi = self.low.to(values), self.high.to(values)
         span = hi - lo
         scaled = 2 * (values - lo) / span.clamp_min(1e-12) - 1
-        clipped = mask & (span > 0) & (scaled.abs() > 1)
-        out = scaled.clamp(-1, 1).masked_fill(~mask | (span == 0), 0)
+        # low/high 仍映射到 -1/+1；额外保留尾部幅度，超过 ±1.5 才计为裁剪。
+        clip_bound = 1.5
+        clipped = mask & (span > 0) & (scaled.abs() > clip_bound)
+        out = scaled.clamp(-clip_bound, clip_bound).masked_fill(~mask | (span == 0), 0)
         return out, clipped.sum(0) / mask.sum(0).clamp_min(1)
 
     def denormalize(self, values, mask):
