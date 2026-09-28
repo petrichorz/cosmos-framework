@@ -6,9 +6,15 @@
       "viewpoint": "ego_view",
       "target_semantics": "preprocessed_next_state",
       "read_options": {
+        "state_key": "state_unified",
+        "action_key": "action_unified",
+        "state_mask_key": "mask_state",
+        "action_mask_key": "mask_action",
         "action_from_state": false,
         "action_time_offset_steps": 0
       },
+      "split_val_ratio": 0,
+      "statistics_path": "${EGOSUITE_GROUP_STATS_PATH}",
       "weight": 1.0
     }
   ]

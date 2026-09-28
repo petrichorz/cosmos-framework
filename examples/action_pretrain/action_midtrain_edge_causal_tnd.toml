@@ -20,14 +20,13 @@ template = "cosmos_framework.data.generator.action.action_state_template.ActionS
 sources_file = "${oc.env:ACTION_SOURCES_FILE}"
 actions_per_block = 32
 video_stride = 4
-max_action_steps = 96
-overlap_action_steps = 16
+# 最多 896 action / 897 observation，抽帧后 225 个视频帧。
+max_action_steps = 896
+overlap_action_steps = 161
 resolution = "480"
 mode = "joint"
 seed = 42
 allow_mock_statistics = false
-mock_state_stats_path = "${oc.env:AGIBOT_STATE_STATS_PATH,}"
-mock_delta_stats_path = "${oc.env:AGIBOT_DELTA_STATS_PATH,}"
 
 [model]
 precision                           = "bfloat16"
@@ -35,7 +34,7 @@ max_num_tokens_after_packing        = -1
 joint_attn_implementation           = "teacher_forcing"
 causal_training_strategy            = "teacher_forcing"
 teacher_forcing_history_blocks_min  = 1
-teacher_forcing_history_blocks_max  = 8
+teacher_forcing_history_blocks_max  = 32
 teacher_forcing_dense_mode          = "grouped_tnd"
 teacher_forcing_tnd_max_kv_tokens   = 131072
 teacher_forcing_visualize_sdpa_mask = false
@@ -87,13 +86,12 @@ lr_multipliers   = {}
 optimizer_type   = "AdamW"
 weight_decay     = 0.05
 
-# Keep the existing action baseline's constant learning rate. For a decay
-# experiment, change cycle_lengths to max_iter and lower f_min.
+# 沿用昨晚实验快照的学习率衰减配置。
 [scheduler]
 lr_scheduler_type = "LambdaLinear"
 cycle_lengths      = [10000]
 f_max              = [1.0]
-f_min              = [1.0]
+f_min              = [0.3]
 f_start            = [1.0]
 verbosity_interval = 0
 warm_up_steps      = [0]
@@ -129,5 +127,5 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 save_iter = 5000
 
 [dataloader_train]
-max_sequence_length = 16384
-num_workers          = 1
+max_sequence_length = 54000
+num_workers          = 4

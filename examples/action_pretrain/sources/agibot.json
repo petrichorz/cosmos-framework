@@ -6,9 +6,15 @@
       "viewpoint": "concat_view",
       "target_semantics": "next_state",
       "read_options": {
+        "state_key": "state_unified",
+        "action_key": "action_unified",
+        "state_mask_key": "mask_state",
+        "action_mask_key": "mask_action",
         "action_from_state": true,
         "action_time_offset_steps": 1
       },
+      "split_val_ratio": 0,
+      "statistics_path": "${AGIBOT_GROUP_STATS_PATH}",
       "weight": 1.0
     }
   ]

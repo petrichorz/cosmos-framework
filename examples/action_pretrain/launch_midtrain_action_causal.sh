@@ -12,8 +12,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 : "${SOURCE_SET:=mixed}"
-: "${AGIBOT_ROOT:=/path/to/agibot/canonical_55d}"
+: "${AGIBOT_ROOT:=/path/to/agibot_processed}"
 : "${EGOSUITE_ROOT:=/path/to/egosuite_processed}"
+: "${AGIBOT_GROUP_STATS_PATH:=/path/to/agibot_group_stats.json}"
+: "${EGOSUITE_GROUP_STATS_PATH:=/path/to/egosuite_group_stats.json}"
 : "${ACTION_SOURCES_FILE:=$SCRIPT_DIR/sources/$SOURCE_SET.json}"
 : "${BASE_CHECKPOINT_PATH:=/path/to/Cosmos3-Edge-DCP}"
 : "${COSMOS3_EDGE_PROCESSOR_PATH:=/path/to/Cosmos3-Edge}"
@@ -22,10 +24,11 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 : "${MROPE_BASE_FPS:=24}"
 TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/action_midtrain_edge_causal_tnd.toml}"
 
-for path_var in AGIBOT_ROOT EGOSUITE_ROOT ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT TOML_PATH; do
+for path_var in AGIBOT_ROOT EGOSUITE_ROOT AGIBOT_GROUP_STATS_PATH EGOSUITE_GROUP_STATS_PATH ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT TOML_PATH; do
     [[ "${!path_var}" = /* ]] || printf -v "$path_var" '%s/%s' "$PWD" "${!path_var}"
 done
 
+export AGIBOT_GROUP_STATS_PATH EGOSUITE_GROUP_STATS_PATH
 export AGIBOT_ROOT EGOSUITE_ROOT ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH
 export IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -45,6 +48,9 @@ TRAIN_ARGS=(-m cosmos_framework.scripts.train --sft-toml="$TOML_PATH")
 CMD=(
     torchrun "${TORCHRUN_ARGS[@]}" "${TRAIN_ARGS[@]}" --
     "model.config.diffusion_expert_config.base_fps=$MROPE_BASE_FPS"
+    # 长片段按 token 预算 packing；沿用昨晚验证过的 lookahead=1。
+    "dataloader_train.lookahead_limit=${LOOKAHEAD_LIMIT:-1}"
+    dataloader_train.max_samples_per_batch=null
     model.config.vlm_config.tokenizer.repository=null
     model.config.vlm_config.tokenizer.revision=null
     "+model.config.vlm_config.tokenizer.tokenizer_type=$COSMOS3_EDGE_PROCESSOR_PATH"
