@@ -346,7 +346,7 @@ def compute_statistics(
     return statistics
 
 
-def parse_args():
+def parse_args(*, parallel=False):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--dataset-root",
@@ -381,7 +381,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=512, help="Adjacent windows per read, within one episode")
     parser.add_argument("--num-workers", type=int, default=4, help="Read/encode threads; accumulation stays ordered")
     parser.add_argument("--output", type=Path, required=True)
+    if parallel:
+        parser.add_argument("--dataset-processes", type=int, default=4, help="Concurrent dataset processes")
     args = parser.parse_args()
+    if parallel and args.dataset_processes < 1:
+        parser.error("--dataset-processes must be positive")
     if not 0 <= args.split_val_ratio < 1:
         parser.error("--split-val-ratio must be in [0, 1)")
     if args.reservoir_size < 1 or args.seed < 0 or args.log_every < 0:

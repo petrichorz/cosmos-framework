@@ -52,23 +52,29 @@ set -o pipefail
 
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
-  python -m tools.compute_causal_action_stats \
+  python -m tools.compute_causal_action_stats_parallel \
   --dataset-root "$AGIBOT_ROOT" --profile agibot \
+  --state-key state_unified --state-mask-key mask_state \
   --action-from-state --action-time-offset-steps 1 \
   --split-val-ratio 0 --split-seed 42 \
-  --method reservoir --reservoir-size 50000 --seed 42 \
-  --num-workers 4 --batch-size 512 \
+  --method exact --seed 42 \
+  --dataset-processes 4 --num-workers 4 --batch-size 512 \
+  --bounds q01_q99 \
   --output "$AGIBOT_GROUP_STATS_PATH" \
   2>&1 | tee "$RUN_DIR/stats/agibot.log"
 ```
 
-AgiBot 的绝对目标取 `state[t+1]`，随后按模板计算 block delta；夹爪、灵巧手使用绝对值。父目录中的所有子集共同生成一份统计，不是平均各子集的 q01/q99。
+AgiBot 的绝对目标取 `state[t+1]`，随后按模板计算 block delta；夹爪、灵巧手使用绝对值。每个子集独立计算，再聚合成一份组统计：逐通道 q01 取各有效子集最小值，q99 取最大值；它们不是合并样本的总体分位数。
 
-**命令成功退出后再继续。正式统计不要加 `--limit`。** 输出 JSON 的 `provenance.partial` 应为 `false`。默认扫描全部合法 block 起点，均值、方差、极值来自全量数据，q01/q99 通过每通道最多 50000 个 reservoir 样本估计。
+**命令成功退出后再继续。正式统计不要加 `--limit`。** 输出 JSON 的 `provenance.partial` 应为 `false`。上述命令扫描全部合法 block 起点，使用 `--method exact` 计算每个子集的精确 q01/q99，不做 reservoir 抽样。min/max、mean/std 和计数按有效样本合并，保持全量统计口径。
 
 统计默认每处理约 1000 个窗口输出一条进度日志（可用 `--log-every` 调整）：包含当前子集编号、窗口进度百分比、处理速度、已用时间和当前子集扫描的预计剩余时间。最后单独提示分位数计算，保存后报告总耗时。ETA 不包含后续子集和最终分位数计算，不是全组完成时间。
 
-`--num-workers 4` 是统计读取/编码线程数；`--batch-size 512` 是每批最多处理 512 个窗口。每个窗口仍为 32 action、33 state，并保留自己的 anchor。它们不改变统计窗口大小，也不决定训练的 DataLoader worker 数。
+`--dataset-processes 4` 同时运行最多 4 个子集进程；`--num-workers 4` 是每个进程内的读取/编码线程数；`--batch-size 512` 是每批最多处理 512 个窗口。每个窗口仍为 32 action、33 state，并保留自己的 anchor。它们不改变统计窗口大小，也不决定训练的 DataLoader worker 数。
+
+每个子集的结果保存到其 `meta/causal_action_stats.json`，不覆盖 LeRobot 原有的 `meta/stats.json`；最终组统计仍写到 `--output` 指定位置。重新执行计算命令会重算子集统计。`exact` 会在内存中保留全部有效编码值，内存不足时优先降低 `--dataset-processes`。
+
+state/action 分别保存 min/max、mean/std、count/valid_counts、q01/q99 和 low/high/valid；分位数字段仅保存 q01/q99。`--bounds q01_q99` 默认使用聚合后的 q01/q99，也可改为 `--bounds min_max`。两种模式下有效四元数的 low/high 均固定为 `[-1,1]`，不覆盖对应的统计字段。
 
 ### A2. 将统计文件接入训练
 
@@ -112,17 +118,34 @@ OUTPUT_ROOT="$RUN_DIR/smoke_agibot" \
 
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
-  python -m tools.compute_causal_action_stats \
+  python -m tools.compute_causal_action_stats_parallel \
   --dataset-root "$EGOSUITE_ROOT" --profile egosuite \
+  --state-key state_unified --action-key action_unified \
+  --state-mask-key mask_state --action-mask-key mask_action \
   --action-time-offset-steps 0 \
   --split-val-ratio 0 --split-seed 42 \
-  --method reservoir --reservoir-size 50000 --seed 42 \
-  --num-workers 4 --batch-size 512 \
+  --method exact --seed 42 \
+  --dataset-processes 4 --num-workers 4 --batch-size 512 \
+  --bounds q01_q99 \
   --output "$EGOSUITE_GROUP_STATS_PATH" \
   2>&1 | tee "$RUN_DIR/stats/egosuite.log"
 ```
 
 EgoSuite 直接使用已处理的 `action_unified[t]`，**不要加 `--action-from-state`，也不要再次移位**。两份统计分别服务各自的数据组，不将 AgiBot 与 EgoSuite 合成一份统计。
+
+子集统计已经存在且数据、模板、读取规则和 split 均未改变时，可以只聚合 JSON，无需重新读取轨迹：
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
+  python -m tools.aggregate_causal_action_stats \
+  --dataset-root "$AGIBOT_ROOT" --bounds q01_q99 \
+  --output "$AGIBOT_GROUP_STATS_PATH"
+
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
+  python -m tools.aggregate_causal_action_stats \
+  --dataset-root "$EGOSUITE_ROOT" --bounds q01_q99 \
+  --output "$EGOSUITE_GROUP_STATS_PATH"
+```
 
 ### B2. 接入统计，并更新混合权重
 
@@ -213,7 +236,8 @@ bash examples/action_pretrain/launch_midtrain_template.sh \
 
 ## 5. 文件分工与结果位置
 
-- `tools/compute_causal_action_stats.py`：CPU 组统计，支持批量读取和线程并行。
+- `tools/compute_causal_action_stats_parallel.py`：按子集多进程计算，内部复用现有多线程统计，并自动聚合。
+- `tools/aggregate_causal_action_stats.py`：单独聚合已保存的子集统计。
 - `sources/agibot.json`、`sources/egosuite.json`、`sources/mixed.json`：来源、读取规则、组统计路径和权重。
 - `action_midtrain_edge_causal_tnd.toml`：公共训练参数。
 - `launch_midtrain_template.sh`：跨机器环境模板，路径为 `/path/to/xxx`；调用通用训练启动脚本。
