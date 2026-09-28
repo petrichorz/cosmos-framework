@@ -1,132 +1,221 @@
-# Causal action mid-training（方案 C：视觉历史）
+# AgiBot / EgoSuite：从组统计到训练
 
-本分支从 main 的独立首帧布局接入 action mid-training，保留方案 C：历史只读取视觉，
-state 仅供所属当前预测块使用。训练入口为
-`action_causal_midtrain_edge`，不是单一数据集微调接口。默认用 DROID 调试；
-`CausalActionMixture` 在每个 rank 上按样本混合多个来源，然后按 `max_tokens` 打包。
-纯视频仍使用独立配方。
+本文面向其他 Ascend 机器，所有命令从 `cosmos-framework` 仓库根目录执行。先替换 `/path/to/xxx`，再在同一个 Bash 会话中按顺序运行。要求已安装本仓库、`cosmos-framework-py312` 环境和匹配的 CANN/torch_npu。
 
-## 表示与来源
+这里的“一组数据集”是一个父目录下的多个 LeRobot v3 子数据集。程序自动递归发现子集，无需逐个填写路径。数据必须满足当前 action 模板及 `state_unified`、`action_unified`、`mask_state`、`mask_action` 字段约定。
 
-- 输入/输出动作统一为 OpenWAM 80D；每块一个独立 state token。state 不进入 action encoder、decoder 或预测 loss。
-- `state2llm`、`action2llm`、`llm2action` 分别共享于所有机器人。`domain_id` 只保留作元数据。
-- 位置、夹爪、手指关节相对整块起点；旋转使用 `R_b.T @ R_target`，rot6d 为矩阵前两列依次拼接。
-- State 与 delta action 分别使用训练集 q01/q99，所有有效 rot6d 通道也参与统计。无效通道不参与统计或监督；L0 只有视觉，不构造 action padding 或 state token。
-- `B` 在数据侧均匀采样，随后选择 state、计算 delta、归一化、计数和 packing。模型复用该 geometry。
-- `history=H` 表示最多读取前 H 个历史视觉块（含窗口内的独立首帧 L0），要求 H>=1；H=1 时只读取前一个视觉块。历史不包含 action/state，干净视觉也不吸收它们。
-- state Q 只读文本和自身，仅所属块的条件/目标可读取它。FD 保留当前动作条件，ID 保留当前视频条件。
+- **路线 A：只训练 AgiBot。** 计算一份 AgiBot 组统计，然后启动单组训练。
+- **路线 B：AgiBot + EgoSuite 混合训练。** 分别计算两份组统计，按训练片段数设置组权重，再启动 mix。
 
-DROID 适配器读取 `observation.state.cartesian_position` 的绝对 XYZ/Euler-XYZ，端点沿用源 reader
-声明的 Panda link8、参考系为 robot base。Pose 目标来自下一时刻实测轨迹，夹爪目标来自
-`action.gripper_position`；实测夹爪来自 `observation.state.gripper_position`。夹爪统一为
-`1 - raw`（0 闭、1 开），单臂放左侧 `0:10`。这不是 FK 推算的命令 EEF 目标；不能把该训练目标解释为控制器命令。
-
-## 生成训练统计
-
-在 py312 环境、仓库根目录运行；所有路径可替换。统计文件不可沿用绝对 action 的旧统计。
+## 1. 公共准备：环境与路径
 
 ```bash
-mkdir -p outputs/action_stats
-python -m cosmos_framework.data.generator.action.block_statistics \
-  --root /mnt/sfs_turbo/public/datasets/Cosmos3-DROID/success \
-  --output outputs/action_stats/droid_b1_4_s1.json \
-  --block-size-min 1 --block-size-max 4 --video-stride 1 \
-  --chunk-length 32 --windows 2048 --seed 123
+export CONDA_ROOT=/path/to/miniforge3
+export CONDA_ENV=cosmos-framework-py312
+export ASCEND_ENV=/path/to/Ascend/ascend-toolkit/set_env.sh
+source "$CONDA_ROOT/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+
+# 父目录下可以有任意多个子数据集；只训练 AgiBot 时不需要设置 EGOSUITE_ROOT。
+export AGIBOT_ROOT=/path/to/agibot_processed
+export EGOSUITE_ROOT=/path/to/egosuite_processed
+
+export BASE_CHECKPOINT_PATH=/path/to/Cosmos3-Edge-DCP
+export COSMOS3_EDGE_PROCESSOR_PATH=/path/to/Cosmos3-Edge
+export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
+
+# 每次新实验换一个目录；沿用训练输出目录可能自动恢复旧 checkpoint。
+export RUN_DIR="$PWD/outputs/my_action_run"
+export HF_DATASETS_CACHE="$RUN_DIR/hf_cache"
+export TMPDIR=/path/to/local_tmp
+mkdir -p "$RUN_DIR/stats" "$RUN_DIR/config" "$HF_DATASETS_CACHE" "$TMPDIR"
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export HF_HUB_OFFLINE=1
+
+# 文件名由你决定；来源 JSON 会通过这两个环境变量引用统计文件。
+export AGIBOT_GROUP_STATS_PATH="$RUN_DIR/stats/agibot_group_stats.json"
+export EGOSUITE_GROUP_STATS_PATH="$RUN_DIR/stats/egosuite_group_stats.json"
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export NPROC_PER_NODE=4
+
+set -o pipefail
 ```
 
-统计绑定来源、版本、train split、划分 seed/比例、坐标系、端点、映射版本、delta 定义、
-窗口长度、B 分布、stride 和分块布局版本。变更这些参数应重新采集。JSON 的 `population` 保存实际窗口索引，
-默认均匀采样窗口和 B；`--windows` 指明估计统计的训练窗口数。固定 B=2 实验使用
-`--block-size-min 2 --block-size-max 2` 单独生成统计。生产训练应评估足够覆盖来源的统计样本量。
+`TMPDIR` 使用本机可写的短路径目录，避免共享文件系统上的 multiprocessing 临时文件清理问题。首次准备机器时，要提前下载模型与 tokenizer；这里默认离线运行。
 
-## 启动
+## 2. 路线 A：AgiBot 单组训练
+
+### A1. 计算全组统计
+
+命令前的两个环境变量仅作用于本次 CPU 统计，用于关闭 NPU 自动加载、避免动态库冲突，不影响后续训练。
 
 ```bash
-export ACTION_STATISTICS_PATH="$PWD/outputs/action_stats/droid_b1_4_s1.json"
-export OUTPUT_ROOT="$PWD/outputs/action_midtrain"
-bash examples/action_pretrain/launch_midtrain_action_causal.sh
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
+  python -m tools.compute_causal_action_stats \
+  --dataset-root "$AGIBOT_ROOT" --profile agibot \
+  --action-from-state --action-time-offset-steps 1 \
+  --split-val-ratio 0 --split-seed 42 \
+  --method reservoir --reservoir-size 50000 --seed 42 \
+  --num-workers 4 --batch-size 512 \
+  --output "$AGIBOT_GROUP_STATS_PATH" \
+  2>&1 | tee "$RUN_DIR/stats/agibot.log"
 ```
 
-上述 launcher 假定当前环境已经安装 torch_npu/CANN。需要同时配置运行环境时，复制并修改
-`launch_midtrain_template.sh` 中的环境路径。默认 TOML 已指向通用 mid-training 入口：
+AgiBot 的绝对目标取 `state[t+1]`，随后按模板计算 block delta；夹爪、灵巧手使用绝对值。父目录中的所有子集共同生成一份统计，不是平均各子集的 q01/q99。
+
+**命令成功退出后再继续。正式统计不要加 `--limit`。** 输出 JSON 的 `provenance.partial` 应为 `false`。默认扫描全部合法 block 起点，均值、方差、极值来自全量数据，q01/q99 通过每通道最多 50000 个 reservoir 样本估计。
+
+`--num-workers 4` 是统计读取/编码线程数；`--batch-size 512` 是每批最多处理 512 个窗口。每个窗口仍为 32 action、33 state，并保留自己的 anchor。它们不改变统计窗口大小，也不决定训练的 DataLoader worker 数。
+
+### A2. 将统计文件接入训练
 
 ```bash
-examples/action_pretrain/action_midtrain_edge_causal_tnd.toml
+export ACTION_SOURCES_FILE="$PWD/examples/action_pretrain/sources/agibot.json"
+export OUTPUT_ROOT="$RUN_DIR/train_agibot"
 ```
 
-关键 overrides：
+该来源 JSON 已包含下面的绑定，无需修改数据集的 `meta/stats.json`：
 
-```text
-dataloader_train.max_sequence_length=16384
-model.config.teacher_forcing_block_size_min=1
-model.config.teacher_forcing_block_size_max=4
-model.config.teacher_forcing_history_blocks_min=1
-model.config.teacher_forcing_history_blocks_max=8
-model.config.activation_checkpointing.mode=selective
+```json
+"root": "${AGIBOT_ROOT}",
+"statistics_path": "${AGIBOT_GROUP_STATS_PATH}"
 ```
 
-默认 joint 比例为 FD:ID:Policy=1:1:1，通过每个来源的 `joint_mode_weights` 调整。
-`MODE=policy/forward_dynamics/inverse_dynamics/joint` 修改默认调试来源；增加来源后，分别配置各来源的 mode/比例。
-训练视频的固定抽帧步长由 TOML 的 `[action].video_stride` 配置，可取 1、2 或 4；它不复用
-video pre-training 的随机 multi-FPS 配置。统计文件必须使用相同的 `video_stride` 生成。
+训练首次读取各子集时，会加载同一份组统计，对 state 和模板编码后的 action 分别归一化。以后替换统计文件，只需更新 `AGIBOT_GROUP_STATS_PATH`，然后重新启动训练。
 
-固定窗口验收还需设置来源 `debug_fixed_index=0`、`cfg_dropout_rate=0`、固定 B，以及
-`model.config.causal_action_debug_noise_seed=123`。此调试 seed 固定 sigma 和噪声，并恢复外部 RNG；
-正式随机窗口训练必须保持其为 `null`。不要把固定窗口和随机 joint 曲线合并解释。
-
-Edge-DCP 加载仍走原 DCP 流程，只在 warm start 初始化新的 state/action 接口，打印跳过的 key。
-自动恢复本次训练 checkpoint 时，原 DCP 逻辑会恢复这些权重；不提供旧 domain action checkpoint 语义兼容。
-
-## 增加数据源
-
-适配器返回以下原始字段：
-
-- `video`: `[3,N+1,H,W]`，`conditioning_fps`: 同步网格帧率。
-- `state_trajectory`、`state_mask`: `[S,80]` 实测绝对状态与独立布尔 mask。
-- `action_target`、`action_mask`: `[N,80]` 绝对目标与独立布尔 mask。
-- `action_state_indexes`: `[N]`，动作开始前对应的实测状态下标；不允许未来 state。
-- `state_timestamps`、`action_timestamps`: 秒，和上述下标相匹配；动作须落在同步视频区间网格上。
-- `source_contract`: `SourceContract`，声明机器人、参考系、物理端点、左右映射、单位、夹爪方向和目标来源语义。
-- 现有 transform 所需的 caption、viewpoint、domain 等元数据。
-
-用 `scatter_openwam_fields` 把不同原始维数映射到物理字段；机械臂关节必须先做可靠 FK，
-不能直接放入灵巧手槽位。速度-only 底盘显式拒绝，需要先决定独立的物理契约。
-
-构建 `ActionSFTDataset(raw_reader, ActionTransformPipeline(max_action_dim=80, ...), resolution)`，
-再用 `CausalActionSFTDataset(base, statistics_path=..., mode="joint", ...)` 包装。
-通过通用 `collect_statistics(dataset, indices=..., block_sizes=..., video_stride=...)` 为每个契约生成独立统计。
-加入 mid-training 配方的 `robots.dataset.datasets`，设置相应 `weights`。
-各来源必须是 map-style（`iterable_shuffle=False`），mixture 统一负责分布式/worker episode 分片。
-每个来源的 episode 数至少覆盖 rank × worker 数，避免空分片挂起。
-
-默认配方只注册已核对契约的 DROID。现有 `agibot_processed/canonical_55d` 未附与 80D 对应的完整
-转换契约，且原统计含 `actions.robot.velocity`；目前不自动接入，不丢弃或猜测其控制字段。
-不同原始维数、左右槽位和手指 mask 的共享路径另有合成多源测试。
-
-## 推理和在线预览
+### A3. 启动训练
 
 ```bash
-export CHECKPOINT_ROOT=/path/to/new/action/checkpoint
-export ACTION_STATISTICS_PATH=/path/to/droid_b2_s1.json
-BLOCK_SIZE=2 bash examples/action_pretrain/inference_causal_action.sh
+# 可先只打印命令，检查路径；这一步不会读取数据或启动训练。
+PRINT_ONLY=1 bash examples/action_pretrain/launch_midtrain_template.sh
+
+# 正式启动，默认 FD / ID / Policy 联训。
+bash examples/action_pretrain/launch_midtrain_template.sh
 ```
 
-默认只生成当前预测块；缺下一块实测 state 时停在边界。所有 B 均默认 `current-block=0`，
-即 L0 后第一组 B 个 latent 的真实动作。B=1/2、stride=1 时分别输出 4/8 个动作。
-`--current-block` 使用不含视觉前缀的预测块编号。
-历史视频必须显式标为已观测；历史 action/state 可使用零占位，不需要提供历史测量或预测动作。
-离线 CLI 的 `--current-block` 会把该块之前的数据集视频标为已观测条件。
+默认 4 卡、每卡 4 个 DataLoader worker。需要先短测时，使用独立输出目录：
 
-离线多块预览必须显式传 `--preview-ground-truth-states`，产物标记为“真值 state 条件预览”。
-默认 mid-training 配方每 5000 iter 也使用这个预览语义，保留样本真实 state 和历史；不称为自由闭环 rollout。
+```bash
+OUTPUT_ROOT="$RUN_DIR/smoke_agibot" \
+  bash examples/action_pretrain/launch_midtrain_template.sh \
+  trainer.max_iter=10 checkpoint.save_iter=10
+```
 
-执行接口使用 `CausalActionSession.generate_current_block` 与 `commit_execution_feedback`。
-`CausalActionSession.for_model` 可连接 Cosmos 和机器人侧 `batch_builder`；后者负责图像/实际历史的
-时间对齐与输入打包，并保留当前实测 state、mask、原块 anchor 和训练统计。
-调用 `commit_execution_feedback(observation=观测视频块, executed_steps=完整块动作数)` 确认执行。
-第一版只允许完整块提交，部分执行会报错；历史只保存观测视频，不再要求回传 action 或旧 state。
-下一次规划必须传入新的当前 state 和图像。
-每次调用创建独立、CFG 隔离的块内缓存，不承诺持续滚动 KV 加速。
+## 3. 路线 B：AgiBot + EgoSuite 混合训练
 
-`real_actions` 仅导出本次生成的真实动作：先反归一化 delta，再用原所属块 state 还原绝对目标。
-执行适配器通过显式槽位 mask gather，返回机器人控制接口所需格式。
+### B1. 分别计算两组统计
+
+先执行 **A1 的 AgiBot 统计命令**。如果同一组数据、读取规则和模板的统计已经计算完成，可以复用。然后计算 EgoSuite：
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' \
+  python -m tools.compute_causal_action_stats \
+  --dataset-root "$EGOSUITE_ROOT" --profile egosuite \
+  --action-time-offset-steps 0 \
+  --split-val-ratio 0 --split-seed 42 \
+  --method reservoir --reservoir-size 50000 --seed 42 \
+  --num-workers 4 --batch-size 512 \
+  --output "$EGOSUITE_GROUP_STATS_PATH" \
+  2>&1 | tee "$RUN_DIR/stats/egosuite.log"
+```
+
+EgoSuite 直接使用已处理的 `action_unified[t]`，**不要加 `--action-from-state`，也不要再次移位**。两份统计分别服务各自的数据组，不将 AgiBot 与 EgoSuite 合成一份统计。
+
+### B2. 接入统计，并更新混合权重
+
+```bash
+export ACTION_SOURCES_FILE="$RUN_DIR/config/mixed.json"
+cp examples/action_pretrain/sources/mixed.json "$ACTION_SOURCES_FILE"
+export OUTPUT_ROOT="$RUN_DIR/train_mixed"
+```
+
+混合清单已经通过 `AGIBOT_GROUP_STATS_PATH`、`EGOSUITE_GROUP_STATS_PATH` 分别绑定两份统计。但仓库中的 `4976:4` 是原实验数据的权重，**换机器上的数据后不要直接照用**。
+
+希望每个训练片段大致等机会采样时，组权重应取各组的有效训练片段数。下面读取 TOML 中当前的切片配置，使用正式数据集构造逻辑计数并更新刚复制的清单；只构造索引，不解码视频或启动训练：
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 LD_LIBRARY_PATH='' python - <<'PY'
+import json
+import os
+import tomllib
+from pathlib import Path
+
+from cosmos_framework.data.generator.action.datasets.causal_action_factory import get_causal_action_dataset
+
+config = tomllib.loads(Path("examples/action_pretrain/action_midtrain_edge_causal_tnd.toml").read_text())
+action = config["action"]
+manifest = Path(os.environ["ACTION_SOURCES_FILE"])
+data = json.loads(manifest.read_text())
+for source in data["sources"]:
+    stats_path = Path(os.path.expandvars(source["statistics_path"]))
+    stats = json.loads(stats_path.read_text())
+    assert not stats["provenance"]["partial"], f"Incomplete statistics: {stats_path}"
+
+mixture = get_causal_action_dataset(
+    sources_file=str(manifest),
+    **{key: action[key] for key in (
+        "template", "actions_per_block", "video_stride", "max_action_steps",
+        "overlap_action_steps", "mode", "seed", "resolution",
+    )},
+    history_blocks_min=config["model"]["teacher_forcing_history_blocks_min"],
+    history_blocks_max=config["model"]["teacher_forcing_history_blocks_max"],
+    allow_mock_statistics=False,
+)
+for source, group in zip(data["sources"], mixture.datasets):
+    source["weight"] = len(group)
+    print(source["reader"], "subdatasets=", len(group.datasets), "segments=", len(group))
+manifest.write_text(json.dumps(data, indent=2) + "\n")
+print("Updated:", manifest)
+PY
+```
+
+组内按片段索引遍历，组间按上述权重采样；无需将权重手动归一化到和为 1。不要使用统计 JSON 的 `blocks` 作为训练权重：统计滑窗与训练长片段是两套索引。增减子集或修改切片长度、overlap 后，应重新执行此步骤；修改模板、block 长度或目标读取规则后，还需要重新计算匹配统计。
+
+### B3. 启动 mix 训练
+
+```bash
+PRINT_ONLY=1 bash examples/action_pretrain/launch_midtrain_template.sh
+bash examples/action_pretrain/launch_midtrain_template.sh
+```
+
+与单组训练共用相同 TOML。混合的是数据来源，任务仍为 `mode=joint`，默认 Policy / ID / FD 按 1:1:1 采样，每个样本选择一种任务。
+
+## 4. 常用训练参数在哪里改
+
+文件：`examples/action_pretrain/action_midtrain_edge_causal_tnd.toml`。
+
+| 配置位置                                     | 当前值  | 含义                                  |
+| -------------------------------------------- | ------- | ------------------------------------- |
+| `[action] max_action_steps`                  | 896     | 每片段最多 896 action、897 个原始观测 |
+| `[action] overlap_action_steps`              | 161     | 相邻片段重叠的 action 步数            |
+| `[action] mode`                              | `joint` | FD / ID / Policy 联训                 |
+| `[model] teacher_forcing_history_blocks_max` | 32      | causal 历史 block 上限                |
+| `[dataloader_train] max_sequence_length`     | 54000   | 每个 rank 的 packing token 上限       |
+| `[dataloader_train] num_workers`             | 4       | 每个 rank 的数据加载进程数            |
+| `[trainer] max_iter`                         | 10000   | 总训练步数                            |
+| `[checkpoint] save_iter`                     | 5000    | 保存 checkpoint 的间隔                |
+
+固定 block 当前为 32 action；视频每 4 帧采样一次，最长片段进入 VAE 前有 225 帧。`lookahead_limit` 在启动脚本中默认 1，可通过 `LOOKAHEAD_LIMIT` 覆盖。数据加载 worker、统计线程和 OpenMP 线程是不同设置；脚本不主动设置 `OMP_NUM_THREADS`。
+
+临时修改训练 worker 数：
+
+```bash
+bash examples/action_pretrain/launch_midtrain_template.sh \
+  dataloader_train.dataloader.num_workers=1
+```
+
+**小数据组注意分片数量。** 每组的有效片段数至少应达到 `卡数 × 每卡 worker 数`。例如原实验 EgoSuite 只有 4 个片段，4 卡单组或 mix 调试时需用每卡 1 worker；更多 worker 会产生空分片。换成 180 个 AgiBot 子集或其他 EgoSuite 数据后，应以 B2 的实际计数为准。
+
+本手册使用正式 Reader。昨晚约 14.8 秒/iter 的结果来自实验版 PyAV resize/uint8 读取优化，尚未接入正式路径，仅增加 worker 数不能保证达到该速度。
+
+## 5. 文件分工与结果位置
+
+- `tools/compute_causal_action_stats.py`：CPU 组统计，支持批量读取和线程并行。
+- `sources/agibot.json`、`sources/egosuite.json`、`sources/mixed.json`：来源、读取规则、组统计路径和权重。
+- `action_midtrain_edge_causal_tnd.toml`：公共训练参数。
+- `launch_midtrain_template.sh`：跨机器环境模板，路径为 `/path/to/xxx`；调用通用训练启动脚本。
+- `launch_midtrain_local.sh`：原开发机器的独立副本，已经填入本机路径；其他机器使用 template。
+- `launch_midtrain_action_causal.sh`：构造并执行 torchrun 命令，末尾传入的命令行参数优先。
+
+统计文件在 `$RUN_DIR/stats`；生成的 mix 清单在 `$RUN_DIR/config/mixed.json`；启动日志在 `$OUTPUT_ROOT/launcher_rank0.log`，训练 checkpoint 位于该输出目录的任务子目录中。恢复训练复用输出目录，新实验使用新目录。
