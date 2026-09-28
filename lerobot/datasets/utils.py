@@ -110,7 +110,7 @@ def load_nested_dataset(
 
     Args:
         pq_dir: Directory containing parquet files
-        features: Optional features schema to ensure consistent loading of complex types like images
+        features: Optional schema defining the columns to read and their types, including complex types like images.
         episodes: Optional list of episode indices to filter. Uses PyArrow predicate pushdown for efficiency.
     """
     paths = sorted(pq_dir.glob("*/*.parquet"))
@@ -120,7 +120,13 @@ def load_nested_dataset(
     with SuppressProgressBars():
         # We use .from_parquet() memory-mapped loading for efficiency
         filters = pa_ds.field("episode_index").isin(episodes) if episodes is not None else None
-        return Dataset.from_parquet([str(path) for path in paths], filters=filters, features=features)
+        # 只读取元信息声明的非视频列，忽略后处理附加的诊断字段；保留 schema 类型校验。
+        return Dataset.from_parquet(
+            [str(path) for path in paths],
+            columns=list(features) if features is not None else None,
+            filters=filters,
+            features=features,
+        )
 
 
 def get_parquet_num_frames(parquet_path: str | Path) -> int:
