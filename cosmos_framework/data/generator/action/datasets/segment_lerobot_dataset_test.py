@@ -60,6 +60,7 @@ def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, r
     monkeypatch.setattr(module.SegmentLeRobotDataset, "_get_dataset", lambda self, index: ds)
     reader = module.SegmentLeRobotDataset(
         root=root,
+        table_backend="hf",
         template=template,
         source_contract=template.source_contract("agibot", source="test", info={}, target_semantics="absolute"),
         planner=SegmentPlanner(

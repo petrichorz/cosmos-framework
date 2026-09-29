@@ -19,6 +19,9 @@ upload_reproducible_setup = false
 template = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
 # 来源默认使用 pyav_resize；在 sources JSON 中显式设置 video_backend="pyav" 可回退。
 sources_file = "${oc.env:ACTION_SOURCES_FILE}"
+# 表格后端：parquet 直接读取、不写 Arrow 缓存且无文件 LRU；hf 使用旧磁盘缓存。
+# sources JSON 中同名字段可覆盖此默认值；不影响视频解码后端。
+table_backend = "parquet"
 actions_per_block = 32
 video_stride = 4
 # 最多 896 action / 897 observation，抽帧后 225 个视频帧。

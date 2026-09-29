@@ -109,6 +109,7 @@ class ActionConfig(BaseModel):
     video_stride: int = Field(default=4, ge=1)
     template: str = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
     sources_file: str = "examples/action_pretrain/sources/mixed.json"
+    table_backend: Literal["parquet", "hf"] = "parquet"
     actions_per_block: int = Field(default=32, ge=1)
     max_action_steps: int = Field(default=96, ge=1)
     overlap_action_steps: int = Field(default=16, ge=0)

@@ -26,6 +26,7 @@ import numpy as np
 import packaging.version
 import pandas
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as pa_ds
 import pyarrow.parquet as pq
 import torch
@@ -377,8 +378,20 @@ def write_episodes(episodes: Dataset, local_dir: Path) -> None:
     episodes.to_parquet(fpath)
 
 
-def load_episodes(local_dir: Path) -> datasets.Dataset:
-    episodes = load_nested_dataset(local_dir / EPISODES_DIR)
+def load_episodes(local_dir: Path, *, use_hf_cache: bool = True) -> datasets.Dataset:
+    if use_hf_cache:
+        episodes = load_nested_dataset(local_dir / EPISODES_DIR)
+    else:
+        # 元数据较小，直接驻留内存；在读取前排除统计列，不生成 HF Arrow 缓存。
+        paths = sorted((local_dir / EPISODES_DIR).glob("*/*.parquet"))
+        if not paths:
+            raise FileNotFoundError(f"No episode parquet files in {local_dir / EPISODES_DIR}")
+        tables = []
+        for path in paths:
+            with pq.ParquetFile(path) as parquet:
+                columns = [key for key in parquet.schema_arrow.names if not key.startswith("stats/")]
+                tables.append(parquet.read(columns=columns))
+        episodes = Dataset(pa.concat_tables(tables))
     # Select episode features/columns containing references to episode data and videos
     # (e.g. tasks, dataset_from_index, dataset_to_index, data/chunk_index, data/file_index, etc.)
     # This is to speedup access to these data, instead of having to load episode stats.
