@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 : "${DATASET_PATH:=/path/to/lerobot_v3_dataset_or_parent}"
 : "${BASE_CHECKPOINT_PATH:=/path/to/Cosmos3-Edge-DCP}"
@@ -17,7 +17,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 : "${WAN_VAE_PATH:=/path/to/Wan2.2_VAE.pth}"
 : "${OUTPUT_ROOT:=/path/to/output/vision_causal_edge_tnd_pretrain}"
 : "${MROPE_BASE_FPS:=24}"
-TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/toml/sft_config/vision_pretrain_edge_causal_tnd.toml}"
+TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/vision_pretrain_edge_causal_tnd.toml}"
 
 for path_var in DATASET_PATH BASE_CHECKPOINT_PATH COSMOS3_EDGE_PROCESSOR_PATH WAN_VAE_PATH OUTPUT_ROOT TOML_PATH; do
     [[ "${!path_var}" = /* ]] || printf -v "$path_var" '%s/%s' "$PWD" "${!path_var}"

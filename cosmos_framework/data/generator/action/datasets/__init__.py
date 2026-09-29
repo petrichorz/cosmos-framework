@@ -8,6 +8,7 @@ All concrete datasets inherit from :class:`ActionBaseDataset` and expose a
 statistics without instantiating the dataset.
 """
 
+from cosmos_framework.data.generator.action.datasets.agibot_segment_lerobot_dataset import AgiBotSegmentLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.agibotworld_beta_lerobot_dataset import (
     AgiBotWorldBetaLeRobotDataset,
 )
@@ -20,10 +21,12 @@ from cosmos_framework.data.generator.action.datasets.human_hand_pose_lerobot_dat
 from cosmos_framework.data.generator.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.robomind_franka_dataset import RoboMINDFrankaDataset
 from cosmos_framework.data.generator.action.datasets.robomind_ur_dataset import RoboMINDURDataset
+from cosmos_framework.data.generator.action.datasets.segment_lerobot_dataset import SegmentLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.umi_lerobot_dataset import UMILeRobotDataset
 
 __all__ = [
     "ActionBaseDataset",
+    "AgiBotSegmentLeRobotDataset",
     "AgiBotWorldBetaLeRobotDataset",
     "BridgeOrigLeRobotDataset",
     "DROIDLeRobotDataset",
@@ -33,5 +36,6 @@ __all__ = [
     "LIBEROLeRobotDataset",
     "RoboMINDFrankaDataset",
     "RoboMINDURDataset",
+    "SegmentLeRobotDataset",
     "UMILeRobotDataset",
 ]

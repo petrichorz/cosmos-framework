@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# Template for Cosmos3-Edge causal continued pre-training with grouped TND attention.
+# Template for Cosmos3-Edge causal video continued pre-training with grouped TND attention.
 # The paired launcher restricts conditioning to T2V, which is the training mode
 # currently supported by Scheme-B teacher forcing.
 

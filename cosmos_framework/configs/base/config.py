@@ -10,6 +10,24 @@ from cosmos_framework.utils import config
 
 
 @attrs.define(slots=False)
+class ActionDataSetting:
+    """Shared template, geometry and source manifest for causal action training."""
+
+    video_stride: int = 4
+    template: str = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+    sources_file: str = "examples/action_pretrain/sources/mixed.json"
+    actions_per_block: int = 32
+    max_action_steps: int = 96
+    overlap_action_steps: int = 16
+    resolution: str = "480"
+    mode: str = "joint"
+    seed: int = 42
+    allow_mock_statistics: bool = False
+    mock_state_stats_path: str = ""
+    mock_delta_stats_path: str = ""
+
+
+@attrs.define(slots=False)
 class DataSetting:
     """Configuration for data.
 
@@ -20,6 +38,7 @@ class DataSetting:
     """
 
     qwen_max_video_token_length: int = 8192
+    action: ActionDataSetting = attrs.field(factory=ActionDataSetting)
 
 
 @attrs.define(slots=False)
@@ -94,6 +113,7 @@ def make_config() -> Config:
 
     # Register shipped experiments explicitly. (vision_sft_nano also defines
     # vision_sft_nano_mapstyle_dataloader — the CosmosDataLoader variant — in the same module.)
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_causal_midtrain_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_droid_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_all_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano  # noqa: F401

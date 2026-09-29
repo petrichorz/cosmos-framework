@@ -19,6 +19,7 @@ from cosmos_framework.data.generator.sequence_packing.mrope import (
 from cosmos_framework.data.generator.sequence_packing.teacher_forcing import TeacherForcingData
 
 if TYPE_CHECKING:
+    from cosmos_framework.data.generator.action.block_state import BlockStateMetadata
     from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 
 
@@ -929,6 +930,7 @@ class PackedSequence:
     action: ModalityData | None = None
     sound: ModalityData | None = None
     teacher_forcing: TeacherForcingData | None = None
+    causal_action_metadata: list[BlockStateMetadata] | None = None
 
     # Multi-control transfer: per-sample list of per-vision-item token counts.
     # For a multi-control transfer sample with N controls + 1 noisy target,
@@ -1034,6 +1036,7 @@ class SequencePlan:
     has_action: bool = False
     condition_frame_indexes_action: list[int] = field(default_factory=list)
     action_start_frame_offset: int = 1
+    causal_action_metadata: BlockStateMetadata | None = None
 
     # -- sound modality --
     has_sound: bool = False

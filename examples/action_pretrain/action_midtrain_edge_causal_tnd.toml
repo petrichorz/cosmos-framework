@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# Cosmos3-Edge causal action mid-training with grouped-TND attention.
+# 公共模板、geometry 和训练参数放在此处。
+# 来源路径、读取规则、统计文件及采样权重放在 sources/*.json。
+
+[job]
+task                      = "vfm"
+experiment                = "action_causal_midtrain_edge"
+project                   = "cosmos3_action"
+group                     = "midtrain"
+name                      = "action_causal_midtrain_edge"
+wandb_mode                = "disabled"
+upload_reproducible_setup = false
+
+[action]
+# 公共模板与时序配置；来源差异单独放在 sources/*.json。
+template = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+sources_file = "${oc.env:ACTION_SOURCES_FILE}"
+actions_per_block = 32
+video_stride = 4
+# 最多 896 action / 897 observation，抽帧后 225 个视频帧。
+max_action_steps = 896
+overlap_action_steps = 161
+resolution = "480"
+mode = "joint"
+seed = 42
+allow_mock_statistics = false
+
+[model]
+# 开启后单独记录 rank 0 的 Policy / ID / FD loss；关闭时跳过新增统计。
+causal_action_log_loss_by_mode      = false
+precision                           = "bfloat16"
+max_num_tokens_after_packing        = -1
+joint_attn_implementation           = "teacher_forcing"
+causal_training_strategy            = "teacher_forcing"
+teacher_forcing_history_blocks_min  = 1
+teacher_forcing_history_blocks_max  = 32
+teacher_forcing_dense_mode          = "grouped_tnd"
+teacher_forcing_tnd_max_kv_tokens   = 131072
+teacher_forcing_visualize_sdpa_mask = false
+
+# Action mid-training updates newly initialized action/state interfaces, so the
+# recipe uses live weights instead of maintaining a second EMA parameter copy.
+[model.ema]
+enabled = false
+
+[model.parallelism]
+data_parallel_shard_degree     = -1
+data_parallel_replicate_degree = 1
+context_parallel_shard_degree  = 1
+cfg_parallel_shard_degree      = 1
+fsdp_mixed_precision_enabled   = true
+fsdp_master_dtype              = "float32"
+
+[model.compile]
+enabled         = false
+compile_dynamic = true
+
+[model.activation_checkpointing]
+mode               = "full"
+save_ops_regex     = ["fmha"]
+preserve_rng_state = true
+determinism_check  = "default"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas          = [0.9, 0.99]
+eps            = 1.0e-8
+fused          = true
+keys_to_select = [
+    "moe_gen",
+    "time_embedder",
+    "vae2llm",
+    "llm2vae",
+    "state2llm",
+    "state_modality_embed",
+    "action2llm",
+    "llm2action",
+    "action_modality_embed",
+    "k_norm_und_for_gen",
+]
+lr               = 5.0e-5
+lr_multipliers   = {}
+optimizer_type   = "AdamW"
+weight_decay     = 0.05
+
+# 沿用昨晚实验快照的学习率衰减配置。
+[scheduler]
+lr_scheduler_type = "LambdaLinear"
+cycle_lengths      = [10000]
+f_max              = [1.0]
+f_min              = [0.3]
+f_start            = [1.0]
+verbosity_interval = 0
+warm_up_steps      = [0]
+
+[trainer]
+distributed_parallelism = "fsdp"
+grad_accum_iter         = 1
+logging_iter            = 1
+max_iter                = 10000
+
+[trainer.callbacks.compile_tokenizer]
+compile_after_iterations = 3
+enabled                  = false
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 1.0
+force_finite = true
+
+# Warm-start the shared video backbone while leaving the action/state adapters
+# freshly initialized. Resuming a checkpoint from this same run restores them
+# through the experiment's normal DCP resume path.
+[checkpoint]
+keys_to_skip_loading = [
+    "net_ema.",
+    "state2llm",
+    "state_modality_embed",
+    "action2llm",
+    "llm2action",
+    "action_modality_embed",
+    "action_pos_embed",
+]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 5000
+
+[dataloader_train]
+max_sequence_length = 54000
+num_workers          = 4

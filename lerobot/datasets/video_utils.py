@@ -210,8 +210,9 @@ def decode_video_frames_pyav_resized(
     finally:
         container.close()
 
-    query_ts = torch.tensor(timestamps)
-    decoded_ts = torch.tensor(loaded_ts)
+    # v3 视频有较大的 episode 时间偏移；float32 舍入可能超过帧匹配容差。
+    query_ts = torch.tensor(timestamps, dtype=torch.float64)
+    decoded_ts = torch.tensor(loaded_ts, dtype=torch.float64)
     if not loaded_frames:
         raise FrameTimestampError(f"No frames decoded from video: {video_path}")
     distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
@@ -296,8 +297,9 @@ def decode_video_frames_torchvision(
 
     reader = None
 
-    query_ts = torch.tensor(timestamps)
-    loaded_ts = torch.tensor(loaded_ts)
+    # v3 视频有较大的 episode 时间偏移；float32 舍入可能超过帧匹配容差。
+    query_ts = torch.tensor(timestamps, dtype=torch.float64)
+    loaded_ts = torch.tensor(loaded_ts, dtype=torch.float64)
 
     # compute distances between each query timestamp and timestamps of all loaded frames
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
@@ -500,8 +502,9 @@ def decode_video_frames_torchcodec(
         if log_loaded_timestamps:
             logging.info(f"Frame loaded at timestamp={pts:.4f}")
 
-    query_ts = torch.tensor(timestamps)
-    loaded_ts = torch.tensor(loaded_ts)
+    # v3 视频有较大的 episode 时间偏移；float32 舍入可能超过帧匹配容差。
+    query_ts = torch.tensor(timestamps, dtype=torch.float64)
+    loaded_ts = torch.tensor(loaded_ts, dtype=torch.float64)
 
     # compute distances between each query timestamp and loaded timestamps
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)

@@ -100,6 +100,26 @@ class JobConfig(BaseModel):
     )
 
 
+# ---------------------------------------------------------------- action
+class ActionConfig(BaseModel):
+    """Action-only data geometry shared by the registered training sources."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    video_stride: int = Field(default=4, ge=1)
+    template: str = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+    sources_file: str = "examples/action_pretrain/sources/mixed.json"
+    actions_per_block: int = Field(default=32, ge=1)
+    max_action_steps: int = Field(default=96, ge=1)
+    overlap_action_steps: int = Field(default=16, ge=0)
+    resolution: str = "480"
+    mode: Literal["joint", "policy", "forward_dynamics", "inverse_dynamics"] = "joint"
+    seed: int = 42
+    allow_mock_statistics: bool = False
+    mock_state_stats_path: str = ""
+    mock_delta_stats_path: str = ""
+
+
 # ---------------------------------------------------------------- model
 class EMAConfig(BaseModel):
     """Exponential Moving Average of the generation-pathway weights.
@@ -371,6 +391,10 @@ class ModelConfig(BaseModel):
         default=32,
         ge=1,
         description="Inclusive maximum clean-history window measured in causal blocks.",
+    )
+    causal_action_log_loss_by_mode: bool = Field(
+        default=False,
+        description="Record separate Policy/ID/FD losses on rank 0 without cross-rank reduction.",
     )
     teacher_forcing_dense_mode: Literal["global", "per_sample", "grouped_tnd"] = Field(
         default="global",
@@ -839,6 +863,7 @@ class SFTExperimentConfig(BaseModel):
     model_config = _PYDANTIC_MODEL_CONFIG
 
     job: JobConfig = Field(default_factory=JobConfig)
+    action: ActionConfig = Field(default_factory=ActionConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)

@@ -387,6 +387,8 @@ class EveryNDrawSample(EveryN):
         causal_num_blocks: int | None = None,
         causal_block_size: int = 1,
         causal_history_blocks: int = 16,
+        causal_seed: int = 42,
+        causal_use_kv_cache: bool = True,
     ) -> None:
         # s3: # files: min(n_sample_to_save, data instance)  # per file: min(batch_size, n_viz_sample)
         # wandb: normal paths log one preview; multiview transfer logs one preview per selected timestamp.
@@ -409,6 +411,8 @@ class EveryNDrawSample(EveryN):
         self.causal_num_blocks = causal_num_blocks
         self.causal_block_size = causal_block_size
         self.causal_history_blocks = causal_history_blocks
+        self.causal_seed = causal_seed
+        self.causal_use_kv_cache = causal_use_kv_cache
         if causal_num_blocks is not None and causal_num_blocks < 1:
             raise ValueError("causal_num_blocks must be positive")
         if causal_block_size < 1 or not 1 <= causal_history_blocks <= 16:
@@ -452,6 +456,41 @@ class EveryNDrawSample(EveryN):
             video = batch[model.input_video_key][0]
             if not isinstance(video, torch.Tensor) or video.ndim not in (4, 5):
                 raise ValueError("causal online sampling requires one single-view video per sample")
+            action_plan = batch.get("sequence_plan", [None])[0]
+            action_metadata = getattr(action_plan, "causal_action_metadata", None)
+            if action_metadata is not None:
+                # All-rank FSDP preview uses explicitly supplied dataset states.
+                # This is not free closed-loop rollout from a single image.
+                log.info("真值 state 条件预览：历史使用样本真值；不作为自由闭环 rollout")
+                batch["causal_action_preview"] = True
+                rows = []
+                clean = model.get_data_and_condition(batch)
+                batch["causal_action_truth_vision"] = clean.x0_tokens_vision
+                for guidance in self.guidance:
+                    generated = model.generate_samples_from_batch(
+                        batch,
+                        guidance=guidance,
+                        n_sample=1,
+                        num_steps=self.num_sampling_step,
+                        has_negative_prompt=self.use_negative_prompt,
+                        seed=[self.causal_seed + sample_id],
+                        causal_block_size=action_metadata.block_size,
+                        causal_history_blocks=action_metadata.history_blocks,
+                        causal_use_kv_cache=self.causal_use_kv_cache,
+                    )
+                    rows.append(model.decode(generated["vision"][0]).float().cpu())
+                rows.extend(
+                    [model.decode(clean.x0_tokens_vision[0]).float().cpu(), clean.raw_state_vision[0].float().cpu()]
+                )
+                # VAE patch alignment can crop the decoded width relative to raw GT.
+                rows = [row.unsqueeze(0) if row.ndim == 4 else row for row in rows]
+                max_w, max_h = max(row.shape[-1] for row in rows), max(row.shape[-2] for row in rows)
+                t_crop = min(row.shape[-3] for row in rows)
+                rows = [pad_images_and_cat([row], max_w, max_h, t_crop) for row in rows]
+                if self.rank == 0:
+                    name = f"Iter{iteration:09d}/GT_state_conditioned_Sample{sample_id:03d}"
+                    results.append(self.run_save(rows, 1, name))
+                continue
             tokenizer = model.tokenizer_vision_gen
             latent_frames = tokenizer.get_latent_num_frames(video.shape[-3])
             if self.causal_num_blocks is not None:

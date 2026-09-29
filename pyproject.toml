@@ -33,8 +33,6 @@ dependencies = [
   "imageio",
   "loguru",
   "msgpack",
-  "nvidia-cudnn-frontend",
-  "nvidia-ml-py",
   "obstore",
   "omegaconf",
   "pydantic",
@@ -190,6 +188,8 @@ ascend-train = [
 ]
 # Match nvcr.io/nvidia/pytorch:25.11-py3: https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-26-01.html
 cu128 = [
+  "nvidia-cudnn-frontend",
+  "nvidia-ml-py",
   "flash-attn-3-nv==1.0.3+cu128.torch210; platform_machine == 'x86_64'",
   "flash-attn==2.7.4.post1+cu128.torch210; platform_machine == 'x86_64'",
   "natten==0.21.6.dev6+cu128.torch210; platform_machine == 'x86_64'",
@@ -223,6 +223,8 @@ cu128-train = [
 ]
 # Match nvcr.io/nvidia/pytorch:25.11-py3: https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-11.html
 cu130 = [
+  "nvidia-cudnn-frontend",
+  "nvidia-ml-py",
   "flash-attn-3-nv==1.0.3+cu130.torch210; platform_machine == 'x86_64'",
   "flash-attn==2.7.4.post1+cu130.torch210; platform_machine == 'x86_64'",
   # GB300/B300 (sm_103a): use the custom build that includes sm_103a kernels (both arches).

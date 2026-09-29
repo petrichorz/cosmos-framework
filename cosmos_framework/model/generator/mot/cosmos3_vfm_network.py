@@ -184,8 +184,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         if config.action_gen:
             self.action_dim = config.action_dim
             self.num_embodiment_domains = config.num_embodiment_domains
-            self.action2llm = DomainAwareLinear(self.action_dim, self.hidden_size, self.num_embodiment_domains)
-            self.llm2action = DomainAwareLinear(self.hidden_size, self.action_dim, self.num_embodiment_domains)
+            self._create_action_interfaces()
 
             self.action_modality_embed = nn.Parameter(torch.zeros(self.hidden_size))
 
@@ -198,6 +197,22 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         self.config = config
         self.parallel_dims = None
         self._teacher_forcing_sdpa_mask_visualized = False
+
+    def _create_action_interfaces(self):
+        self.action2llm = DomainAwareLinear(self.action_dim, self.hidden_size, self.num_embodiment_domains)
+        self.llm2action = DomainAwareLinear(self.hidden_size, self.action_dim, self.num_embodiment_domains)
+
+    def _init_action_interfaces(self):
+        # DomainAwareLinear uses embeddings for weights, so we initialize them differently
+        # action2llm: input_size=action_dim, output_size=hidden_size
+        std = 1.0 / math.sqrt(self.action_dim)
+        torch.nn.init.trunc_normal_(self.action2llm.fc.weight, std=std, a=-3 * std, b=3 * std)
+        torch.nn.init.zeros_(self.action2llm.bias.weight)
+
+        # llm2action: input_size=hidden_size, output_size=action_dim
+        std = 1.0 / math.sqrt(self.hidden_size)
+        torch.nn.init.trunc_normal_(self.llm2action.fc.weight, std=std, a=-3 * std, b=3 * std)
+        torch.nn.init.zeros_(self.llm2action.bias.weight)
 
     def init_weights(self, buffer_device: torch.device | None):
         if self.config.vision_gen or self.config.action_gen or self.config.sound_gen:
@@ -214,16 +229,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             torch.nn.init.zeros_(self.llm2vae.bias)
 
         if self.config.action_gen:
-            # DomainAwareLinear uses embeddings for weights, so we initialize them differently
-            # action2llm: input_size=action_dim, output_size=hidden_size
-            std = 1.0 / math.sqrt(self.action_dim)
-            torch.nn.init.trunc_normal_(self.action2llm.fc.weight, std=std, a=-3 * std, b=3 * std)
-            torch.nn.init.zeros_(self.action2llm.bias.weight)
-
-            # llm2action: input_size=hidden_size, output_size=action_dim
-            std = 1.0 / math.sqrt(self.hidden_size)
-            torch.nn.init.trunc_normal_(self.llm2action.fc.weight, std=std, a=-3 * std, b=3 * std)
-            torch.nn.init.zeros_(self.llm2action.bias.weight)
+            self._init_action_interfaces()
 
             std = 1.0 / math.sqrt(self.hidden_size)
             torch.nn.init.trunc_normal_(self.action_modality_embed, std=std, a=-3 * std, b=3 * std)
@@ -1016,7 +1022,11 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             assert packed_seq.vision.token_shapes is not None
             assert isinstance(packed_seq.vision.sequence_indexes, torch.Tensor)
             all_gen_indexes.append(packed_seq.vision.sequence_indexes)
-        if packed_seq.action is not None and isinstance(packed_seq.action.sequence_indexes, torch.Tensor):
+        if (
+            packed_seq.action is not None
+            and isinstance(packed_seq.action.sequence_indexes, torch.Tensor)
+            and not getattr(getattr(packed_seq.teacher_forcing, "layout", None), "includes_action", False)
+        ):
             all_gen_indexes.append(packed_seq.action.sequence_indexes)
         if packed_seq.sound is not None and isinstance(packed_seq.sound.sequence_indexes, torch.Tensor):
             all_gen_indexes.append(packed_seq.sound.sequence_indexes)

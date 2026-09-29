@@ -296,6 +296,41 @@ def _dummy_recipe_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestEndToEndLoader:
+    @pytest.mark.parametrize(
+        "steps,stride,maximum,overlap,block,durations",
+        [
+            (32, 4, 96, 16, 2, [9, 17, 25]),
+            (16, 4, 48, 8, 1, [5, 9, 13]),
+        ],
+    )
+    def test_template_action_recipe_geometry(
+        self, _dummy_recipe_env, monkeypatch, steps, stride, maximum, overlap, block, durations
+    ):
+        from cosmos_framework.data.generator.action.action_state_template import resolve_action_template
+
+        monkeypatch.setenv("ACTION_SOURCES_FILE", "/tmp/sources.json")
+        path = Path(__file__).parents[3] / "examples/action_pretrain/action_midtrain_edge_causal_tnd.toml"
+        config = _load_or_skip(
+            path,
+            extra_overrides=[
+                f"data_setting.action.actions_per_block={steps}",
+                f"data_setting.action.video_stride={stride}",
+                f"data_setting.action.max_action_steps={maximum}",
+                f"data_setting.action.overlap_action_steps={overlap}",
+            ],
+        )
+        source = config.dataloader_train.dataloader.datasets.robots.dataset
+        model = config.model.config
+        assert model.max_action_dim == resolve_action_template(config.data_setting.action.template).width
+        assert model.teacher_forcing_block_size_min == model.teacher_forcing_block_size_max == block
+        assert list(model.tokenizer.encode_exact_durations) == durations
+        assert model.diffusion_expert_config.enable_fps_modulation is True
+        assert source.actions_per_block == steps
+        assert source.video_stride == stride
+        assert source.max_action_steps == maximum
+        assert source.overlap_action_steps == overlap
+        assert source.sources_file == "/tmp/sources.json"
+
     def test_load_lerobot_resolution_tiers(self, _dummy_recipe_env: None) -> None:
         recipe_path = Path(__file__).parents[3] / "examples/toml/sft_config/vision_sft_edge.toml"
 
@@ -322,7 +357,7 @@ class TestEndToEndLoader:
             ],
         )
 
-        assert config.model._target_ == f"{OmniMoTCausalModel.__module__}.{OmniMoTCausalModel.__qualname__}"
+        assert config.model._target_ is OmniMoTCausalModel
         assert config.job.name == "vision_causal_smoke_edge"
         assert config.trainer.distributed_parallelism == "ddp"
         assert config.trainer.max_iter == 3
@@ -379,7 +414,7 @@ load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
 
         config = _load_or_skip(toml_path, extra_overrides=["model=mot_causal_fsdp"])
 
-        assert config.model._target_ == f"{OmniMoTCausalModel.__module__}.{OmniMoTCausalModel.__qualname__}"
+        assert config.model._target_ is OmniMoTCausalModel
         assert config.model.config.causal_training_strategy == "teacher_forcing"
         assert config.model.config.joint_attn_implementation == "teacher_forcing"
         assert config.model.config.teacher_forcing_block_size_min == 1
