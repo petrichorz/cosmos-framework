@@ -145,10 +145,15 @@ def decode_video_frames(
     Returns:
         torch.Tensor: Decoded frames.
 
-    Currently supports torchcodec on cpu and pyav.
+    The explicit "pyav_resize" backend requires both positive resize dimensions and returns uint8.
+    Existing "pyav" / "video_reader" resize dispatch is unchanged.
     """
     if backend is None:
         backend = get_safe_default_codec()
+    if backend == "pyav_resize":
+        if any(type(size) is not int or size <= 0 for size in (resize_h, resize_w)):
+            raise ValueError("pyav_resize requires positive integer resize_h and resize_w")
+        return decode_video_frames_pyav_resized(video_path, timestamps, tolerance_s, resize_h, resize_w)
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(
             video_path, timestamps, tolerance_s, resize_h=resize_h, resize_w=resize_w

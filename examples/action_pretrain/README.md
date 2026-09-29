@@ -232,7 +232,11 @@ bash examples/action_pretrain/launch_midtrain_template.sh \
 
 **小数据组注意分片数量。** 每组的有效片段数至少应达到 `卡数 × 每卡 worker 数`。例如原实验 EgoSuite 只有 4 个片段，4 卡单组或 mix 调试时需用每卡 1 worker；更多 worker 会产生空分片。换成 180 个 AgiBot 子集或其他 EgoSuite 数据后，应以 B2 的实际计数为准。
 
-本手册使用正式 Reader。昨晚约 14.8 秒/iter 的结果来自实验版 PyAV resize/uint8 读取优化，尚未接入正式路径，仅增加 worker 数不能保证达到该速度。
+Action 来源未指定 `video_backend` 时，默认使用 `pyav_resize`，启用 PyAV resize/uint8 读取路径。可在 sources JSON 的某个来源中显式设置 `"video_backend": "pyav"` 使用旧后端；各来源独立选择。同一份来源清单通过 `ACTION_SOURCES_FILE` 传给现有 launcher，无需修改原配方。
+
+新路径在解码时按相机布局缩放，使用 uint8 拼接；保留完整 observation 时间网格、episode 文件偏移和原时间容差。它不会提前抽帧，也不修改 action/state、统计、训练目标或最终训练 resize/padding。AgiBot 腕部由原 PyTorch bilinear 改为 libswscale bicubic，像素有差异；同尺寸 head 应保持一致。新后端要求 head feature 以 `names` 明确声明 `height` 和 `width`。
+
+显式设置 `"video_backend": "pyav"` 并重新启动、重建 DataLoader 即回到原路径（移除该字段会使用新默认值 `pyav_resize`），无需转换数据或 checkpoint。昨晚约 14.8 秒/iter 是实验配置结果，不能作为新后端在所有来源上的速度保证。
 
 ## 5. 文件分工与结果位置
 

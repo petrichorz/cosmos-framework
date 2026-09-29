@@ -17,6 +17,7 @@ upload_reproducible_setup = false
 [action]
 # 公共模板与时序配置；来源差异单独放在 sources/*.json。
 template = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
+# 来源默认使用 pyav_resize；在 sources JSON 中显式设置 video_backend="pyav" 可回退。
 sources_file = "${oc.env:ACTION_SOURCES_FILE}"
 actions_per_block = 32
 video_stride = 4
