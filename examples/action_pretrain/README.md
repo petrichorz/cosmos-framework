@@ -26,9 +26,8 @@ export WAN_VAE_PATH=/path/to/Wan2.2_VAE.pth
 
 # 每次新实验换一个目录；沿用训练输出目录可能自动恢复旧 checkpoint。
 export RUN_DIR="$PWD/outputs/my_action_run"
-export HF_DATASETS_CACHE="$RUN_DIR/hf_cache"
 export TMPDIR=/path/to/local_tmp
-mkdir -p "$RUN_DIR/stats" "$RUN_DIR/config" "$HF_DATASETS_CACHE" "$TMPDIR"
+mkdir -p "$RUN_DIR/stats" "$RUN_DIR/config" "$TMPDIR"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export HF_HUB_OFFLINE=1
 
@@ -265,3 +264,11 @@ local、template 和公共启动脚本均支持该命令行覆盖。关闭时不
 模式 loss 复用现有逐样本 loss，沿用 condition mask、归一化方式及视觉/动作 loss 权重，不包含无法按样本归属的辅助 loss。原有总 loss、vision/action loss 和反向传播保持不变。终端的 `CAUSAL_ACTION_METRICS` 在记录窗口结束时增加 `mode_losses` 字段。
 
 模板默认 `[job].wandb_mode = "disabled"`，只输出终端日志；需要 W&B 曲线时，将所用 TOML 的该字段改为 `"online"`，并配置 W&B 登录信息。
+
+## 表格读取：默认不生成 Arrow 磁盘缓存
+
+causal action 训练和统计脚本默认使用 `table_backend="parquet"`：直接读取原始 Parquet 的必要列，一次取齐当前片段的 state/action、mask、timestamp 和 task；支持片段跨文件以及 action 来源和时间偏移配置。episode 元数据也直接加载到内存，不经过 HF 磁盘缓存，因此这条路径不需要设置 `HF_DATASETS_CACHE` 或提前预热。
+
+没有跨样本文件 LRU。初始化保留元数据、行号索引，首次取样后保留原有数据集级 mask；每次读取后只留下样本数据，释放文件级表格。内存峰值仍包含单个文件必要列的解压结果，并会随并行 worker 数增加。连续访问同一文件会重复解压，吞吐需在实际存储上测量。视频后端与采样、归一化规则不变，其他非 causal action 数据集仍沿用原路径。
+
+训练 TOML 的 `[action].table_backend = "parquet"` 显式选择默认表格后端。需要对照旧实现时，将其改为 `"hf"`；`sources/*.json` 中对应 source 的同名字段优先于 TOML，可单独覆盖。统计脚本默认直接读取 Parquet，不读取训练 TOML。旧后端仍会生成磁盘缓存；切换后端不会自动删除历史缓存。

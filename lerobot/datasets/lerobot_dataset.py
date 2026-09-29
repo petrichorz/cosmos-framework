@@ -89,6 +89,7 @@ class LeRobotDatasetMetadata:
         revision: str | None = None,
         force_cache_sync: bool = False,
         metadata_buffer_size: int = 10,
+        use_hf_cache: bool = True,
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else CODEBASE_VERSION
@@ -97,6 +98,7 @@ class LeRobotDatasetMetadata:
         self.latest_episode = None
         self.metadata_buffer: list[dict] = []
         self.metadata_buffer_size = metadata_buffer_size
+        self._use_hf_cache = use_hf_cache
 
         try:
             if force_cache_sync:
@@ -163,7 +165,7 @@ class LeRobotDatasetMetadata:
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks = load_tasks(self.root)
         self.subtasks = load_subtasks(self.root)
-        self.episodes = load_episodes(self.root)
+        self.episodes = load_episodes(self.root, use_hf_cache=getattr(self, "_use_hf_cache", True))
         self.stats = load_stats(self.root)
 
     def pull_from_repo(

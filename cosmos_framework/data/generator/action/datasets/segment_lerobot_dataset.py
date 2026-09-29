@@ -15,6 +15,7 @@ from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot impo
     LeRobotDatasetMetadata,
     split_episode_ids,
 )
+from cosmos_framework.data.generator.action.datasets.direct_parquet import DirectParquetDataset
 from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
@@ -40,10 +41,15 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         split_val_ratio: float = 0.0,
         tolerance_s: float = 1e-4,
         video_backend: str | None = None,
+        table_backend: str = "parquet",
         video_view: VideoViewConfig | None = None,
         viewpoint: str | None = None,
     ):
-        meta = LeRobotDatasetMetadata(repo_id="local", root=root, revision="local")
+        if table_backend not in ("parquet", "hf"):
+            raise ValueError("table_backend must be parquet or hf")
+        self.table_backend = table_backend
+        meta = LeRobotDatasetMetadata(repo_id="local", root=root, revision="local", use_hf_cache=table_backend == "hf")
+        self._direct_meta = meta if table_backend == "parquet" else None
         self._pyav_resize = video_backend == "pyav_resize"
         self.video_view = video_view
         if video_view is not None:
@@ -150,11 +156,12 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         """新索引空间的一项就是一段；不再把 idx 解释成滑窗起点。"""
         return self._segments[idx]
 
-    def _read_masks(self, ds, row):
+    def _read_masks(self, ds, row, *, values=None):
         """每个子数据集从一行加载 mask，缓存后不再逐帧查询。"""
         if self._masks is None:
             keys = {self.read_options.state_mask_key, self.read_options.target_mask_key}
-            values = ds._query_hf_dataset({key: [row] for key in keys})
+            if values is None:
+                values = ds._query_hf_dataset({key: [row] for key in keys})
             masks = []
             for key in (self.read_options.state_mask_key, self.read_options.target_mask_key):
                 mask = self.template.validate_valid_mask(values[key][0]).clone()
@@ -193,26 +200,30 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 按当前 episode 获取原始 FPS；只有字段缺失时才回退到 meta.fps。
         source_fps = self._read_source_fps(episode_id)
         ds = self._get_dataset(ds_idx)
-        ds._ensure_hf_dataset_loaded()
         options = self.read_options
-        rows = list(range(start, start + actions + 1))
-        target_rows = [row + options.action_time_offset_steps for row in rows[:-1]]
-        # 不经过 LeRobot 的边界 clamp，也不改共享 delta_timestamps。
-        observations = ds._query_hf_dataset({options.state_key: rows})
-        if options.action_from_state and options.action_time_offset_steps in (0, 1):
-            offset = options.action_time_offset_steps
-            target = observations[options.state_key][offset : offset + actions]
+        if self.table_backend == "parquet":
+            state, target, state_mask, action_mask, times, task = self._read_parquet_segment(ds, start, actions)
         else:
-            target = ds._query_hf_dataset({options.target_key: target_rows})[options.target_key]
-        state_mask, action_mask = self._read_masks(ds, rows[0])
-        # 绕开 LeRobot 默认 torch.tensor(float) 的 float32 转换，保留长轨迹时间精度。
-        timestamps = ds.hf_dataset.select_columns(["timestamp"]).with_format(None)[rows]["timestamp"]
-        times = torch.tensor(timestamps, dtype=torch.float64)
+            ds._ensure_hf_dataset_loaded()
+            rows = list(range(start, start + actions + 1))
+            target_rows = [row + options.action_time_offset_steps for row in rows[:-1]]
+            # 不经过 LeRobot 的边界 clamp，也不改共享 delta_timestamps。
+            observations = ds._query_hf_dataset({options.state_key: rows})
+            if options.action_from_state and options.action_time_offset_steps in (0, 1):
+                offset = options.action_time_offset_steps
+                target = observations[options.state_key][offset : offset + actions]
+            else:
+                target = ds._query_hf_dataset({options.target_key: target_rows})[options.target_key]
+            state_mask, action_mask = self._read_masks(ds, rows[0])
+            # 绕开 LeRobot 默认 torch.tensor(float) 的 float32 转换，保留长轨迹时间精度。
+            timestamps = ds.hf_dataset.select_columns(["timestamp"]).with_format(None)[rows]["timestamp"]
+            times = torch.tensor(timestamps, dtype=torch.float64)
+            task = ds._query_hf_dataset({"task_index": [rows[0]]})["task_index"][0].item()
+            state = observations[options.state_key]
         # 先用存储 FPS 检查连续采样，再将输出 FPS 切换到真实训练时间尺度。
         if not torch.allclose(times[1:] - times[:-1], torch.full_like(times[1:], 1 / self.fps), atol=1e-5, rtol=1e-4):
             raise ValueError(f"Episode {episode_id}: timestamp intervals must match meta.fps={self.fps}")
         # action 时间标记区间起点；目标实际读取时刻由 read_options 声明。
-        task = ds._query_hf_dataset({"task_index": [rows[0]]})["task_index"][0].item()
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
         viewpoint = self._viewpoint
         video = self._read_video(ds, episode_id, times.tolist(), viewpoint=viewpoint)
@@ -221,7 +232,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             mode=None,
             video=video.permute(1, 0, 2, 3) if video is not None else None,
             action=target,
-            state_trajectory=observations[options.state_key],
+            state_trajectory=state,
             action_target=target,
             state_mask=state_mask.clone(),
             action_mask=action_mask.clone(),
@@ -239,3 +250,36 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             additional_view_description=self.video_view.describe(viewpoint=viewpoint) if self.video_view else "",
         )
         return sample
+
+    def _read_parquet_segment(self, ds, start, actions):
+        options = self.read_options
+        target_start = start + options.action_time_offset_steps
+        begin = min(start, target_start)
+        end = max(start + actions + 1, target_start + actions)
+        columns = [options.state_key, options.target_key, "timestamp", "task_index"]
+        if self._masks is None:
+            columns.extend([options.state_mask_key, options.target_mask_key])
+        # 合并所有字段为一次读取，兼容 action 来源、正负偏移和跨文件片段。
+        values = ds.read_window(begin, end, columns)
+        state_offset, target_offset = start - begin, target_start - begin
+        state = torch.tensor(values[options.state_key][state_offset : state_offset + actions + 1])
+        target = torch.tensor(values[options.target_key][target_offset : target_offset + actions])
+        mask_values = None
+        if self._masks is None:
+            mask_values = {
+                key: [torch.tensor(values[key][state_offset])]
+                for key in {options.state_mask_key, options.target_mask_key}
+            }
+        state_mask, action_mask = self._read_masks(ds, start, values=mask_values)
+        times = torch.tensor(values["timestamp"][state_offset : state_offset + actions + 1], dtype=torch.float64)
+        return state, target, state_mask, action_mask, times, values["task_index"][state_offset]
+
+    def _get_dataset(self, ds_idx):
+        if self.table_backend == "hf":
+            return super()._get_dataset(ds_idx)
+        if self._datasets[ds_idx] is None:
+            args = self._dataset_build_args[ds_idx]
+            self._datasets[ds_idx] = DirectParquetDataset(
+                self._direct_meta, tolerance_s=args["tolerance_s"], video_backend=args["video_backend"]
+            )
+        return self._datasets[ds_idx]
