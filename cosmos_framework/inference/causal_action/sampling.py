@@ -119,7 +119,9 @@ def sample_prepared(
             if has_noisy_actions:
                 active[nv:] &= valid_action.flatten()
             active = active & (~cm.bool())
-            generated_action_mask |= am[:, 0] & valid_action.any(-1)
+            # 仅标记实际参与去噪的 action；FD 的 action 全是条件输入。
+            if has_noisy_actions:
+                generated_action_mask |= active[nv:].reshape(ashape).any(-1)
             if not bool(active.any()):
                 history_v[:, :, start:end] = state[:nv].reshape(vshape)[:, :, start:end]
                 continue
