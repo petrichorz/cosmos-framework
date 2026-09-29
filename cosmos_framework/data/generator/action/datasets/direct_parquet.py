@@ -3,6 +3,7 @@
 
 from bisect import bisect_right
 
+import pyarrow
 import pyarrow.parquet as pq
 from datasets.table import table_cast
 
@@ -60,6 +61,9 @@ class DirectParquetDataset:
             del table, values
             start = file_stop
             file_index += 1
+        # 样本已转为独立 Python 数据；在当前读取进程归还空闲 Arrow 内存，降低 RSS 驻留。
+        # 每个窗口调用一次（跨文件也只调用一次），不降低解压期间的瞬时峰值。
+        pyarrow.default_memory_pool().release_unused()
         return result
 
     def _query_videos(self, query_timestamps, ep_idx):
