@@ -104,7 +104,7 @@ def get_causal_action_dataset(
                 split_seed=seed,
                 split_val_ratio=source.get("split_val_ratio", 0.0),
                 tolerance_s=source.get("tolerance_s", 1e-4),
-                video_backend=source.get("video_backend", "pyav"),
+                video_backend=source.get("video_backend", "pyav_resize"),
             )
             if not len(reader):
                 raise ValueError(f"No complete training segments: {root}")

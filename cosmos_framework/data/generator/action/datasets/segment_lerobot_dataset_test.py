@@ -203,3 +203,19 @@ def test_invalid_source_fps_does_not_fall_back(monkeypatch, tmp_path, fps):
     path.write_text(json.dumps({"episode_index": 0, "source_fps": fps}))
     with pytest.raises(ValueError, match="Invalid source_fps"):
         make_reader(monkeypatch, root=tmp_path, lengths=(65,))
+
+
+def test_resized_video_conversion_is_opt_in(monkeypatch):
+    reader, _ = make_reader(monkeypatch, lengths=(33,))
+    frames = torch.full((33, 3, 2, 2), 128, dtype=torch.uint8)
+    with pytest.raises(TypeError, match="floating-point"):
+        reader._convert_video(frames)
+    reader._pyav_resize = True
+    assert torch.equal(reader._convert_video(frames), frames.permute(1, 0, 2, 3))
+    with pytest.raises(TypeError, match="uint8"):
+        reader._convert_video(frames.float())
+    with pytest.raises(ValueError, match="shape"):
+        reader._convert_video(frames[0])
+    assert reader._convert_video(None) is None
+    reader._skip_video_loading = True
+    assert reader._convert_video(frames) is None

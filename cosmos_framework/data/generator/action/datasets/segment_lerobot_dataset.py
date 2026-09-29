@@ -44,6 +44,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         viewpoint: str | None = None,
     ):
         meta = LeRobotDatasetMetadata(repo_id="local", root=root, revision="local")
+        self._pyav_resize = video_backend == "pyav_resize"
         self.video_view = video_view
         if video_view is not None:
             video_view.validate_features(meta.features, viewpoint=viewpoint)
@@ -173,6 +174,18 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             if self.video_view is not None
             else None
         )
+
+    def _convert_video(self, video_tchw):
+        """The opt-in resized reader already produces uint8; preserve legacy validation otherwise."""
+        if not self._pyav_resize:
+            return super()._convert_video(video_tchw)
+        if self._skip_video_loading or video_tchw is None:
+            return None
+        if video_tchw.ndim != 4 or video_tchw.shape[1] != 3:
+            raise ValueError("pyav_resize expected video with shape [T,3,H,W]")
+        if video_tchw.dtype != torch.uint8:
+            raise TypeError("pyav_resize expected uint8 video")
+        return video_tchw.permute(1, 0, 2, 3)
 
     def __getitem__(self, idx):
         """按实际长度批量读取，目标偏移只在这里执行一次。"""
