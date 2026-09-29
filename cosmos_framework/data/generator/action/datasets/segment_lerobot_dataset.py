@@ -3,7 +3,8 @@
 
 import json
 import math
-from dataclasses import replace
+from bisect import bisect_right
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,16 @@ from cosmos_framework.data.generator.action.datasets.direct_parquet import Direc
 from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
+
+
+@dataclass(frozen=True)
+class ActionTrainingRange:
+    """episode 内的 observation 半开范围；caption=None 沿用原任务文本。"""
+
+    start: int
+    stop: int
+    caption: str | None = None
+    segment_id: str | None = None
 
 
 class SegmentLeRobotDataset(BaseActionLeRobotDataset):
@@ -81,6 +92,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             geometry=planner.geometry,
         )
         self._segments: list[tuple[int, int, int, int]] = []  # ds、episode、源表起点、action 数
+        # 每个保留范围只存一次文本；累计终点同时用于 shuffle 和片段到范围的查找。
+        self._range_captions: list[str | None] = []
         self._masks: tuple[torch.Tensor, torch.Tensor] | None = None
         self._register_source(
             root=str(root),
@@ -117,6 +130,16 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         fps = self._episode_fps[episode_id]
         return self.fps if np.isnan(fps) else float(fps)
 
+    def _iter_training_ranges(self, episode_id, episode_length):
+        """默认以完整 episode 为范围；后续统一标注解析在此提供子范围和文本。"""
+        yield ActionTrainingRange(0, episode_length)
+
+    def _caption_for_index(self, idx):
+        """按范围查找文本，避免为重叠片段重复保存 caption。"""
+        if idx < 0:
+            idx += len(self._segments)
+        return self._range_captions[bisect_right(self._episode_cum_ends, idx)]
+
     def _append_index_records(self, *, meta, ds_idx, dataset_label=None):
         """先排除目标偏移导致的越界，再在对齐网格上规划片段。"""
         options = self.read_options
@@ -137,19 +160,26 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             ep = meta.episodes[episode_id]
             begin, end = int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
             count = end - begin
-            # 目标只对应前 T 个区间；offset=1 恰好使用已有的终点 observation。
-            first = max(0, -offset)
-            stop = max(first, min(count, count + 1 - offset))
-            planned = self.planner.plan(
-                stop - first,
-                observation_start=first,
-                source_id=str(meta.root),
-                episode_id=episode_id,
-            )
-            for start, actions in planned:
-                self._segments.append((ds_idx, episode_id, begin + start, actions))
-            if planned:
-                self._episode_cum_ends.append(len(self._segments))
+            for training_range in self._iter_training_ranges(episode_id, count):
+                lo, hi = training_range.start, training_range.stop
+                if not 0 <= lo <= hi <= count:
+                    raise ValueError(f"Episode {episode_id}: training range [{lo}, {hi}) outside [0, {count})")
+                # observation 和偏移后的目标都留在当前范围；offset=1 使用已有终点。
+                first = lo + max(0, -offset)
+                stop = max(first, min(hi, hi + 1 - offset))
+                planned = self.planner.plan(
+                    stop - first,
+                    observation_start=first,
+                    source_id=str(meta.root),
+                    episode_id=episode_id,
+                    segment_id=training_range.segment_id,
+                )
+                for start, actions in planned:
+                    self._segments.append((ds_idx, episode_id, begin + start, actions))
+                if planned:
+                    # 父类 get_shuffle_blocks 据此分组；默认 episode 模式的分组不变。
+                    self._episode_cum_ends.append(len(self._segments))
+                    self._range_captions.append(training_range.caption)
         self._num_valid_indices = len(self._segments)
 
     def _resolve_index(self, idx):
@@ -227,6 +257,9 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
         viewpoint = self._viewpoint
         video = self._read_video(ds, episode_id, times.tolist(), viewpoint=viewpoint)
+        caption = self._caption_for_index(idx)
+        if caption is None:
+            caption = str(ds.meta.tasks.iloc[int(task)].name)
         # 沿用父类字典与 uint8 视频格式；action 暂为绝对目标，C06 再写入编码结果。
         sample = self._build_result(
             mode=None,
@@ -245,7 +278,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             conditioning_fps=torch.tensor(source_fps, dtype=torch.float32),
             source_fps=torch.tensor(source_fps, dtype=torch.float32),
             read_options=options,
-            ai_caption=str(ds.meta.tasks.iloc[int(task)].name),
+            ai_caption=caption,
             viewpoint=viewpoint,
             additional_view_description=self.video_view.describe(viewpoint=viewpoint) if self.video_view else "",
         )
