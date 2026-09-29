@@ -5,6 +5,10 @@ import math
 import random
 from dataclasses import replace
 
+import torch
+
+from cosmos_framework.data.generator.action.sample_contract import ActionSampleReadError
+
 from .action_sft_dataset import ActionSFTDataset
 
 MODES = ("forward_dynamics", "inverse_dynamics", "policy")
@@ -65,6 +69,14 @@ class CausalActionSFTDataset(ActionSFTDataset):
             if self.debug_fixed_index is not None:
                 random.seed(42)
             raw = self._dataset[idx]
+        except (MemoryError, torch.OutOfMemoryError):
+            raise
+        except Exception as error:
+            # 只标记原始读取错误；统计校验、编码和 transform 错误仍直接抛出。
+            raise ActionSampleReadError(
+                f"Failed to read source={self._dataset.source_contract.source!r}, sample_index={idx}: "
+                f"{type(error).__name__}: {error}"
+            ) from error
         finally:
             if self.debug_fixed_index is not None:
                 random.setstate(rng)

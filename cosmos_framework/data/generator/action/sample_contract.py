@@ -49,3 +49,7 @@ class ActionReadOptions:
     def target_mask_key(self) -> str:
         """目标来自 state 时使用 state mask，否则使用 action mask。"""
         return self.state_mask_key if self.action_from_state else self.action_mask_key
+
+
+class ActionSampleReadError(RuntimeError):
+    """原始样本读取失败；训练 mixture 记录日志后跳过，不掩盖后续处理异常。"""

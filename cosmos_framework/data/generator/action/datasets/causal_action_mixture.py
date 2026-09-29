@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 """Mix source contracts before max_tokens packing on every training rank."""
 
+import logging
 import math
 import random
 
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
+
+from cosmos_framework.data.generator.action.sample_contract import ActionSampleReadError
+
+logger = logging.getLogger(__name__)
 
 
 class CausalActionMixture(IterableDataset):
@@ -63,6 +68,17 @@ class CausalActionMixture(IterableDataset):
                 start, length = blocks[block]
                 first = start + (shard - position) % total_shards
                 for index in range(first, start + length, total_shards):
-                    yield dataset[index]
+                    try:
+                        yield dataset[index]
+                    except ActionSampleReadError:
+                        logger.error(
+                            "Skipping unreadable action sample: shard=%s/%s epoch=%s index=%s",
+                            shard,
+                            total_shards,
+                            epoch,
+                            index,
+                            exc_info=True,
+                        )
+                        continue
                 position += length
             epoch += 1
