@@ -47,6 +47,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         source_contract: TemplateSourceContract,
         planner: SegmentPlanner,
         read_options: ActionReadOptions = ActionReadOptions(),
+        use_subtask: bool = False,  # 仅训练按 action_config 切分；统计保持默认 episode 模式。
         split: str = "full",
         split_seed: int = 0,
         split_val_ratio: float = 0.0,
@@ -81,10 +82,14 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             viewpoint=viewpoint,
             tolerance_s=tolerance_s,
         )
+        if type(use_subtask) is not bool:
+            raise TypeError("use_subtask must be a bool")
+        self.use_subtask = use_subtask
         self.template = template
         self.read_options = read_options
         self.source_contract = replace(source_contract, fps=fps, split=self.split)
-        self._episode_fps = self._load_episode_fps(Path(root), meta.total_episodes)
+        self._episode_fps, self._subtask_ranges = self._load_episode_metadata(Path(root), meta.total_episodes)
+        self.unannotated_observation_frames = 0
         # 索引计数属于当前 Reader，不修改调用方或其他 Reader 的 planner。
         self.planner = SegmentPlanner(
             max_action_steps=planner.max_action_steps,
@@ -103,27 +108,57 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             prefetched_meta=meta,
         )
 
-    def _load_episode_fps(self, root, total_episodes):
-        """episode ID 从 0 连续编号；只缓存 float32 FPS，不保留 JSONL 内容。"""
+        # 建完索引只需范围 caption，释放临时标注边界，不缓存完整 JSONL。
+        self._subtask_ranges.clear()
+
+    def _load_episode_metadata(self, root, total_episodes):
+        """流式读取 FPS 和可选 subtask；episode ID 从 0 连续编号。"""
         values = np.full(total_episodes, np.nan, dtype=np.float32)
+        ranges = {}
         path = root / "meta" / "episodes.jsonl"
+        if self.use_subtask and not path.is_file():
+            raise FileNotFoundError(f"use_subtask requires {path}")
         if path.is_file():
             with path.open() as file:
                 for line in file:
                     if not line.strip():
                         continue
                     episode = json.loads(line)
-                    if "source_fps" not in episode:
+                    if not self.use_subtask and "source_fps" not in episode:
                         continue
                     episode_id = episode["episode_index"]
                     if type(episode_id) is not int or not 0 <= episode_id < total_episodes:
                         raise ValueError(f"episode_index out of range in {path}: {episode_id}")
-                    fps = episode["source_fps"]
-                    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or fps <= 0:
-                        raise ValueError(f"Invalid source_fps for episode {episode_id} in {path}: {fps}")
-                    values[episode_id] = fps
+                    if "source_fps" in episode:
+                        fps = episode["source_fps"]
+                        if (
+                            isinstance(fps, bool)
+                            or not isinstance(fps, (int, float))
+                            or not math.isfinite(fps)
+                            or fps <= 0
+                        ):
+                            raise ValueError(f"Invalid source_fps for episode {episode_id} in {path}: {fps}")
+                        values[episode_id] = fps
+                    if self.use_subtask:
+                        if episode_id in ranges:
+                            raise ValueError(f"Duplicate episode {episode_id} in {path}")
+                        annotations = episode.get("action_config")
+                        if not isinstance(annotations, list) or not annotations:
+                            raise ValueError(f"Episode {episode_id} in {path}: use_subtask requires action_config")
+                        parsed = []
+                        for i, annotation in enumerate(annotations):
+                            start, stop = annotation.get("start_frame"), annotation.get("end_frame")
+                            caption = annotation.get("action_text")
+                            if type(start) is not int or type(stop) is not int:
+                                raise ValueError(
+                                    f"Episode {episode_id}, subtask {i} in {path}: frame bounds must be integers"
+                                )
+                            if not isinstance(caption, str) or not caption.strip():
+                                raise ValueError(f"Episode {episode_id}, subtask {i} in {path}: action_text is empty")
+                            parsed.append(ActionTrainingRange(start, stop, caption, str(i)))
+                        ranges[episode_id] = parsed
         values.setflags(write=False)
-        return values
+        return values, ranges
 
     def _read_source_fps(self, episode_id):
         """按 episode ID 直接索引；NaN 表示未声明，回退到 meta.fps。"""
@@ -131,8 +166,24 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         return self.fps if np.isnan(fps) else float(fps)
 
     def _iter_training_ranges(self, episode_id, episode_length):
-        """默认以完整 episode 为范围；后续统一标注解析在此提供子范围和文本。"""
-        yield ActionTrainingRange(0, episode_length)
+        """建索引时选择 episode 或标注范围；未标注 observation 不参与训练。"""
+        if not self.use_subtask:
+            yield ActionTrainingRange(0, episode_length)
+            return
+        ranges = self._subtask_ranges.get(episode_id)
+        if not ranges:
+            raise ValueError(f"Episode {episode_id} in {self.source_contract.source}: missing subtask annotations")
+        previous_stop = covered = 0
+        for training_range in ranges:
+            if not previous_stop <= training_range.start < training_range.stop <= episode_length:
+                raise ValueError(
+                    f"Episode {episode_id} in {self.source_contract.source}, subtask {training_range.segment_id}: "
+                    "bounds must be ordered, non-overlapping and within the episode"
+                )
+            covered += training_range.stop - training_range.start
+            previous_stop = training_range.stop
+            yield training_range
+        self.unannotated_observation_frames += episode_length - covered
 
     def _caption_for_index(self, idx):
         """按范围查找文本，避免为重叠片段重复保存 caption。"""

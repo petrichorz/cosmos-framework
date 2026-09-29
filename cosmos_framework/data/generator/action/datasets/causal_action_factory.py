@@ -100,6 +100,7 @@ def get_causal_action_dataset(
                     profile, source=str(root), info=info, target_semantics=source["target_semantics"]
                 ),
                 read_options=options,
+                use_subtask=source.get("use_subtask", False),
                 viewpoint=source["viewpoint"],
                 split="train",
                 split_seed=seed,
