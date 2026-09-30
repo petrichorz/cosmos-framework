@@ -101,7 +101,13 @@ PRINT_ONLY=1 bash examples/action_pretrain/launch_midtrain_template.sh
 bash examples/action_pretrain/launch_midtrain_template.sh
 ```
 
-默认 4 卡、每卡 4 个 DataLoader worker。需要先短测时，使用独立输出目录：
+默认 4 卡、每卡 4 个 DataLoader worker。
+
+数据配置默认开启 `early_video_sampling`，在视频读取时选择 block 所需的时间戳，减少 RGB 帧物化和视角拼接的中间内存；action 序列保持原采样率。帧间编码仍需要解码依赖帧，不能据此认为总解码量或整机内存减少 75%。可通过 `data_setting.action.early_video_sampling=false` 恢复后置抽帧。
+
+启动脚本默认导出 `MALLOC_ARENA_MAX=2` 和 `MIMALLOC_PURGE_DELAY=0`，分别限制 glibc arena 数量和促使 mimalloc 及时清理空闲页；两者只对使用对应分配器的内存生效。外部设置同名环境变量可覆盖默认值，且必须在启动进程前设置。它们用于缓解空闲堆驻留，不能保证消除所有内存增长。4 卡、每卡 12 worker 的同输入数据管线对照中，arena 上限设为 2 后，匹配样本边界的 worker PSS 合计减少约 13.35 GiB，50 步读取总耗时增加约 5%；实际训练受计算与预取重叠影响，需要按部署环境复测。
+
+需要先短测时，使用独立输出目录：
 
 ```bash
 OUTPUT_ROOT="$RUN_DIR/smoke_agibot" \

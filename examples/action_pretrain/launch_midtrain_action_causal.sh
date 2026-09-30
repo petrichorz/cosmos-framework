@@ -35,6 +35,8 @@ export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export COSMOS_DEVICE="${COSMOS_DEVICE:-npu}"
 # Release freed CPU tensor pages promptly in mimalloc-backed PyTorch builds.
 export MIMALLOC_PURGE_DELAY="${MIMALLOC_PURGE_DELAY:-0}"
+# Bound glibc arena retention in long-lived workers; callers can override the cap.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 TORCHRUN_ARGS=(
     --nproc_per_node="${NPROC_PER_NODE:-4}"
@@ -63,6 +65,7 @@ CMD=(
 CMD+=("$@")
 
 printf 'Repository: %s\nTOML: %s\nOutput: %s\n' "$REPO_ROOT" "$TOML_PATH" "$OUTPUT_ROOT"
+printf 'CPU allocator settings: MALLOC_ARENA_MAX=%s MIMALLOC_PURGE_DELAY=%s\n' "$MALLOC_ARENA_MAX" "$MIMALLOC_PURGE_DELAY"
 printf 'Sources: %s\nAgiBot statistics: %s\nEgoSuite statistics: %s\n' \
     "$ACTION_SOURCES_FILE" "$AGIBOT_GROUP_STATS_PATH" "$EGOSUITE_GROUP_STATS_PATH"
 printf 'Command: '
