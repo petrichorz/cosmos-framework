@@ -35,7 +35,7 @@ class ActionTrainingRange:
 class SegmentLeRobotDataset(BaseActionLeRobotDataset):
     """一个实例对应一个 LeRobot 根目录；返回尚未编码、归一化的绝对量。
 
-    连续读取源数据时间步，保持源 FPS；视频专用抽帧由后续 block 处理执行。
+    数值数据连续读取并保持源 FPS；可在读取时按 geometry 抽视频帧，显式携带 observation 索引。
     相机组合通过 video_view 配置；未配置时只读取数值。
     """
 
@@ -54,12 +54,14 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         tolerance_s: float = 1e-4,
         video_backend: str | None = None,
         table_backend: str = "parquet",
+        early_video_sampling: bool = False,
         video_view: VideoViewConfig | None = None,
         viewpoint: str | None = None,
     ):
         if table_backend not in ("parquet", "hf"):
             raise ValueError("table_backend must be parquet or hf")
         self.table_backend = table_backend
+        self.early_video_sampling = early_video_sampling
         meta = LeRobotDatasetMetadata(repo_id="local", root=root, revision="local", use_hf_cache=table_backend == "hf")
         self._direct_meta = meta if table_backend == "parquet" else None
         self._pyav_resize = video_backend == "pyav_resize"
@@ -285,7 +287,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         return None
 
     def _read_video(self, ds, episode_id, timestamps, *, viewpoint):
-        """按配置读取并组合视角，不做时间下采样。"""
+        """按给定视频时间戳读取并组合视角。"""
         return (
             self.video_view.read(ds, episode_id, timestamps, viewpoint=viewpoint)
             if self.video_view is not None
@@ -336,7 +338,11 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # action 时间标记区间起点；目标实际读取时刻由 read_options 声明。
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
         viewpoint = self._viewpoint
-        video = self._read_video(ds, episode_id, times.tolist(), viewpoint=viewpoint)
+        video_indexes = (
+            torch.arange(0, actions + 1, self.planner.geometry.video_stride) if self.early_video_sampling else None
+        )
+        video_times = times if video_indexes is None else times[video_indexes]
+        video = self._read_video(ds, episode_id, video_times.tolist(), viewpoint=viewpoint)
         caption = self._caption_for_index(idx)
         if caption is None:
             caption = str(ds.meta.tasks.iloc[int(task)].name)
@@ -362,6 +368,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             viewpoint=viewpoint,
             additional_view_description=self.video_view.describe(viewpoint=viewpoint) if self.video_view else "",
         )
+        if video is not None and video_indexes is not None:
+            sample["video_observation_indexes"] = video_indexes
         return sample
 
     def _read_parquet_segment(self, ds, start, actions):
