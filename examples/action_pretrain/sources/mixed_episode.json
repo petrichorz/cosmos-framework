@@ -16,7 +16,7 @@
       },
       "split_val_ratio": 0,
       "statistics_path": "${AGIBOT_GROUP_STATS_PATH}",
-      "weight": 4976
+      "weight": 1
     },
     {
       "reader": "egosuite",
@@ -34,7 +34,7 @@
       },
       "split_val_ratio": 0,
       "statistics_path": "${EGOSUITE_GROUP_STATS_PATH}",
-      "weight": 4
+      "weight": 1
     }
   ]
 }
