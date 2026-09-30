@@ -2,6 +2,7 @@
   "sources": [
     {
       "reader": "egosuite",
+      "use_subtask": false,
       "root": "${EGOSUITE_ROOT}",
       "viewpoint": "ego_view",
       "target_semantics": "preprocessed_next_state",
