@@ -344,3 +344,31 @@ def test_missing_subtasks_match_episode_mode(monkeypatch, tmp_path, metadata):
     assert reader._segments == baseline._segments
     assert reader._range_captions == baseline._range_captions
     assert reader.planner.discarded_action_steps == baseline.planner.discarded_action_steps
+
+
+@pytest.mark.parametrize(
+    "last_config",
+    [
+        [{"start_frame": 20, "end_frame": 52, "action_text": "last caption"}],
+        None,
+        [{"start_frame": 0, "end_frame": 200, "action_text": "invalid"}],
+    ],
+)
+def test_duplicate_episode_warns_and_uses_last_record(monkeypatch, tmp_path, last_config):
+    (tmp_path / "meta").mkdir()
+    first = {"episode_index": 0, "action_config": [{"start_frame": 0, "end_frame": 32, "action_text": "first caption"}]}
+    last = {"episode_index": 0, "action_config": last_config}
+    path = tmp_path / "meta/episodes.jsonl"
+    path.write_text(json.dumps(last))
+    if last_config is not None and last_config[0]["end_frame"] <= 100:
+        expected, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path, use_subtask=True)
+    else:
+        expected, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path)
+    path.write_text("\n".join(json.dumps(row) for row in [first, last]))
+    with pytest.warns(UserWarning) as caught:
+        reader, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path, use_subtask=True)
+    assert any("Duplicate episode 0" in str(w.message) for w in caught)
+    assert reader._segments == expected._segments
+    assert reader._range_captions == expected._range_captions
+    for i in range(len(reader)):
+        assert reader[i]["ai_caption"] == expected[i]["ai_caption"]

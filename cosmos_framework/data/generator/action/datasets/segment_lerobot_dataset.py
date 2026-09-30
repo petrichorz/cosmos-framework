@@ -145,7 +145,11 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                         values[episode_id] = fps
                     if self.use_subtask:
                         if episode_id in ranges:
-                            raise ValueError(f"Duplicate episode {episode_id} in {path}")
+                            warnings.warn(
+                                f"Duplicate episode {episode_id} in {path}: overwriting previous subtask annotations",
+                                UserWarning,
+                                stacklevel=2,
+                            )
                         ep = meta.episodes[episode_id]
                         length = int(ep["dataset_to_index"]) - int(ep["dataset_from_index"])
                         annotations = episode.get("action_config")
