@@ -50,6 +50,7 @@ def get_causal_action_dataset(
     sources_file,
     template,
     table_backend="parquet",
+    early_video_sampling=True,
     actions_per_block=32,
     video_stride=4,
     max_action_steps=96,
@@ -107,6 +108,7 @@ def get_causal_action_dataset(
                 tolerance_s=source.get("tolerance_s", 1e-4),
                 video_backend=source.get("video_backend", "pyav_resize"),
                 table_backend=source.get("table_backend", table_backend),
+                early_video_sampling=source.get("early_video_sampling", early_video_sampling),
             )
             if not len(reader):
                 raise ValueError(f"No complete training segments: {root}")
