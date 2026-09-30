@@ -354,7 +354,7 @@ def test_missing_subtasks_match_episode_mode(monkeypatch, tmp_path, metadata):
         [{"start_frame": 0, "end_frame": 200, "action_text": "invalid"}],
     ],
 )
-def test_duplicate_episode_warns_and_uses_last_record(monkeypatch, tmp_path, last_config):
+def test_duplicate_episode_logs_error_and_uses_last_record(monkeypatch, tmp_path, last_config, caplog):
     (tmp_path / "meta").mkdir()
     first = {"episode_index": 0, "action_config": [{"start_frame": 0, "end_frame": 32, "action_text": "first caption"}]}
     last = {"episode_index": 0, "action_config": last_config}
@@ -365,9 +365,8 @@ def test_duplicate_episode_warns_and_uses_last_record(monkeypatch, tmp_path, las
     else:
         expected, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path)
     path.write_text("\n".join(json.dumps(row) for row in [first, last]))
-    with pytest.warns(UserWarning) as caught:
-        reader, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path, use_subtask=True)
-    assert any("Duplicate episode 0" in str(w.message) for w in caught)
+    reader, _ = make_reader(monkeypatch, lengths=(100,), root=tmp_path, use_subtask=True)
+    assert any(r.levelname == "ERROR" and "Duplicate episode 0" in r.message for r in caplog.records)
     assert reader._segments == expected._segments
     assert reader._range_captions == expected._range_captions
     for i in range(len(reader)):

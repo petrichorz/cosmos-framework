@@ -2,6 +2,7 @@
 """Template-independent, variable-length LeRobot segment reader."""
 
 import json
+import logging
 import math
 import warnings
 from bisect import bisect_right
@@ -21,6 +22,8 @@ from cosmos_framework.data.generator.action.datasets.direct_parquet import Direc
 from cosmos_framework.data.generator.action.sample_contract import ActionReadOptions
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -145,10 +148,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                         values[episode_id] = fps
                     if self.use_subtask:
                         if episode_id in ranges:
-                            warnings.warn(
-                                f"Duplicate episode {episode_id} in {path}: overwriting previous subtask annotations",
-                                UserWarning,
-                                stacklevel=2,
+                            logger.error(
+                                "Duplicate episode %s in %s: overwriting previous subtask annotations", episode_id, path
                             )
                         ep = meta.episodes[episode_id]
                         length = int(ep["dataset_to_index"]) - int(ep["dataset_from_index"])
