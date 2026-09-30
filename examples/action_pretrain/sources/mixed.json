@@ -2,7 +2,7 @@
   "sources": [
     {
       "reader": "agibot",
-      "use_subtask": false,
+      "use_subtask": true,
       "root": "${AGIBOT_ROOT}",
       "viewpoint": "concat_view",
       "target_semantics": "next_state",
@@ -20,7 +20,7 @@
     },
     {
       "reader": "egosuite",
-      "use_subtask": false,
+      "use_subtask": true,
       "root": "${EGOSUITE_ROOT}",
       "viewpoint": "ego_view",
       "target_semantics": "preprocessed_next_state",
