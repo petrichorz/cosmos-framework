@@ -3,6 +3,7 @@ from itertools import islice
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from cosmos_framework.data.generator.action.datasets.causal_action_mixture import CausalActionMixture
 
@@ -70,3 +71,44 @@ def test_incompatible_templates_fail_before_iteration():
     other.template = SimpleNamespace(template_id="different", width=3)
     with pytest.raises(ValueError, match="same action template"):
         CausalActionMixture([Source([16]), other])
+
+
+@pytest.mark.parametrize("error", [OSError("read failed"), ValueError("transform failed")])
+def test_bad_sample_logs_and_continues(error, caplog):
+    class BrokenSource(Source):
+        def __getitem__(self, index):
+            if index == 0:
+                raise error
+            return index
+
+    stream = CausalActionMixture._source_stream(BrokenSource([3]), 42, 0, 1)
+    assert list(islice(stream, 4)) == [1, 2, 1, 2]
+    assert "index=0" in caplog.text
+    assert any(r.levelname == "ERROR" and r.exc_info for r in caplog.records)
+
+
+def test_failed_epoch_retries_same_source(caplog):
+    class RecoveringSource(Source):
+        calls = 0
+
+        def __getitem__(self, index):
+            self.calls += 1
+            if self.calls <= len(self):
+                raise OSError("temporarily unavailable")
+            return index
+
+    source = RecoveringSource([3])
+    stream = iter(CausalActionMixture([source]))
+    assert list(islice(stream, 3)) == [0, 1, 2]
+    assert source.calls == 6
+    assert sum(r.levelname == "ERROR" for r in caplog.records) == 3
+
+
+@pytest.mark.parametrize("error", [MemoryError("oom"), torch.OutOfMemoryError("oom"), KeyboardInterrupt()])
+def test_resource_errors_and_interrupts_are_not_skipped(error):
+    class BrokenSource(Source):
+        def __getitem__(self, index):
+            raise error
+
+    with pytest.raises(type(error)):
+        next(iter(CausalActionMixture([BrokenSource([2])])))

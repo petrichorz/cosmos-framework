@@ -3,6 +3,7 @@
 
 import json
 import math
+import warnings
 from bisect import bisect_right
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -90,7 +91,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         self.template = template
         self.read_options = read_options
         self.source_contract = replace(source_contract, fps=fps, split=self.split)
-        self._episode_fps, self._subtask_ranges = self._load_episode_metadata(Path(root), meta.total_episodes)
+        self._episode_fps, self._subtask_ranges = self._load_episode_metadata(Path(root), meta)
         self.unannotated_observation_frames = 0
         # 索引计数属于当前 Reader，不修改调用方或其他 Reader 的 planner。
         self.planner = SegmentPlanner(
@@ -115,13 +116,12 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 建完索引只需范围 caption，释放临时标注边界，不缓存完整 JSONL。
         self._subtask_ranges.clear()
 
-    def _load_episode_metadata(self, root, total_episodes):
+    def _load_episode_metadata(self, root, meta):
         """流式读取 FPS 和可选 subtask；episode ID 从 0 连续编号。"""
+        total_episodes = meta.total_episodes
         values = np.full(total_episodes, np.nan, dtype=np.float32)
         ranges = {}
         path = root / "meta" / "episodes.jsonl"
-        if self.use_subtask and not path.is_file():
-            raise FileNotFoundError(f"use_subtask requires {path}")
         if path.is_file():
             with path.open() as file:
                 for line in file:
@@ -146,21 +146,36 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                     if self.use_subtask:
                         if episode_id in ranges:
                             raise ValueError(f"Duplicate episode {episode_id} in {path}")
+                        ep = meta.episodes[episode_id]
+                        length = int(ep["dataset_to_index"]) - int(ep["dataset_from_index"])
                         annotations = episode.get("action_config")
-                        if not isinstance(annotations, list) or not annotations:
-                            raise ValueError(f"Episode {episode_id} in {path}: use_subtask requires action_config")
-                        parsed = []
-                        for i, annotation in enumerate(annotations):
-                            start, stop = annotation.get("start_frame"), annotation.get("end_frame")
-                            caption = annotation.get("action_text")
-                            if type(start) is not int or type(stop) is not int:
-                                raise ValueError(
-                                    f"Episode {episode_id}, subtask {i} in {path}: frame bounds must be integers"
-                                )
-                            if not isinstance(caption, str) or not caption.strip():
-                                raise ValueError(f"Episode {episode_id}, subtask {i} in {path}: action_text is empty")
-                            parsed.append(ActionTrainingRange(start, stop, caption, str(i)))
-                        ranges[episode_id] = parsed
+                        try:
+                            if not isinstance(annotations, list) or not annotations:
+                                raise ValueError("action_config must be a non-empty list")
+                            parsed, previous_stop = [], 0
+                            for i, annotation in enumerate(annotations):
+                                if not isinstance(annotation, dict):
+                                    raise ValueError(f"subtask {i} must be an object")
+                                start, stop = annotation.get("start_frame"), annotation.get("end_frame")
+                                caption = annotation.get("action_text")
+                                if type(start) is not int or type(stop) is not int:
+                                    raise ValueError(f"subtask {i} frame bounds must be integers")
+                                if not previous_stop <= start < stop <= length:
+                                    raise ValueError(
+                                        f"subtask {i} bounds must be ordered, non-overlapping and within the episode"
+                                    )
+                                if not isinstance(caption, str) or not caption.strip():
+                                    raise ValueError(f"subtask {i} action_text must be non-empty text")
+                                parsed.append(ActionTrainingRange(start, stop, caption, str(i)))
+                                previous_stop = stop
+                            ranges[episode_id] = parsed
+                        except ValueError as error:
+                            warnings.warn(
+                                f"Episode {episode_id} in {self.source_contract.source}: falling back to episode mode: {error}",
+                                UserWarning,
+                                stacklevel=2,
+                            )
+                            ranges[episode_id] = [ActionTrainingRange(0, length)]
         values.setflags(write=False)
         return values, ranges
 
@@ -170,22 +185,21 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         return self.fps if np.isnan(fps) else float(fps)
 
     def _iter_training_ranges(self, episode_id, episode_length):
-        """建索引时选择 episode 或原标注范围；未标注区域不独立生成样本。"""
+        """返回已校验的范围；缺少元数据记录时也回退到 episode。"""
         if not self.use_subtask:
             yield ActionTrainingRange(0, episode_length)
             return
         ranges = self._subtask_ranges.get(episode_id)
-        if not ranges:
-            raise ValueError(f"Episode {episode_id} in {self.source_contract.source}: missing subtask annotations")
-        previous_stop = covered = 0
+        if ranges is None:
+            warnings.warn(
+                f"Episode {episode_id} in {self.source_contract.source}: falling back to episode mode: missing metadata",
+                UserWarning,
+                stacklevel=2,
+            )
+            ranges = [ActionTrainingRange(0, episode_length)]
+        covered = 0
         for training_range in ranges:
-            if not previous_stop <= training_range.start < training_range.stop <= episode_length:
-                raise ValueError(
-                    f"Episode {episode_id} in {self.source_contract.source}, subtask {training_range.segment_id}: "
-                    "bounds must be ordered, non-overlapping and within the episode"
-                )
             covered += training_range.stop - training_range.start
-            previous_stop = training_range.stop
             yield training_range
         self.unannotated_observation_frames += episode_length - covered
 
@@ -240,7 +254,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                 lo, hi = training_range.start, training_range.stop
                 if not 0 <= lo <= hi <= count:
                     raise ValueError(f"Episode {episode_id}: training range [{lo}, {hi}) outside [0, {count})")
-                if self.use_subtask:
+                is_subtask = training_range.segment_id is not None
+                if is_subtask:
                     first, stop = self._subtask_read_bounds(training_range, count)
                 else:
                     # episode 模式及统计保持原索引与截尾规则。
@@ -252,7 +267,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                     source_id=str(meta.root),
                     episode_id=episode_id,
                     segment_id=training_range.segment_id,
-                    preserve_tail=self.use_subtask,
+                    preserve_tail=is_subtask,
                 )
                 for start, actions in planned:
                     self._segments.append((ds_idx, episode_id, begin + start, actions))
@@ -260,7 +275,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                     # 父类 get_shuffle_blocks 据此分组；默认 episode 模式的分组不变。
                     self._episode_cum_ends.append(len(self._segments))
                     self._range_captions.append(training_range.caption)
-                    if self.use_subtask:
+                    if is_subtask:
                         self._range_bounds.append((lo, hi, first, stop))
         self._num_valid_indices = len(self._segments)
 

@@ -8,8 +8,6 @@ import random
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
-from cosmos_framework.data.generator.action.sample_contract import ActionSampleReadError
-
 logger = logging.getLogger(__name__)
 
 
@@ -70,9 +68,11 @@ class CausalActionMixture(IterableDataset):
                 for index in range(first, start + length, total_shards):
                     try:
                         yield dataset[index]
-                    except ActionSampleReadError:
+                    except (MemoryError, torch.OutOfMemoryError):
+                        raise
+                    except Exception:
                         logger.error(
-                            "Skipping unreadable action sample: shard=%s/%s epoch=%s index=%s",
+                            "Skipping unreadable or unprocessable action sample: shard=%s/%s epoch=%s index=%s",
                             shard,
                             total_shards,
                             epoch,

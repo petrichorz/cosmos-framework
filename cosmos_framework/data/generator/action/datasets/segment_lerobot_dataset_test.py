@@ -282,3 +282,65 @@ def test_resized_video_conversion_is_opt_in(monkeypatch):
     assert reader._convert_video(None) is None
     reader._skip_video_loading = True
     assert reader._convert_video(frames) is None
+
+
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        None,
+        [],
+        {},
+        "bad",
+        [None],
+        [{"start_frame": 0, "end_frame": 32}],
+        [{"start_frame": True, "end_frame": 32, "action_text": "bad"}],
+        [{"start_frame": -1, "end_frame": 32, "action_text": "bad"}],
+        [{"start_frame": 20, "end_frame": 20, "action_text": "bad"}],
+        [{"start_frame": 0, "end_frame": 101, "action_text": "bad"}],
+        [{"start_frame": 0, "end_frame": 32, "action_text": " "}],
+        [
+            {"start_frame": 0, "end_frame": 40, "action_text": "valid first"},
+            {"start_frame": 39, "end_frame": 65, "action_text": "overlap"},
+        ],
+    ],
+)
+@pytest.mark.parametrize("offset", [-2, 0, 1, 3])
+def test_invalid_subtask_falls_back_only_affected_episode(monkeypatch, tmp_path, bad_config, offset):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    first = {"episode_index": 0}
+    if bad_config is not None:
+        first["action_config"] = bad_config
+    second = {
+        "episode_index": 1,
+        "action_config": [{"start_frame": 10, "end_frame": 42, "action_text": "valid subtask"}],
+    }
+    (meta / "episodes.jsonl").write_text("\n".join(json.dumps(x) for x in [first, second]))
+    baseline, _ = make_reader(monkeypatch, lengths=(100, 100), root=tmp_path, offset=offset)
+    with pytest.warns(UserWarning, match="Episode 0.*falling back to episode mode"):
+        reader, _ = make_reader(monkeypatch, lengths=(100, 100), root=tmp_path, offset=offset, use_subtask=True)
+    assert [s for s in reader._segments if s[1] == 0] == [s for s in baseline._segments if s[1] == 0]
+    for index, segment in enumerate(reader._segments):
+        sample = reader[index]
+        if segment[1] == 0:
+            assert sample["ai_caption"] == "test task"
+            expected = baseline[index]
+            for key in ["action_target", "state_trajectory", "state_timestamps", "action_timestamps"]:
+                torch.testing.assert_close(sample[key], expected[key])
+        else:
+            assert sample["ai_caption"] == "valid subtask"
+    assert len(reader._range_bounds) == 1
+
+
+@pytest.mark.parametrize("metadata", [None, "", '{"episode_index": 0, "action_config": null}\n'])
+def test_missing_subtasks_match_episode_mode(monkeypatch, tmp_path, metadata):
+    if metadata is not None:
+        (tmp_path / "meta").mkdir()
+        (tmp_path / "meta/episodes.jsonl").write_text(metadata)
+    baseline, _ = make_reader(monkeypatch, lengths=(50, 50), root=tmp_path)
+    with pytest.warns(UserWarning, match="falling back to episode mode") as warnings:
+        reader, _ = make_reader(monkeypatch, lengths=(50, 50), root=tmp_path, use_subtask=True)
+    assert len(warnings) == 2
+    assert reader._segments == baseline._segments
+    assert reader._range_captions == baseline._range_captions
+    assert reader.planner.discarded_action_steps == baseline.planner.discarded_action_steps
