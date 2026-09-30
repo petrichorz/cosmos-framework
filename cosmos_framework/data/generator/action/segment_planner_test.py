@@ -36,6 +36,22 @@ def test_short_episode_keeps_beginning_and_truncates_end(frames, kept, discarded
     assert p.skipped_ranges == 0
 
 
+@pytest.mark.parametrize("block_actions", [16, 32])
+def test_preserve_tail_covers_all_actions_without_duplicate_windows(block_actions):
+    geometry = CausalBlockGeometry(actions_per_block=block_actions, temporal_compression_factor=4)
+    for frames in range(block_actions + 1, 260):
+        p = planner(length=block_actions * 3, overlap=7, geometry=geometry)
+        segments = p.plan(frames, observation_start=11, preserve_tail=True)
+        covered = set()
+        for start, actions in segments:
+            assert actions % block_actions == 0 and actions <= p.max_action_steps
+            assert 11 <= start and start + actions < 11 + frames
+            covered.update(range(start, start + actions))
+        assert covered == set(range(11, 11 + frames - 1))
+        assert len(segments) == len(set(segments))
+        assert p.discarded_action_steps == p.skipped_ranges == 0
+
+
 @pytest.mark.parametrize("frames", [0, 1, 2, 32])
 def test_too_short_warns_with_source_and_range_then_skips(frames):
     p = planner()

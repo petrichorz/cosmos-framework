@@ -99,6 +99,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         self._segments: list[tuple[int, int, int, int]] = []  # ds、episode、源表起点、action 数
         # 每个保留范围只存一次文本；累计终点同时用于 shuffle 和片段到范围的查找。
         self._range_captions: list[str | None] = []
+        # 每个保留 subtask 的 (标注起点, 标注终点, 读取起点, 读取终点)，不按窗口重复存储。
+        self._range_bounds: list[tuple[int, int, int, int]] = []
         self._masks: tuple[torch.Tensor, torch.Tensor] | None = None
         self._register_source(
             root=str(root),
@@ -166,7 +168,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         return self.fps if np.isnan(fps) else float(fps)
 
     def _iter_training_ranges(self, episode_id, episode_length):
-        """建索引时选择 episode 或标注范围；未标注 observation 不参与训练。"""
+        """建索引时选择 episode 或原标注范围；未标注区域不独立生成样本。"""
         if not self.use_subtask:
             yield ActionTrainingRange(0, episode_length)
             return
@@ -190,6 +192,27 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         if idx < 0:
             idx += len(self._segments)
         return self._range_captions[bisect_right(self._episode_cum_ends, idx)]
+
+    def _subtask_read_bounds(self, training_range, episode_length):
+        """覆盖标注内的合法动作起点，优先向后补真实帧，不足再向前补。"""
+        offset = self.read_options.action_time_offset_steps
+        episode_first = max(0, -offset)
+        episode_stop = max(episode_first, min(episode_length, episode_length + 1 - offset))
+        first = max(training_range.start, episode_first)
+        # 包含标注末帧动作的终点，避免已整除的 subtask 仍漏掉衔接动作。
+        stop = max(first, min(training_range.stop + 1, episode_stop))
+        if stop == first:
+            return first, stop
+
+        block_actions = self.planner.geometry.actions_per_block
+        actions = stop - first - 1
+        required_frames = max(1, (actions + block_actions - 1) // block_actions) * block_actions + 1
+        missing = required_frames - (stop - first)
+        after = min(missing, episode_stop - stop)
+        stop += after
+        first -= min(missing - after, first - episode_first)
+        # 整个 episode 也无法补齐时，由 planner 的重叠尾窗覆盖剩余动作。
+        return first, stop
 
     def _append_index_records(self, *, meta, ds_idx, dataset_label=None):
         """先排除目标偏移导致的越界，再在对齐网格上规划片段。"""
@@ -215,15 +238,19 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                 lo, hi = training_range.start, training_range.stop
                 if not 0 <= lo <= hi <= count:
                     raise ValueError(f"Episode {episode_id}: training range [{lo}, {hi}) outside [0, {count})")
-                # observation 和偏移后的目标都留在当前范围；offset=1 使用已有终点。
-                first = lo + max(0, -offset)
-                stop = max(first, min(hi, hi + 1 - offset))
+                if self.use_subtask:
+                    first, stop = self._subtask_read_bounds(training_range, count)
+                else:
+                    # episode 模式及统计保持原索引与截尾规则。
+                    first = lo + max(0, -offset)
+                    stop = max(first, min(hi, hi + 1 - offset))
                 planned = self.planner.plan(
                     stop - first,
                     observation_start=first,
                     source_id=str(meta.root),
                     episode_id=episode_id,
                     segment_id=training_range.segment_id,
+                    preserve_tail=self.use_subtask,
                 )
                 for start, actions in planned:
                     self._segments.append((ds_idx, episode_id, begin + start, actions))
@@ -231,6 +258,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                     # 父类 get_shuffle_blocks 据此分组；默认 episode 模式的分组不变。
                     self._episode_cum_ends.append(len(self._segments))
                     self._range_captions.append(training_range.caption)
+                    if self.use_subtask:
+                        self._range_bounds.append((lo, hi, first, stop))
         self._num_valid_indices = len(self._segments)
 
     def _resolve_index(self, idx):
