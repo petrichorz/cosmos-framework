@@ -17,6 +17,7 @@ class ActionDataSetting:
     template: str = "cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
     sources_file: str = "examples/action_pretrain/sources/mixed.json"
     table_backend: str = "parquet"
+    early_video_sampling: bool = True
     actions_per_block: int = 32
     max_action_steps: int = 96
     overlap_action_steps: int = 16

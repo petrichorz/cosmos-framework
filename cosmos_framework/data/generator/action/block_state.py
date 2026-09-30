@@ -197,9 +197,17 @@ def build_block_sample(raw, *, template, planner, history_blocks, statistics=Non
     # 保留首帧并按 stride 抽视频帧；action 不抽帧，此处不执行 VAE 编码。
     video = raw.get("video")
     if video is not None:
-        if video.ndim != 4 or video.shape[1] != n + 1:
-            raise ValueError("Video must contain T+1 observations before subsampling")
-        video = video[:, :: geometry.video_stride].contiguous()
+        indexes = raw.get("video_observation_indexes")
+        if indexes is None:
+            if video.ndim != 4 or video.shape[1] != n + 1:
+                raise ValueError("Video must contain T+1 observations before subsampling")
+            video = video[:, :: geometry.video_stride].contiguous()
+        else:
+            expected = torch.arange(0, n + 1, geometry.video_stride, device=indexes.device)
+            if indexes.dtype != torch.int64 or not torch.equal(indexes, expected):
+                raise ValueError("Video observation indexes must match the block geometry")
+            if video.ndim != 4 or video.shape[1] != len(expected):
+                raise ValueError("Video frames must match video observation indexes")
     # 视频 FPS 随抽帧降低，action FPS 保持 Reader 提供的训练频率。
     fps = float(raw["conditioning_fps"])
     result = dict(
@@ -209,4 +217,5 @@ def build_block_sample(raw, *, template, planner, history_blocks, statistics=Non
         conditioning_fps=torch.tensor(geometry.video_fps(fps), dtype=torch.float32),
         conditioning_fps_action=torch.tensor(geometry.action_fps(fps), dtype=torch.float32),
     )
+    result.pop("video_observation_indexes", None)
     return result, metadata

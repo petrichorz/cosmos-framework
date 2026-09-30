@@ -175,8 +175,8 @@ def decode_video_frames_pyav_resized(
 ) -> torch.Tensor:
     """pyav 后端在解码阶段直接 resize（bicubic），返回 uint8 [0,255] TCHW。
 
-    镜像 ``decode_video_frames_torchvision`` 的时间戳选择逻辑，区别在于每解出一帧
-    AVFrame 就调用 ``frame.reformat`` 一步完成 yuv→rgb24 + 缩放到 (resize_h, resize_w)，
+    沿用最近时间戳选帧语义；仅对选中的 AVFrame 调用 ``frame.reformat``，
+    一步完成 yuv→rgb24 + 缩放到 (resize_h, resize_w)，
     不再产出全分辨率中间 tensor。
 
     返回 ``[T, 3, resize_h, resize_w]`` uint8 ∈ [0,255]（已 resize）。
@@ -188,8 +188,31 @@ def decode_video_frames_pyav_resized(
     video_path = str(video_path)
     first_ts = min(timestamps)
     last_ts = max(timestamps)
-    loaded_frames: list[torch.Tensor] = []
-    loaded_ts: list[float] = []
+    # Match each query against adjacent decoded timestamps. Keep only requested
+    # RGB frames; intermediate AVFrames are needed for inter-frame codecs but
+    # must not accumulate in an RGB list before temporal subsampling.
+    order = sorted(range(len(timestamps)), key=timestamps.__getitem__)
+    selected: list[torch.Tensor | None] = [None] * len(timestamps)
+    cursor = 0
+    previous = None
+    previous_ts = None
+    converted_frame = None
+    converted_tensor = None
+
+    def select(frame, timestamp, query_index):
+        nonlocal converted_frame, converted_tensor
+        if not abs(timestamp - timestamps[query_index]) < tolerance_s:
+            raise FrameTimestampError(
+                f"No frame within tolerance={tolerance_s} for timestamp={timestamps[query_index]} "
+                f"in {video_path}; nearest={timestamp}"
+            )
+        if frame is not converted_frame:
+            resized = frame.reformat(
+                width=resize_w, height=resize_h, format="rgb24", interpolation=Interpolation.BICUBIC
+            )
+            converted_tensor = torch.from_numpy(resized.to_ndarray().copy()).permute(2, 0, 1)
+            converted_frame = frame
+        selected[query_index] = converted_tensor
 
     container = av.open(video_path, metadata_errors="ignore")
     try:
@@ -198,43 +221,33 @@ def decode_video_frames_pyav_resized(
         container.seek(offset, backward=True, any_frame=False, stream=stream)
         for frame in container.decode(video=0):
             if frame.pts is None:
-                # 个别编码的帧可能缺 pts，跳过以免 frame.pts * time_base 抛 TypeError
                 continue
             current_ts = float(frame.pts * frame.time_base)
-            resized = frame.reformat(
-                width=resize_w,
-                height=resize_h,
-                format="rgb24",
-                interpolation=Interpolation.BICUBIC,
-            )
-            # to_ndarray() 返回临时 numpy 数组，copy 一份避免悬空引用
-            loaded_frames.append(torch.from_numpy(resized.to_ndarray().copy()).permute(2, 0, 1))
-            loaded_ts.append(current_ts)
+            # Match the old argmin behavior: prefer the earlier decoded frame
+            # on ties, including duplicate presentation timestamps.
+            if previous_ts is not None and current_ts == previous_ts:
+                continue
+            while cursor < len(order) and timestamps[order[cursor]] <= current_ts:
+                query_index = order[cursor]
+                query_ts = timestamps[query_index]
+                if previous is not None and abs(previous_ts - query_ts) <= abs(current_ts - query_ts):
+                    select(previous, previous_ts, query_index)
+                else:
+                    select(frame, current_ts, query_index)
+                cursor += 1
+            previous, previous_ts = frame, current_ts
             if current_ts >= last_ts:
                 break
+        if previous is None:
+            raise FrameTimestampError(f"No frames decoded from video: {video_path}")
+        # EOF: the last decoded frame may still be within the requested tolerance.
+        while cursor < len(order):
+            select(previous, previous_ts, order[cursor])
+            cursor += 1
     finally:
         container.close()
 
-    # v3 视频有较大的 episode 时间偏移；float32 舍入可能超过帧匹配容差。
-    query_ts = torch.tensor(timestamps, dtype=torch.float64)
-    decoded_ts = torch.tensor(loaded_ts, dtype=torch.float64)
-    if not loaded_frames:
-        raise FrameTimestampError(f"No frames decoded from video: {video_path}")
-    distances = torch.cdist(query_ts[:, None], decoded_ts[:, None], p=1)
-    minimum, closest_indices = distances.min(1)
-    within_tolerance = minimum < tolerance_s
-    if not within_tolerance.all():
-        raise FrameTimestampError(
-            "One or several query timestamps unexpectedly violate the tolerance "
-            f"({minimum[~within_tolerance]} > tolerance_s={tolerance_s})."
-            f"\nqueried timestamps: {query_ts}"
-            f"\nloaded timestamps: {decoded_ts}"
-            f"\nvideo: {video_path}"
-            "\nbackend: pyav"
-        )
-
-    closest_frames = torch.stack([loaded_frames[index] for index in closest_indices])
-    return closest_frames
+    return torch.stack(selected)
 
 
 def decode_video_frames_torchvision(
