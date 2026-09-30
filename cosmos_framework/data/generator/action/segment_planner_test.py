@@ -50,6 +50,16 @@ def test_preserve_tail_covers_all_actions_without_duplicate_windows(block_action
         assert covered == set(range(11, 11 + frames - 1))
         assert len(segments) == len(set(segments))
         assert p.discarded_action_steps == p.skipped_ranges == 0
+        if frames - 1 < p.max_action_steps:
+            assert all(actions == (frames - 1) // block_actions * block_actions for _, actions in segments)
+
+
+@pytest.mark.parametrize(
+    "frames,expected",
+    [(181, [(0, 160), (20, 160)]), (161, [(0, 160)]), (33, [(0, 32)])],
+)
+def test_short_subtask_uses_maximum_windows_at_both_ends(frames, expected):
+    assert planner(length=896).plan(frames, preserve_tail=True) == expected
 
 
 @pytest.mark.parametrize("frames", [0, 1, 2, 32])
