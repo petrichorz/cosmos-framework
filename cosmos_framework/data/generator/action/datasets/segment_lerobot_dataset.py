@@ -3,7 +3,8 @@
 
 import json
 import math
-from dataclasses import replace
+from bisect import bisect_right
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,16 @@ from cosmos_framework.data.generator.action.segment_planner import SegmentPlanne
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
 
 
+@dataclass(frozen=True)
+class ActionTrainingRange:
+    """episode 内的 observation 半开范围；caption=None 沿用原任务文本。"""
+
+    start: int
+    stop: int
+    caption: str | None = None
+    segment_id: str | None = None
+
+
 class SegmentLeRobotDataset(BaseActionLeRobotDataset):
     """一个实例对应一个 LeRobot 根目录；返回尚未编码、归一化的绝对量。
 
@@ -36,6 +47,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         source_contract: TemplateSourceContract,
         planner: SegmentPlanner,
         read_options: ActionReadOptions = ActionReadOptions(),
+        use_subtask: bool = False,  # 仅训练按 action_config 切分；统计保持默认 episode 模式。
         split: str = "full",
         split_seed: int = 0,
         split_val_ratio: float = 0.0,
@@ -70,10 +82,14 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             viewpoint=viewpoint,
             tolerance_s=tolerance_s,
         )
+        if type(use_subtask) is not bool:
+            raise TypeError("use_subtask must be a bool")
+        self.use_subtask = use_subtask
         self.template = template
         self.read_options = read_options
         self.source_contract = replace(source_contract, fps=fps, split=self.split)
-        self._episode_fps = self._load_episode_fps(Path(root), meta.total_episodes)
+        self._episode_fps, self._subtask_ranges = self._load_episode_metadata(Path(root), meta.total_episodes)
+        self.unannotated_observation_frames = 0
         # 索引计数属于当前 Reader，不修改调用方或其他 Reader 的 planner。
         self.planner = SegmentPlanner(
             max_action_steps=planner.max_action_steps,
@@ -81,6 +97,10 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             geometry=planner.geometry,
         )
         self._segments: list[tuple[int, int, int, int]] = []  # ds、episode、源表起点、action 数
+        # 每个保留范围只存一次文本；累计终点同时用于 shuffle 和片段到范围的查找。
+        self._range_captions: list[str | None] = []
+        # 每个保留 subtask 的 (标注起点, 标注终点, 读取起点, 读取终点)，不按窗口重复存储。
+        self._range_bounds: list[tuple[int, int, int, int]] = []
         self._masks: tuple[torch.Tensor, torch.Tensor] | None = None
         self._register_source(
             root=str(root),
@@ -90,32 +110,109 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             prefetched_meta=meta,
         )
 
-    def _load_episode_fps(self, root, total_episodes):
-        """episode ID 从 0 连续编号；只缓存 float32 FPS，不保留 JSONL 内容。"""
+        # 建完索引只需范围 caption，释放临时标注边界，不缓存完整 JSONL。
+        self._subtask_ranges.clear()
+
+    def _load_episode_metadata(self, root, total_episodes):
+        """流式读取 FPS 和可选 subtask；episode ID 从 0 连续编号。"""
         values = np.full(total_episodes, np.nan, dtype=np.float32)
+        ranges = {}
         path = root / "meta" / "episodes.jsonl"
+        if self.use_subtask and not path.is_file():
+            raise FileNotFoundError(f"use_subtask requires {path}")
         if path.is_file():
             with path.open() as file:
                 for line in file:
                     if not line.strip():
                         continue
                     episode = json.loads(line)
-                    if "source_fps" not in episode:
+                    if not self.use_subtask and "source_fps" not in episode:
                         continue
                     episode_id = episode["episode_index"]
                     if type(episode_id) is not int or not 0 <= episode_id < total_episodes:
                         raise ValueError(f"episode_index out of range in {path}: {episode_id}")
-                    fps = episode["source_fps"]
-                    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or fps <= 0:
-                        raise ValueError(f"Invalid source_fps for episode {episode_id} in {path}: {fps}")
-                    values[episode_id] = fps
+                    if "source_fps" in episode:
+                        fps = episode["source_fps"]
+                        if (
+                            isinstance(fps, bool)
+                            or not isinstance(fps, (int, float))
+                            or not math.isfinite(fps)
+                            or fps <= 0
+                        ):
+                            raise ValueError(f"Invalid source_fps for episode {episode_id} in {path}: {fps}")
+                        values[episode_id] = fps
+                    if self.use_subtask:
+                        if episode_id in ranges:
+                            raise ValueError(f"Duplicate episode {episode_id} in {path}")
+                        annotations = episode.get("action_config")
+                        if not isinstance(annotations, list) or not annotations:
+                            raise ValueError(f"Episode {episode_id} in {path}: use_subtask requires action_config")
+                        parsed = []
+                        for i, annotation in enumerate(annotations):
+                            start, stop = annotation.get("start_frame"), annotation.get("end_frame")
+                            caption = annotation.get("action_text")
+                            if type(start) is not int or type(stop) is not int:
+                                raise ValueError(
+                                    f"Episode {episode_id}, subtask {i} in {path}: frame bounds must be integers"
+                                )
+                            if not isinstance(caption, str) or not caption.strip():
+                                raise ValueError(f"Episode {episode_id}, subtask {i} in {path}: action_text is empty")
+                            parsed.append(ActionTrainingRange(start, stop, caption, str(i)))
+                        ranges[episode_id] = parsed
         values.setflags(write=False)
-        return values
+        return values, ranges
 
     def _read_source_fps(self, episode_id):
         """按 episode ID 直接索引；NaN 表示未声明，回退到 meta.fps。"""
         fps = self._episode_fps[episode_id]
         return self.fps if np.isnan(fps) else float(fps)
+
+    def _iter_training_ranges(self, episode_id, episode_length):
+        """建索引时选择 episode 或原标注范围；未标注区域不独立生成样本。"""
+        if not self.use_subtask:
+            yield ActionTrainingRange(0, episode_length)
+            return
+        ranges = self._subtask_ranges.get(episode_id)
+        if not ranges:
+            raise ValueError(f"Episode {episode_id} in {self.source_contract.source}: missing subtask annotations")
+        previous_stop = covered = 0
+        for training_range in ranges:
+            if not previous_stop <= training_range.start < training_range.stop <= episode_length:
+                raise ValueError(
+                    f"Episode {episode_id} in {self.source_contract.source}, subtask {training_range.segment_id}: "
+                    "bounds must be ordered, non-overlapping and within the episode"
+                )
+            covered += training_range.stop - training_range.start
+            previous_stop = training_range.stop
+            yield training_range
+        self.unannotated_observation_frames += episode_length - covered
+
+    def _caption_for_index(self, idx):
+        """按范围查找文本，避免为重叠片段重复保存 caption。"""
+        if idx < 0:
+            idx += len(self._segments)
+        return self._range_captions[bisect_right(self._episode_cum_ends, idx)]
+
+    def _subtask_read_bounds(self, training_range, episode_length):
+        """覆盖标注内的合法动作起点，优先向后补真实帧，不足再向前补。"""
+        offset = self.read_options.action_time_offset_steps
+        episode_first = max(0, -offset)
+        episode_stop = max(episode_first, min(episode_length, episode_length + 1 - offset))
+        first = max(training_range.start, episode_first)
+        # 包含标注末帧动作的终点，避免已整除的 subtask 仍漏掉衔接动作。
+        stop = max(first, min(training_range.stop + 1, episode_stop))
+        if stop == first:
+            return first, stop
+
+        block_actions = self.planner.geometry.actions_per_block
+        actions = stop - first - 1
+        required_frames = max(1, (actions + block_actions - 1) // block_actions) * block_actions + 1
+        missing = required_frames - (stop - first)
+        after = min(missing, episode_stop - stop)
+        stop += after
+        first -= min(missing - after, first - episode_first)
+        # 整个 episode 也无法补齐时，由 planner 的重叠尾窗覆盖剩余动作。
+        return first, stop
 
     def _append_index_records(self, *, meta, ds_idx, dataset_label=None):
         """先排除目标偏移导致的越界，再在对齐网格上规划片段。"""
@@ -137,19 +234,32 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             ep = meta.episodes[episode_id]
             begin, end = int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
             count = end - begin
-            # 目标只对应前 T 个区间；offset=1 恰好使用已有的终点 observation。
-            first = max(0, -offset)
-            stop = max(first, min(count, count + 1 - offset))
-            planned = self.planner.plan(
-                stop - first,
-                observation_start=first,
-                source_id=str(meta.root),
-                episode_id=episode_id,
-            )
-            for start, actions in planned:
-                self._segments.append((ds_idx, episode_id, begin + start, actions))
-            if planned:
-                self._episode_cum_ends.append(len(self._segments))
+            for training_range in self._iter_training_ranges(episode_id, count):
+                lo, hi = training_range.start, training_range.stop
+                if not 0 <= lo <= hi <= count:
+                    raise ValueError(f"Episode {episode_id}: training range [{lo}, {hi}) outside [0, {count})")
+                if self.use_subtask:
+                    first, stop = self._subtask_read_bounds(training_range, count)
+                else:
+                    # episode 模式及统计保持原索引与截尾规则。
+                    first = lo + max(0, -offset)
+                    stop = max(first, min(hi, hi + 1 - offset))
+                planned = self.planner.plan(
+                    stop - first,
+                    observation_start=first,
+                    source_id=str(meta.root),
+                    episode_id=episode_id,
+                    segment_id=training_range.segment_id,
+                    preserve_tail=self.use_subtask,
+                )
+                for start, actions in planned:
+                    self._segments.append((ds_idx, episode_id, begin + start, actions))
+                if planned:
+                    # 父类 get_shuffle_blocks 据此分组；默认 episode 模式的分组不变。
+                    self._episode_cum_ends.append(len(self._segments))
+                    self._range_captions.append(training_range.caption)
+                    if self.use_subtask:
+                        self._range_bounds.append((lo, hi, first, stop))
         self._num_valid_indices = len(self._segments)
 
     def _resolve_index(self, idx):
@@ -227,6 +337,9 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
         viewpoint = self._viewpoint
         video = self._read_video(ds, episode_id, times.tolist(), viewpoint=viewpoint)
+        caption = self._caption_for_index(idx)
+        if caption is None:
+            caption = str(ds.meta.tasks.iloc[int(task)].name)
         # 沿用父类字典与 uint8 视频格式；action 暂为绝对目标，C06 再写入编码结果。
         sample = self._build_result(
             mode=None,
@@ -245,7 +358,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             conditioning_fps=torch.tensor(source_fps, dtype=torch.float32),
             source_fps=torch.tensor(source_fps, dtype=torch.float32),
             read_options=options,
-            ai_caption=str(ds.meta.tasks.iloc[int(task)].name),
+            ai_caption=caption,
             viewpoint=viewpoint,
             additional_view_description=self.video_view.describe(viewpoint=viewpoint) if self.video_view else "",
         )

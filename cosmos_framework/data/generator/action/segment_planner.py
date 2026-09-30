@@ -38,12 +38,14 @@ class SegmentPlanner:
         source_id: str = "",
         episode_id: int | None = None,
         segment_id: str | None = None,
+        preserve_tail: bool = False,
     ) -> list[tuple[int, int]]:
         """长范围尾段右对齐；短范围保留开头；过短范围 warning 并跳过。
 
         每条 (start, actions) 对应 observation[start:start+actions+1]。
         来源参数仅用于 warning；不检查标识格式，也不包装输出记录。
         丢弃计数仅含未覆盖的 action 间隔，不包含 overlap 的重复部分。
+        preserve_tail 用于 subtask：短范围有余量时，首尾各取一个最大合法窗口。
         """
         # 计算完整 block 能容纳的最大帧数，只算长度，此处不截断长 episode。
         usable_frames = self.geometry.max_complete_observation_frames(num_observation_frames)
@@ -65,8 +67,14 @@ class SegmentPlanner:
             self.discarded_action_steps += available_actions
             return []
 
-        # 短于最大片段：只生成一段，保留开头，裁掉末尾不足一个 block 的余量。
+        # 短范围默认截尾；subtask 保尾时，尾窗与前窗等长，保留尽可能多的上下文。
         if available_actions < self.max_action_steps:
+            if preserve_tail and num_observation_frames > usable_frames:
+                window_actions = usable_frames - 1
+                return [
+                    (observation_start, window_actions),
+                    (observation_start + available_actions - window_actions, window_actions),
+                ]
             self.discarded_action_steps += num_observation_frames - usable_frames
             return [(observation_start, usable_frames - 1)]
 

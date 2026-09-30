@@ -17,7 +17,7 @@ from cosmos_framework.data.generator.action.sample_contract import ActionReadOpt
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 
 
-def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, root="synthetic"):
+def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, root="synthetic", use_subtask=False):
     template = ActionStateTemplate55()
     size = sum(lengths)
     state = torch.arange(size, dtype=torch.float32)[:, None].expand(-1, template.width).clone()
@@ -67,8 +67,70 @@ def make_reader(monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, r
             max_action_steps=64, overlap_action_steps=16, geometry=CausalBlockGeometry(temporal_compression_factor=4)
         ),
         read_options=ActionReadOptions(action_from_state=from_state, action_time_offset_steps=offset),
+        use_subtask=use_subtask,
     )
     return reader, queries
+
+
+@pytest.mark.parametrize("offset", [-2, 0, 1, 3])
+@pytest.mark.parametrize("from_state", [False, True])
+def test_subtask_extension_covers_boundaries_and_keeps_targets_aligned(monkeypatch, tmp_path, offset, from_state):
+    annotations = [[(0, 33), (40, 177), (177, 181)], [(0, 65)]]
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    episodes = [
+        {
+            "episode_index": ep,
+            "action_config": [
+                {"start_frame": lo, "end_frame": hi, "action_text": f"{ep}/{i}"} for i, (lo, hi) in enumerate(ranges)
+            ],
+        }
+        for ep, ranges in enumerate(annotations)
+    ]
+    (meta / "episodes.jsonl").write_text("\n".join(json.dumps(ep) for ep in episodes))
+    reader, _ = make_reader(
+        monkeypatch, lengths=(181, 65), offset=offset, from_state=from_state, root=tmp_path, use_subtask=True
+    )
+    for (begin_idx, size), (lo, hi, first, stop) in zip(reader.get_shuffle_blocks(), reader._range_bounds):
+        covered = set()
+        for idx in range(begin_idx, begin_idx + size):
+            _, ep, start, actions = reader._segments[idx]
+            begin, end = ((0, 181), (181, 246))[ep]
+            covered.update(range(start - begin, start - begin + actions))
+            assert begin <= start and start + actions < end
+            assert begin <= start + offset and start + actions - 1 + offset < end
+            sample = reader[idx]
+            expected = torch.arange(start + offset, start + offset + actions).float()
+            torch.testing.assert_close(sample["action_target"][:, 0], expected + (0 if from_state else 1000))
+            torch.testing.assert_close(
+                sample["state_trajectory"][:, 0], torch.arange(start, start + actions + 1).float()
+            )
+            assert sample["ai_caption"] == reader._caption_for_index(begin_idx)
+        legal_end = min(end - begin - 1, end - begin - offset)
+        assert set(range(max(lo, -offset, 0), min(hi, legal_end))) <= covered
+        assert covered == set(range(first, stop - 1))
+    assert reader.planner.discarded_action_steps == reader.planner.skipped_ranges == 0
+
+
+@pytest.mark.parametrize(
+    "bounds,length,expected",
+    [
+        ((0, 181), 602, (0, 193)),
+        ((181, 421), 602, (181, 438)),
+        ((421, 602), 602, (409, 602)),
+        ((0, 33), 100, (0, 65)),  # 已整除也不能漏掉动作起点 32。
+        ((90, 99), 100, (67, 100)),
+        ((10, 11), 100, (10, 43)),
+        ((0, 181), 181, (0, 181)),  # 整个 episode 不够向上补齐，交给 planner 保尾。
+    ],
+)
+def test_subtask_borrows_forward_before_backward(bounds, length, expected):
+    reader = object.__new__(module.SegmentLeRobotDataset)
+    reader.read_options = ActionReadOptions(action_time_offset_steps=1)
+    reader.planner = SegmentPlanner(
+        max_action_steps=896, overlap_action_steps=16, geometry=CausalBlockGeometry(temporal_compression_factor=4)
+    )
+    assert reader._subtask_read_bounds(module.ActionTrainingRange(*bounds), length) == expected
 
 
 @pytest.mark.parametrize("offset", [-2, -1, 0, 1, 2, 3])
