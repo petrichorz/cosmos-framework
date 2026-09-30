@@ -2,6 +2,7 @@
   "sources": [
     {
       "reader": "agibot",
+      "use_subtask": false,
       "root": "${AGIBOT_ROOT}",
       "viewpoint": "concat_view",
       "target_semantics": "next_state",
