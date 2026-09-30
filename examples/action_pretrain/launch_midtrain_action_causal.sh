@@ -33,6 +33,10 @@ export AGIBOT_ROOT EGOSUITE_ROOT ACTION_SOURCES_FILE BASE_CHECKPOINT_PATH COSMOS
 export IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export COSMOS_DEVICE="${COSMOS_DEVICE:-npu}"
+# Release freed CPU tensor pages promptly in mimalloc-backed PyTorch builds.
+export MIMALLOC_PURGE_DELAY="${MIMALLOC_PURGE_DELAY:-0}"
+# Bound glibc arena retention in long-lived workers; callers can override the cap.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 TORCHRUN_ARGS=(
     --nproc_per_node="${NPROC_PER_NODE:-4}"
