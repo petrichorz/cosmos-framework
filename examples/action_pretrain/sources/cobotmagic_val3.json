@@ -1,0 +1,48 @@
+{
+  "sources": [
+    {
+      "reader": "cobotmagic",
+      "viewpoint": "concat_view",
+      "use_subtask": false,
+      "read_options": {
+        "state_key": "state_unified",
+        "action_key": "action_unified",
+        "state_mask_key": "mask_state",
+        "action_mask_key": "mask_action",
+        "action_from_state": true,
+        "action_time_offset_steps": 1
+      },
+      "statistics_path": "${POC_STATS_PATH}",
+      "weight": 1,
+      "root": "${WIRE_DATA_ROOT}",
+      "split_val_ratio": {
+        "factory-test_lerobot": 0.05,
+        "fatory_test_mp_lerobot": 0,
+        "test_1014_1_hby_lerobot": 0,
+        "test_1014_1_liujin_lerobot": 0
+      }
+    },
+    {
+      "reader": "cobotmagic",
+      "viewpoint": "concat_view",
+      "use_subtask": false,
+      "read_options": {
+        "state_key": "state_unified",
+        "action_key": "action_unified",
+        "state_mask_key": "mask_state",
+        "action_mask_key": "mask_action",
+        "action_from_state": true,
+        "action_time_offset_steps": 1
+      },
+      "statistics_path": "${POC_STATS_PATH}",
+      "weight": 1,
+      "root": "${BOX_DATA_ROOT}",
+      "split_val_ratio": {
+        "box_pick_left_1_lerobot": 0.05,
+        "box_pick_left_2_lerobot": 0,
+        "box_pick_right_1_lerobot": 0.05,
+        "box_pick_right_2_lerobot": 0
+      }
+    }
+  ]
+}

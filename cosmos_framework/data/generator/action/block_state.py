@@ -163,7 +163,10 @@ def build_block_sample(raw, *, template, planner, history_blocks, statistics=Non
     # 模板决定字段使用差值、相对旋转还是绝对目标。
     encoded = template.encode_action_delta(target, anchor_per_action, am)
     state_mask = sm.expand(blocks, -1)
-    action_mask = am.expand(n, -1)
+    time_mask = torch.as_tensor(raw.get("action_time_mask", torch.ones(n, dtype=torch.bool)), device=target.device)
+    if time_mask.dtype != torch.bool or time_mask.shape != (n,):
+        raise ValueError("Action time mask must be boolean [T]")
+    action_mask = am.expand(n, -1) & time_mask[:, None]
     states = anchors
     state_clip = action_clip = None
     # 先编码再分别归一化；anchors 保留原值，未传统计时可用于采集 q01/q99。
@@ -215,4 +218,5 @@ def build_block_sample(raw, *, template, planner, history_blocks, statistics=Non
         conditioning_fps_action=torch.tensor(geometry.action_fps(fps), dtype=torch.float32),
     )
     result.pop("video_observation_indexes", None)
+    result.pop("action_time_mask", None)
     return result, metadata

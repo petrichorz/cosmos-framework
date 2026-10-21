@@ -22,6 +22,7 @@ def main():
     p.add_argument("--video-stride", type=int, default=4)
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--split-seed", type=int, default=42, help="Dataset ordering seed; separate from --seed")
+    p.add_argument("--split", choices=["train", "val", "full"], default="train")
     p.add_argument("--resolution", default="480")
     p.add_argument("--output", required=True)
     p.add_argument("--steps", type=int, default=10)
@@ -115,6 +116,7 @@ def main():
         overlap_action_steps=args.overlap_action_steps,
         mode=args.mode,
         seed=args.split_seed,
+        split=args.split,
         resolution=args.resolution,
         cfg_dropout_rate=0,
         allow_mock_statistics=args.allow_mock_statistics,
@@ -190,6 +192,14 @@ def main():
         seconds=time.perf_counter() - started,
         peak_gib=torch.cuda.max_memory_allocated() / 2**30,
         mode=args.mode,
+        source_index=args.source_index,
+        sample_index=args.index,
+        checkpoint=args.checkpoint,
+        sources_file=args.sources_file,
+        seed=args.seed,
+        steps=args.steps,
+        guidance=args.guidance,
+        split=args.split,
         split_seed=args.split_seed,
         max_action_steps=args.max_action_steps,
         overlap_action_steps=args.overlap_action_steps,

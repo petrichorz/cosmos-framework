@@ -22,6 +22,7 @@ from .agibot_segment_lerobot_dataset import AgiBotSegmentLeRobotDataset
 from .causal_action_dataset_group import CausalActionDatasetGroup
 from .causal_action_mixture import CausalActionMixture
 from .causal_action_sft_dataset import CausalActionSFTDataset
+from .cobotmagic_segment_lerobot_dataset import CobotMagicSegmentLeRobotDataset
 from .egosuite_segment_lerobot_dataset import EgoSuiteSegmentLeRobotDataset
 from .robotwin_segment_lerobot_dataset import RoboTwinSegmentLeRobotDataset
 
@@ -29,6 +30,7 @@ READERS = {
     "agibot": AgiBotSegmentLeRobotDataset,
     "egosuite": EgoSuiteSegmentLeRobotDataset,
     "robotwin": RoboTwinSegmentLeRobotDataset,
+    "cobotmagic": CobotMagicSegmentLeRobotDataset,
 }
 
 
@@ -71,6 +73,7 @@ def get_causal_action_dataset(
     history_blocks_min=1,
     history_blocks_max=8,
     seed=42,
+    split="train",
     resolution="480",
     tokenizer_config=None,
     cfg_dropout_rate=0.1,
@@ -79,6 +82,8 @@ def get_causal_action_dataset(
     mock_delta_stats_path="",
 ):
     """来源文件只声明路径/读取规则；模板、geometry 和 transform 共用任务级配置。"""
+    if split not in ("train", "val", "full"):
+        raise ValueError("split must be train, val, or full")
     template = resolve_action_template(template)
     geometry = CausalBlockGeometry(
         actions_per_block=actions_per_block, video_stride=video_stride, temporal_compression_factor=4
@@ -113,7 +118,7 @@ def get_causal_action_dataset(
                 read_options=options,
                 use_subtask=source.get("use_subtask", False),
                 viewpoint=source["viewpoint"],
-                split="train",
+                split=split,
                 split_seed=seed,
                 split_val_ratio=source.get("split_val_ratio", 0.0),
                 tolerance_s=source.get("tolerance_s", 1e-4),
@@ -125,6 +130,8 @@ def get_causal_action_dataset(
                 reader.template = template
                 reader.planner.geometry = geometry
                 if not len(reader):
+                    if split == "val":
+                        continue
                     raise ValueError(f"No complete training segments: {root}")
                 statistics_path = source.get("statistics_path")
                 if statistics_path:
@@ -155,6 +162,8 @@ def get_causal_action_dataset(
                 )
                 children.append(dataset)
                 log.info(f"Action dataset: {root}; segments={len(dataset)}")
+            if not children:
+                raise ValueError(f"No complete {split} segments in source group: {source['root']}")
             datasets.append(CausalActionDatasetGroup(children))
             weights.append(source.get("weight", 1.0))
     return CausalActionMixture(datasets, weights, seed=seed)
