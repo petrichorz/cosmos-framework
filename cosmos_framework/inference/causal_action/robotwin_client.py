@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -295,17 +296,33 @@ def positive_int(value):
     return parsed
 
 
+def comma_separated(value):
+    values = [item.strip() for item in value.split(",")]
+    if any(not item for item in values):
+        raise argparse.ArgumentTypeError("Expected nonempty comma-separated values")
+    if len(values) != len(set(values)):
+        raise argparse.ArgumentTypeError("Duplicate comma-separated values are not allowed")
+    return values
+
+
+def control_modes(value):
+    values = comma_separated(value)
+    if any(item not in ("joint", "eef") for item in values):
+        raise argparse.ArgumentTypeError("Control modes must be 'joint' or 'eef'")
+    return values
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--robotwin-root", required=True, help="Path to the RoboTwin simulator repository")
     p.add_argument("--server-uri", default="ws://127.0.0.1:8000")
-    p.add_argument("--task-name", default="adjust_bottle")
-    p.add_argument("--task-config", default="demo_clean")
+    p.add_argument("--task-name", type=comma_separated, default="adjust_bottle", help="Comma-separated task names")
+    p.add_argument("--task-config", type=comma_separated, default="demo_clean", help="Comma-separated task configs")
     p.add_argument("--instruction", help="Override RoboTwin-generated instruction; reused across episodes")
     p.add_argument("--instruction-type", choices=["seen", "unseen"], help="Default: task config eval_instruction")
     p.add_argument("--seed", type=int, default=100000, help="First simulator seed; incremented after every attempt")
-    p.add_argument("--episodes", type=positive_int, default=1)
-    p.add_argument("--control-mode", choices=["joint", "eef"], default="joint")
+    p.add_argument("--episodes", type=positive_int, default=1, help="Episodes per task/config/control-mode combination")
+    p.add_argument("--control-mode", type=control_modes, default="joint", help="Comma-separated modes: joint, eef")
     p.add_argument("--state-source", choices=["command", "measured"], default="command")
     poses = p.add_mutually_exclusive_group()
     poses.add_argument("--eef-config", help="JSON with eef_pose_frame and optional T_world_base; default: world")
@@ -330,6 +347,18 @@ def main():
         pose_converter = RobotwinPoseConverter(**pose_config)
     # Resolve output before load_robotwin changes cwd for simulator asset loading.
     output = Path(args.output).expanduser().resolve()
+    args.robotwin_root = str(Path(args.robotwin_root).expanduser().resolve())
+    combinations = list(product(args.task_name, args.task_config, args.control_mode))
+    for task_name, task_config, control_mode in combinations:
+        run_args = argparse.Namespace(**vars(args))
+        run_args.task_name, run_args.task_config, run_args.control_mode = task_name, task_config, control_mode
+        run_output = output / task_name / task_config / control_mode if len(combinations) > 1 else output
+        print(f"Task {task_name}, config {task_config}, control mode {control_mode}, output: {run_output}", flush=True)
+        run(run_args, output=run_output, pose_converter=pose_converter)
+
+
+def run(args, *, output, pose_converter):
+    """Run one task/config/control-mode combination with its own connection and artifacts."""
     output.mkdir(parents=True, exist_ok=True)
     summary = dict(
         task=args.task_name,
@@ -411,6 +440,7 @@ def main():
                 requests_path.write_text(json.dumps(record.pop("requests"), ensure_ascii=False, indent=2))
                 record["requests_path"] = str(requests_path)
                 record["status"] = "finished"
+                print(json.dumps(record, ensure_ascii=False), flush=True)
             except helpers.UnStableError as error:
                 record.update(status="skipped_unstable", error=f"{type(error).__name__}: {error}")
                 print(
@@ -423,7 +453,12 @@ def main():
             finally:
                 helpers.safe_close_env(env)
                 summary["skipped_seeds" if record.get("status") == "skipped_unstable" else "episodes"].append(record)
+                finished = [item for item in summary["episodes"] if item["status"] == "finished"]
+                summary["completed_episodes"] = len(finished)
+                summary["successful_episodes"] = sum(item["success"] for item in finished)
+                summary["success_rate"] = summary["successful_episodes"] / len(finished) if finished else None
                 (output / "metrics.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+                print(f"Metrics saved: {output / 'metrics.json'}", flush=True)
                 seed += 1
             episode += 1
 

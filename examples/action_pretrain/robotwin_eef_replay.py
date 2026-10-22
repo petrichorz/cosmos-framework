@@ -8,7 +8,8 @@ Run in the RoboTwin Python environment (NumPy, PyArrow, OpenCV and FFmpeg).
 e.g. /path/to/robotwin_processed/RoboTwin__adjust_bottle/clean.
 --prepare-only exports actions and the dataset video without importing RoboTwin/SAPIEN.
 Outputs under --output/episode{episode_index:03d}/: action.npy [T,16],
-observations.npz (initial state then one state per action), video.mp4,
+action_dataset.npy (original dataset targets), observations.npz (initial state
+then one state per action, with tracking errors in the dataset frame), video.mp4,
 video_data.mp4 (dataset reference), metrics.json. Simulator seed equals episode_index.
 Stops on task success or step limit unless --execute-all-actions is set.
 
@@ -54,6 +55,43 @@ def quaternion_product(a, b):
     )
 
 
+def resolve_pose_transform(info, *, pose_frame, world_from_base=None):
+    if pose_frame == "base":
+        if world_from_base is None:
+            transform = info.get("custom", {}).get("eef_enrichment", {}).get("T_world_base")
+            if transform is None:
+                raise ValueError(
+                    "Base-frame poses require metadata custom.eef_enrichment.T_world_base or --world-from-base"
+                )
+            world_from_base = transform["position"] + transform["quaternion_wxyz"]
+        transform = np.asarray(world_from_base, dtype=np.float64)
+        if transform.shape != (7,) or not np.isfinite(transform).all():
+            raise ValueError("world-from-base must be finite [x,y,z,qw,qx,qy,qz]")
+        translation, rotation = transform[:3], unit_quaternion(transform[3:])
+    elif pose_frame == "world":
+        if world_from_base is not None:
+            raise ValueError("--world-from-base only applies to --pose-frame base")
+        translation, rotation = np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])
+    else:
+        raise ValueError("pose-frame must be 'base' or 'world'")
+    return translation, rotation
+
+
+def transform_pose(pose, translation, rotation, *, to_world):
+    """Transform xyz+wxyz poses between the dataset frame and world frame."""
+    pose = np.asarray(pose, dtype=np.float64)
+    rotation = rotation.copy()
+    xyz = pose[..., :3]
+    if not to_world:
+        rotation[1:] *= -1
+        xyz = xyz - translation
+    uv = np.cross(rotation[1:], xyz)
+    xyz = xyz + 2 * (rotation[0] * uv + np.cross(rotation[1:], uv))
+    if to_world:
+        xyz = xyz + translation
+    return np.concatenate([xyz, quaternion_product(rotation, pose[..., 3:7])], axis=-1)
+
+
 def load_actions(root, episode_index, *, pose_frame, world_from_base=None):
     """Read unnormalized action_unified rows; no extra temporal shift or stride."""
     import pyarrow.dataset as ds
@@ -82,33 +120,17 @@ def load_actions(root, episode_index, *, pose_frame, world_from_base=None):
     if ((action[:, 28:30] < 0) | (action[:, 28:30] > 1)).any():
         raise ValueError("RoboTwin gripper targets must be normalized to [0,1]")
 
-    if pose_frame == "base":
-        if world_from_base is None:
-            transform = info.get("custom", {}).get("eef_enrichment", {}).get("T_world_base")
-            if transform is None:
-                raise ValueError(
-                    "Base-frame poses require metadata custom.eef_enrichment.T_world_base or --world-from-base"
-                )
-            world_from_base = transform["position"] + transform["quaternion_wxyz"]
-        transform = np.asarray(world_from_base, dtype=np.float64)
-        if transform.shape != (7,) or not np.isfinite(transform).all():
-            raise ValueError("world-from-base must be finite [x,y,z,qw,qx,qy,qz]")
-        translation, rotation = transform[:3], unit_quaternion(transform[3:])
-    else:
-        if world_from_base is not None:
-            raise ValueError("--world-from-base only applies to --pose-frame base")
-        translation, rotation = np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])
+    translation, rotation = resolve_pose_transform(info, pose_frame=pose_frame, world_from_base=world_from_base)
 
     parts = []
     for start, gripper in ((14, 28), (21, 29)):
         pose = action[:, start : start + 7]
-        xyz = pose[:, :3]
         q = unit_quaternion(pose[:, [6, 3, 4, 5]])  # unified xyzw -> RoboTwin wxyz
         # T_world_eef = T_world_base @ T_base_eef, including orientation.
-        uv = np.cross(rotation[1:], xyz)
-        xyz = xyz + 2 * (rotation[0] * uv + np.cross(rotation[1:], uv)) + translation
-        parts.extend([xyz, quaternion_product(rotation, q), action[:, gripper : gripper + 1]])
-    return np.concatenate(parts, axis=1), frames, info
+        world_pose = transform_pose(np.concatenate([pose[:, :3], q], axis=1), translation, rotation, to_world=True)
+        parts.extend([world_pose, action[:, gripper : gripper + 1]])
+    dataset_actions = action[:, np.r_[14:21, 28, 21:28, 29]].copy()
+    return np.concatenate(parts, axis=1), frames, info, dataset_actions
 
 
 class DatasetVideoRecorder(VideoRecorder):
@@ -177,9 +199,12 @@ def pose_errors(target, observed):
     return position, angle
 
 
-def replay(env, actions, frames, output, *, video_fps, execute_all_actions=False):
+def replay(
+    env, actions, frames, output, *, dataset_actions, translation, rotation, video_fps, execute_all_actions=False
+):
     """Save initial observation at row 0; action i produces observation i+1."""
     eef, measured, command, success = [], [], [], []
+    eef_dataset = []
     executed = 0
     first_success_step = None
     success_seen = bool(env.eval_success)
@@ -207,6 +232,11 @@ def replay(env, actions, frames, output, *, video_fps, execute_all_actions=False
         video.append(images)
         state = native_state(observation, env, state_source="measured")
         eef.append(np.concatenate([observation["endpose"][f"{side}_endpose"] for side in ("left", "right")]))
+        dataset_poses = []
+        for start in (0, 7):
+            pose = transform_pose(eef[-1][start : start + 7], translation, rotation, to_world=False)
+            dataset_poses.append(pose[[0, 1, 2, 4, 5, 6, 3]])  # world wxyz -> dataset xyzw
+        eef_dataset.append(np.concatenate(dataset_poses))
         # Real arm qpos; gripper getter is still a command value, so exclude it here.
         measured.append(np.concatenate([state["joint_action"][f"{side}_arm"] for side in ("left", "right")]))
         command.append(np.asarray(observation["joint_action"]["vector"]).copy())
@@ -232,9 +262,18 @@ def replay(env, actions, frames, output, *, video_fps, execute_all_actions=False
                 del env.check_success
             env.step_lim = original_step_lim
             env.eval_success = success_seen
+        observed = np.asarray(eef_dataset, dtype=np.float64).reshape(-1, 14)[1:]
+        targets = dataset_actions[: len(observed), np.r_[0:7, 8:15]]
+        errors = [pose_errors(targets[:, start : start + 7], observed[:, start : start + 7]) for start in (0, 7)]
+        position_errors = np.stack([error[0] for error in errors], axis=1)
+        rotation_errors = np.stack([error[1] for error in errors], axis=1)
         np.savez_compressed(
             output / "observations.npz",
             eef_world_wxyz=np.asarray(eef),  # [N+1,14]: left pose, right pose
+            eef_dataset_xyzw=np.asarray(eef_dataset, dtype=np.float64).reshape(-1, 14),
+            target_eef_dataset_xyzw=targets,
+            eef_position_error_m=position_errors,  # [N,2]: left, right
+            eef_rotation_error_rad=rotation_errors,
             measured_arm_qpos=np.asarray(measured),
             joint_command=np.asarray(command),  # includes commanded grippers
             eval_success=np.asarray(success),
@@ -242,12 +281,9 @@ def replay(env, actions, frames, output, *, video_fps, execute_all_actions=False
             source_frame_index=frames[:executed],
         )
     error_metrics = {}
-    observed = np.asarray(eef)[1:]
-    if executed:
-        for side, target_start, observed_start in (("left", 0, 0), ("right", 8, 7)):
-            position, angle = pose_errors(
-                actions[:executed, target_start : target_start + 7], observed[:, observed_start : observed_start + 7]
-            )
+    if len(observed):
+        for index, side in enumerate(("left", "right")):
+            position, angle = position_errors[:, index], rotation_errors[:, index]
             error_metrics[side] = dict(
                 position_mean_m=float(position.mean()),
                 position_max_m=float(position.max()),
@@ -298,16 +334,21 @@ def main():
         parser.error("--robotwin-root is required for simulator replay")
     root = args.dataset_root.expanduser().resolve()
     output = args.output.expanduser().resolve() / f"episode{args.episode_index:03d}"
-    actions, frames, info = load_actions(
+    actions, frames, info, dataset_actions = load_actions(
         root, args.episode_index, pose_frame=args.pose_frame, world_from_base=args.world_from_base
+    )
+    translation, rotation = resolve_pose_transform(
+        info, pose_frame=args.pose_frame, world_from_base=args.world_from_base
     )
     args.task_name = args.task_name or info.get("custom", {}).get("source", {}).get("task")
     if not args.task_name and not args.prepare_only:
         parser.error("--task-name is required when dataset metadata does not specify the task")
     if args.max_steps is not None:
         actions, frames = actions[: args.max_steps], frames[: args.max_steps]
+        dataset_actions = dataset_actions[: args.max_steps]
     output.mkdir(parents=True, exist_ok=True)
     np.save(output / "action.npy", actions)
+    np.save(output / "action_dataset.npy", dataset_actions)
     summary = dict(
         dataset_root=str(root),
         episode_index=args.episode_index,
@@ -320,6 +361,9 @@ def main():
         if args.pose_frame == "base"
         else None,
         action_format="left xyz+wxyz+gripper, right xyz+wxyz+gripper; world frame",
+        tracking_error_frame=args.pose_frame,
+        tracking_error_quaternion_order="xyzw",
+        tracking_error_reference="original dataset action[i] versus post-action observation[i+1]",
         action_steps=len(actions),
         execute_all_actions=args.execute_all_actions,
         video_fps=args.video_fps,
@@ -352,6 +396,9 @@ def main():
                         actions,
                         frames,
                         output,
+                        dataset_actions=dataset_actions,
+                        translation=translation,
+                        rotation=rotation,
                         video_fps=args.video_fps,
                         execute_all_actions=args.execute_all_actions,
                     )

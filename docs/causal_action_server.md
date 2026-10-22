@@ -188,6 +188,34 @@ OpenCV（用于双腕视角 resize）、支持 `libx264` 编码器的 FFmpeg 命
 server 的 `SEED` 控制模型采样，client 的 `--seed` 控制仿真场景，两者分别配置。
 `--help` 只解析参数，不导入 RoboTwin/SAPIEN，也不会连接 server。
 
+`--task-name`、`--task-config`、`--control-mode` 都支持用逗号分隔多个值，
+按 task × config × mode 的所有组合依次执行，顺序与参数中的值一致。
+逗号两侧的空格会被去除；空项、重复项和 `joint/eef` 以外的控制模式会在参数解析时报错。
+例如下面会执行两个任务、两种场景配置和两种控制模式的 8 个组合，每个组合完成 3 个 episode：
+
+```bash
+python examples/action_pretrain/robotwin_client.py \
+  --robotwin-root /path/to/RoboTwin \
+  --task-name adjust_bottle,beat_block_hammer \
+  --task-config demo_clean,demo_randomized \
+  --control-mode joint,eef \
+  --episodes 3 \
+  --seed 100000 \
+  --output outputs/causal_action/robotwin_sim
+```
+
+多组合时，各组合分别建立连接，并保存到 `<output>/<task>/<config>/<mode>/`，
+其中包含本组合的 `metrics.json` 和 `seed{seed}/` 结果；单组合保留原来的 `<output>/seed{seed}/` 布局。
+每个组合都从 `--seed` 开始，不稳定 seed 的重试规则不变。
+所有模式都必须由当前 server 支持；不支持的模式会报错并停止后续组合。
+客户端在每轮结束时打印结果摘要，包括成功状态、步数、耗时、视频及请求记录的保存路径，
+并打印 `metrics.json` 路径；`requests` 内容只写入独立的 `requests.json`，不打印到终端。
+
+每个组合的 `metrics.json` 还记录 `completed_episodes`（正常完成轮数）、
+`successful_episodes`（其中任务成功的轮数）和 `success_rate`（成功轮数 / 正常完成轮数，取值 0..1）。
+每次尝试结束后更新统计；不稳定 seed 和异常退出轮次不计入分母。
+尚无正常完成轮次时，两个计数均为 0，`success_rate` 为 `null`。
+
 ### 单个 episode 的具体执行顺序
 
 1. client 建立 WebSocket 连接，读取 server metadata，校验所选 `control_mode`。
@@ -328,7 +356,7 @@ python examples/action_pretrain/robotwin_eef_replay.py \
   --output outputs/robotwin_eef_replay
 ```
 
-`--prepare-only` requires NumPy, PyArrow, msgpack, OpenCV and FFmpeg but does not import RoboTwin/SAPIEN. It validates and exports the actions and dataset reference video, writing `action.npy`, `video_data.mp4` and `metrics.json` under `outputs/robotwin_eef_replay/episode001/`. This checks data preparation and video extraction, not simulator execution or task success.
+`--prepare-only` requires NumPy, PyArrow, msgpack, OpenCV and FFmpeg but does not import RoboTwin/SAPIEN. It validates and exports the actions and dataset reference video, writing `action.npy`, `action_dataset.npy`, `video_data.mp4` and `metrics.json` under `outputs/robotwin_eef_replay/episode001/`. This checks data preparation and video extraction, not simulator execution or task success.
 
 ### Run the replay in a RoboTwin environment
 
@@ -365,15 +393,20 @@ Each exported action has 16 values: `[left xyz, left qw,qx,qy,qz, left gripper, 
 
 All files are written directly under `--output/episode{episode_index:03d}/`, for example `outputs/robotwin_eef_replay/episode001/`. The directory is keyed by the selected dataset episode. Rerunning the same episode in the same output root overwrites files with the same names.
 
-| File               | Contents                                                                                                                               |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `action.npy`       | World-frame EEF/gripper control targets, shape `[T,16]`; T is the selected action count after applying `--max-steps`.                  |
-| `observations.npz` | Initial and subsequent EEF poses, measured arm qpos, joint/gripper commands, success flags, executed actions and source frame indices. |
-| `video.mp4`        | H.264 video of simulation RGB observations: head camera on top, resized left/right wrist cameras side by side below.                   |
-| `video_data.mp4`   | H.264 reference video extracted from the selected dataset episode, using the same three-view layout and the dataset's FPS.             |
-| `metrics.json`     | Dataset/scene settings, run status, execution count, stop reason, task success and mean/max position and rotation tracking errors.     |
+| File                 | Contents                                                                                                                               |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `action.npy`         | World-frame EEF/gripper control targets, shape `[T,16]`; T is the selected action count after applying `--max-steps`.                  |
+| `action_dataset.npy` | Original dataset EEF/gripper targets, shape `[T,16]`, with the same interleaved grippers and `xyz+xyzw` poses in the dataset frame.    |
+| `observations.npz`   | Initial and subsequent EEF poses, measured arm qpos, joint/gripper commands, success flags, executed actions and source frame indices. |
+| `video.mp4`          | H.264 video of simulation RGB observations: head camera on top, resized left/right wrist cameras side by side below.                   |
+| `video_data.mp4`     | H.264 reference video extracted from the selected dataset episode, using the same three-view layout and the dataset's FPS.             |
+| `metrics.json`       | Dataset/scene settings, run status, execution count, stop reason, task success and mean/max position and rotation tracking errors.     |
 
 In `observations.npz`, `eef_world_wxyz` has shape `[N+1,14]` (left pose followed by right pose), `measured_arm_qpos` contains actual arm joint positions, and `joint_command` contains drive targets including commanded gripper values. `eval_success` aligns with the N+1 observations. `executed_action` and `source_frame_index` have N rows; their row i corresponds to observation row i+1. Separate RGB image files are not written.
+
+After each action, the script converts `get_obs()["endpose"]` from world `xyz+wxyz` back to the dataset frame and `xyz+xyzw`. In the default `--pose-frame base` mode this uses the inverse of the same `T_world_base` used to construct execution targets. It then compares the converted observation against the original dataset action row, without another temporal shift. `--pose-frame world` compares in the world frame instead. `metrics.json` records `tracking_error_frame`, `tracking_error_quaternion_order`, and `tracking_error_reference`; `tracking_error.left/right` report mean/max position distance in meters and rotation angle in radians, computed as `2*acos(abs(dot(q_target, q_observed)))` after quaternion normalization.
+
+The NPZ additionally stores `eef_dataset_xyzw [N+1,14]`, `target_eef_dataset_xyzw [N,14]`, `eef_position_error_m [N,2]`, and `eef_rotation_error_rad [N,2]`. The two error columns are left/right; error row i compares target row i with dataset-frame observation row i+1. The initial observation is retained but excluded from tracking-error statistics.
 
 Reference video extraction uses the per-camera chunk/file indices and episode timestamps in `meta/episodes/chunk-*/file-*.parquet`, together with `meta/info.json`'s `video_path`, to select this episode from the packed source videos. All three dataset camera videos must be available and have the same FPS as the dataset. Frames are streamed into the same head/wrist layout used by `video.mp4`, preserving the source head-camera resolution. `--video-fps` controls simulation-video playback only; the reference retains the dataset's FPS.
 

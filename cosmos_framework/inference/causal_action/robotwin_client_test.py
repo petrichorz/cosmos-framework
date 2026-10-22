@@ -276,14 +276,130 @@ def test_robotwin_root_is_required_even_with_environment_variable(monkeypatch, c
     assert "--robotwin-root" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--task-name", ""),
+        ("--task-name", "adjust_bottle,"),
+        ("--task-config", "demo_clean,,demo_randomized"),
+        ("--task-config", "demo_clean, demo_clean"),
+        ("--control-mode", "joint,invalid"),
+        ("--control-mode", "joint, "),
+    ],
+)
+def test_comma_separated_arguments_reject_empty_duplicate_and_invalid_values(flag, value):
+    with pytest.raises(SystemExit) as error:
+        runner.parser().parse_args(["--robotwin-root", "/path/to/RoboTwin", flag, value])
+    assert error.value.code == 2
+
+
+def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(monkeypatch, tmp_path, capsys):
+    clients, envs, loaded, roots, closed = [], [], [], [], []
+    simulator = tmp_path / "RoboTwin"
+    simulator.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    def make_client(uri, *, control_mode):
+        client = FakeClient(uri, control_mode=control_mode)
+        clients.append(client)
+        return client
+
+    def load_task(args):
+        loaded.append((args["task_name"], args["task_config"]))
+        return dict(camera={}, data_type={}), "aloha-agilex"
+
+    def make_env(task):
+        env = FakeEnv(success_at=2 if len(envs) % 2 == 0 else None)
+        envs.append((task, env))
+        return env
+
+    helpers = SimpleNamespace(
+        UnStableError=UnStableError,
+        load_task_args=load_task,
+        class_decorator=make_env,
+        safe_close_env=closed.append,
+    )
+
+    def load_robotwin(root):
+        roots.append(root)
+        # Real loading changes cwd; later combinations must retain the original paths.
+        monkeypatch.chdir(simulator)
+        return helpers
+
+    monkeypatch.setattr(runner, "load_robotwin", load_robotwin)
+    monkeypatch.setattr(runner, "CausalPolicyClient", make_client)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "robotwin_client.py",
+            "--robotwin-root",
+            "RoboTwin",
+            "--task-name",
+            "task_a, task_b",
+            "--task-config",
+            "demo_clean, demo_randomized",
+            "--control-mode",
+            "eef, joint",
+            "--instruction",
+            "Move the object.",
+            "--episodes",
+            "2",
+            "--seed",
+            "42",
+            "--max-steps",
+            "2",
+            "--output",
+            "results",
+        ],
+    )
+    runner.main()
+    combinations = [
+        (task, config, mode)
+        for task in ("task_a", "task_b")
+        for config in ("demo_clean", "demo_randomized")
+        for mode in ("eef", "joint")
+    ]
+    assert loaded == [(task, config) for task, config, _ in combinations]
+    assert roots == [str(simulator)] * 8
+    assert [client.control_mode for client in clients] == [mode for _, _, mode in combinations]
+    assert all(client.closed and len(client.resets) == 2 for client in clients)
+    assert closed == [env for _, env in envs]
+    assert [task for task, _ in envs] == [task for task, _, _ in combinations for _ in range(2)]
+    for index, (task, config, mode) in enumerate(combinations):
+        output = tmp_path / "results" / task / config / mode
+        metrics = json.loads((output / "metrics.json").read_text())
+        assert (metrics["task"], metrics["task_config"], metrics["control_mode"]) == (task, config, mode)
+        assert [record["seed"] for record in metrics["episodes"]] == [42, 43]
+        assert metrics["completed_episodes"] == 2
+        assert metrics["successful_episodes"] == 1
+        assert metrics["success_rate"] == 0.5
+        for episode, record in enumerate(metrics["episodes"]):
+            assert record["status"] == "finished" and "requests" not in record
+            requests_path = output / f"seed{record['seed']}" / "requests.json"
+            assert record["requests_path"] == str(requests_path)
+            assert json.loads(requests_path.read_text()) == [dict(observation_step=0, infer_ms=1.0)]
+            actions = np.load(requests_path.parent / f"step000000_action_{mode}.npy")
+            assert actions.shape == (32, 14 if mode == "joint" else 16)
+            env = envs[index * 2 + episode][1]
+            assert env.setup_args["seed"] == record["seed"]
+            assert [kind for _, kind in env.executed] == ["qpos" if mode == "joint" else "ee"] * 2
+    stdout = capsys.readouterr().out
+    assert stdout.count('"status": "finished"') == 16
+    assert '"requests":' not in stdout and "infer_ms" not in stdout
+
+
 @pytest.mark.parametrize("fail_setup", [False, True])
-def test_main_loads_config_resets_each_episode_and_always_closes_env(monkeypatch, tmp_path, fail_setup, capsys):
+@pytest.mark.parametrize("success_count", [0, 1, 2])
+def test_main_loads_config_resets_each_episode_and_always_closes_env(
+    monkeypatch, tmp_path, fail_setup, success_count, capsys
+):
     client, envs, closed = FakeClient(), [], []
     config = dict(camera={}, data_type={})
 
     def make_env(task):
         assert task == "adjust_bottle"
-        env = FakeEnv()
+        env = FakeEnv(success_at=2 if len(envs) < success_count else None)
         if fail_setup:
 
             def fail(**kwargs):
@@ -337,6 +453,9 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(monkeypatch
     metrics = json.loads((tmp_path / "metrics.json").read_text())
     assert len(metrics["episodes"]) == (1 if fail_setup else 2)
     assert metrics["episodes"][0]["status"] == ("error" if fail_setup else "finished")
+    assert metrics["completed_episodes"] == (0 if fail_setup else 2)
+    assert metrics["successful_episodes"] == (0 if fail_setup else success_count)
+    assert metrics["success_rate"] == (None if fail_setup else success_count / 2)
     if not fail_setup:
         assert metrics["episodes"][0]["instruction"] == "Adjust."
         assert metrics["episodes"][0]["instruction_source"] == "override"
@@ -349,8 +468,14 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(monkeypatch
             assert requests[0]["infer_ms"] == 1.0
         stdout = capsys.readouterr().out
         assert "Episode 0, seed 42" in stdout
-        assert "requests" not in stdout
+        assert '"requests":' not in stdout
         assert "infer_ms" not in stdout
+        assert f'"success": {str(success_count > 0).lower()}' in stdout
+        assert '"executed_steps": 2' in stdout
+        assert '"seconds":' in stdout
+        assert '"video_path":' in stdout
+        assert str(tmp_path / "metrics.json") in stdout
+        assert str(tmp_path / "seed42" / "requests.json") in stdout
 
 
 @pytest.fixture
@@ -508,6 +633,9 @@ def test_unstable_seeds_are_retried_without_consuming_episodes(automatic_main, t
     assert all(record["status"] == "finished" and record["executed_steps"] == 2 for record in metrics["episodes"])
     assert [record["seed"] for record in metrics["skipped_seeds"]] == [42, 43]
     assert all(record["status"] == "skipped_unstable" for record in metrics["skipped_seeds"])
+    assert metrics["completed_episodes"] == 2
+    assert metrics["successful_episodes"] == 0
+    assert metrics["success_rate"] == 0.0
     assert all("UnStableError" in record["error"] for record in metrics["skipped_seeds"])
     assert (tmp_path / "seed44" / "step000000_action_joint.npy").is_file()
     if phase == "rollout":
