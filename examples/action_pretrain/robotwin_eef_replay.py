@@ -10,7 +10,7 @@ e.g. /path/to/robotwin_processed/RoboTwin__adjust_bottle/clean.
 Outputs under --output/episode{episode_index:03d}/: action.npy [T,16],
 observations.npz (initial state then one state per action), video.mp4,
 video_data.mp4 (dataset reference), metrics.json. Simulator seed equals episode_index.
-Stops on task success or step limit.
+Stops on task success or step limit unless --execute-all-actions is set.
 
 EEF actions are derived next-recorded-pose targets, not original Cartesian
 commands. Each take_action call replans a path, so replay has no fixed 30 Hz
@@ -177,12 +177,31 @@ def pose_errors(target, observed):
     return position, angle
 
 
-def replay(env, actions, frames, output, *, video_fps):
+def replay(env, actions, frames, output, *, video_fps, execute_all_actions=False):
     """Save initial observation at row 0; action i produces observation i+1."""
     eef, measured, command, success = [], [], [], []
     executed = 0
+    first_success_step = None
+    success_seen = bool(env.eval_success)
+    if execute_all_actions:
+        original_check_success = env.check_success
+        had_check_success_override = "check_success" in vars(env)
+        original_step_lim = env.step_lim
+        replay_step_lim = max(env.step_lim, env.take_action_cnt + len(actions))
+
+        def check_success_without_stopping():
+            nonlocal success_seen
+            # Still evaluate the real task condition at every physics step.
+            success_seen = bool(original_check_success()) or success_seen
+            return False
+
+        # take_action checks eval_success at entry and check_success in its loop.
+        env.check_success = check_success_without_stopping
+        env.eval_success = False
+        env.step_lim = replay_step_lim
 
     def capture(video):
+        nonlocal first_success_step
         observation = env.get_obs()
         images = camera_images(observation)
         video.append(images)
@@ -191,18 +210,28 @@ def replay(env, actions, frames, output, *, video_fps):
         # Real arm qpos; gripper getter is still a command value, so exclude it here.
         measured.append(np.concatenate([state["joint_action"][f"{side}_arm"] for side in ("left", "right")]))
         command.append(np.asarray(observation["joint_action"]["vector"]).copy())
-        success.append(bool(env.eval_success))
+        achieved = success_seen if execute_all_actions else bool(env.eval_success)
+        success.append(achieved)
+        if achieved and first_success_step is None:
+            first_success_step = executed
 
     try:
         with VideoRecorder(output, fps=video_fps) as video:
             capture(video)
             for action in actions:
-                if episode_finished(env):
+                if not execute_all_actions and episode_finished(env):
                     break
                 env.take_action(action.copy(), action_type="ee")
                 executed += 1
                 capture(video)
     finally:
+        if execute_all_actions:
+            if had_check_success_override:
+                env.check_success = original_check_success
+            else:
+                del env.check_success
+            env.step_lim = original_step_lim
+            env.eval_success = success_seen
         np.savez_compressed(
             output / "observations.npz",
             eef_world_wxyz=np.asarray(eef),  # [N+1,14]: left pose, right pose
@@ -225,11 +254,18 @@ def replay(env, actions, frames, output, *, video_fps):
                 rotation_mean_rad=float(angle.mean()),
                 rotation_max_rad=float(angle.max()),
             )
+    stop_reason = "actions_exhausted"
+    if not execute_all_actions:
+        if env.eval_success:
+            stop_reason = "success"
+        elif episode_finished(env):
+            stop_reason = "step_limit"
     return dict(
         executed_steps=executed,
         observation_frames=len(eef),
         eval_success=bool(env.eval_success),
-        stop_reason="success" if env.eval_success else "step_limit" if episode_finished(env) else "actions_exhausted",
+        first_success_step=first_success_step,
+        stop_reason=stop_reason,
         tracking_error=error_metrics,
     )
 
@@ -246,6 +282,11 @@ def main():
         "--world-from-base", nargs=7, type=float, metavar="VALUE", help="Override base transform: xyz+wxyz"
     )
     parser.add_argument("--max-steps", type=positive_int, help="Optional action count limit")
+    parser.add_argument(
+        "--execute-all-actions",
+        action="store_true",
+        help="Execute every selected action despite task success; extend the task step limit if needed",
+    )
     parser.add_argument("--video-fps", type=positive_int, default=30, help="Playback FPS; does not set physics cadence")
     parser.add_argument(
         "--prepare-only", action="store_true", help="Export native actions and dataset video without RoboTwin"
@@ -280,6 +321,7 @@ def main():
         else None,
         action_format="left xyz+wxyz+gripper, right xyz+wxyz+gripper; world frame",
         action_steps=len(actions),
+        execute_all_actions=args.execute_all_actions,
         video_fps=args.video_fps,
         status="prepared",
     )
@@ -304,7 +346,16 @@ def main():
             env.suc, env.test_num = 0, 0
             try:
                 env.setup_demo(now_ep_num=args.episode_index, seed=seed, is_test=True, **task_args)
-                summary.update(replay(env, actions, frames, output, video_fps=args.video_fps))
+                summary.update(
+                    replay(
+                        env,
+                        actions,
+                        frames,
+                        output,
+                        video_fps=args.video_fps,
+                        execute_all_actions=args.execute_all_actions,
+                    )
+                )
                 summary["status"] = "finished"
             finally:
                 helpers.safe_close_env(env)

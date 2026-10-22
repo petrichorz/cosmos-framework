@@ -342,6 +342,19 @@ python examples/action_pretrain/robotwin_eef_replay.py \
 
 Use `--task-config demo_randomized` for the corresponding randomized data. `--task-name` can be omitted when `meta/info.json` supplies `custom.source.task`. Add `--max-steps 32` to limit replay to the first 32 action rows; RoboTwin may stop earlier on task success or its task step limit. `--video-fps` sets video playback FPS and defaults to 30.
 
+To execute all selected actions even after the task succeeds, append `--execute-all-actions`. This also temporarily extends RoboTwin's task step limit to cover the selected action count. `--max-steps` still determines which action prefix is selected; omit it to replay the entire episode. For example:
+
+```bash
+python examples/action_pretrain/robotwin_eef_replay.py \
+  --robotwin-root /path/to/RoboTwin \
+  --dataset-root "$DATASET_ROOT" \
+  --episode-index 1 \
+  --execute-all-actions \
+  --output outputs/robotwin_eef_replay
+```
+
+The option applies only to this standalone replay. During replay it temporarily wraps the environment instance's `check_success()` to record success without triggering `take_action()`'s early return, and keeps `eval_success` from blocking subsequent actions. The original checker and task limit are restored on exit, including exceptions; no RoboTwin source files are modified. `metrics.json` records `execute_all_actions`, the first successful action number in `first_success_step` (0 means success before any action, null means no success), and whether success was observed in `eval_success`. `observations.npz` success flags remain true after the first observed success. After all selected actions complete, `stop_reason` is `actions_exhausted`, even if the task succeeded earlier. Errors still terminate the run and are recorded normally.
+
 Each exported action has 16 values: `[left xyz, left qw,qx,qy,qz, left gripper, right xyz, right qw,qx,qy,qz, right gripper]`. The script calls `env.take_action(action, action_type="ee")` and then `env.get_obs()` after each completed action. It saves an initial observation before the first action, so a successful recording of N executed actions contains N+1 observation frames.
 
 ### Output files
