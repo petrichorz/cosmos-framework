@@ -54,7 +54,7 @@ class FakeEngine:
 def request(engine, count=1, value=0):
     state = dict(
         joint_action=dict(left_arm=[value, 0, 0, 0, 0, 0], right_arm=[0] * 6, left_gripper=0, right_gripper=0),
-        endpose=dict(left_endpose=[0, 0, 0, 1, 0, 0, 0], right_endpose=[0, 0, 0, 1, 0, 0, 0]),
+        endpose=dict(left_endpose=[0, 0, 0, 0, 0, 0, 1], right_endpose=[0, 0, 0, 0, 0, 0, 1]),
     )
     return dict(
         obs={key: np.full((count, 4, 6, 3), value, dtype=np.uint8) for key in CAMERA_KEYS},
@@ -166,6 +166,8 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch):
             def client_session():
                 with CausalPolicyClient(uri, control_mode="joint") as client:
                     assert client.metadata["protocol"] == "cosmos-causal-action-v2"
+                    assert client.metadata["quaternion_order"] == "xyzw"
+                    assert client.metadata["eef_pose_frame"] == "dataset"
                     assert client.metadata["seed"] == policy.engine.seed
                     assert client.metadata["available_control_modes"] == ["joint"]
                     for episode in range(2):

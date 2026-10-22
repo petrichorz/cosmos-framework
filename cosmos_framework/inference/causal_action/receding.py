@@ -37,7 +37,7 @@ def run_receding_policy(model, dataset, args):
     if not isinstance(reader, RoboTwinSegmentLeRobotDataset):
         raise ValueError("--execute-steps currently supports RoboTwin policy sources")
     data = read_observations(reader, args.index - offset)
-    adapter = RobotwinAdapter.from_statistics(source.template, source.statistics, dataset_root=reader.root)
+    adapter = RobotwinAdapter.from_statistics(source.template, source.statistics)
     if (adapter.state_mask & ~data["state_mask"]).any() or (adapter.action_mask & ~data["action_mask"]).any():
         raise ValueError("Dataset is missing dimensions required by the server robot configuration")
     engine = CausalPolicyEngine(

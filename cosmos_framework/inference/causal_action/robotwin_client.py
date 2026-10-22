@@ -25,6 +25,83 @@ from cosmos_framework.inference.causal_action.client import (
 )
 
 
+class RobotwinPoseConverter:
+    """Convert RoboTwin world xyz+wxyz poses to/from dataset xyz+xyzw poses."""
+
+    def __init__(self, *, eef_pose_frame="world", T_world_base=None):
+        if eef_pose_frame not in ("base", "world"):
+            raise ValueError("eef_pose_frame must be 'base' or 'world'")
+        self.eef_pose_frame = eef_pose_frame
+        self.T_world_base = None
+        if eef_pose_frame == "base":
+            if not isinstance(T_world_base, dict):
+                raise ValueError("Base-frame EEF requires T_world_base with position and quaternion_wxyz")
+            position = np.asarray(T_world_base.get("position"), dtype=np.float64)
+            quaternion = np.asarray(T_world_base.get("quaternion_wxyz"), dtype=np.float64)
+            if position.shape != (3,) or quaternion.shape != (4,):
+                raise ValueError("T_world_base needs position[3] and quaternion_wxyz[4]")
+            if (
+                not np.isfinite(position).all()
+                or not np.isfinite(quaternion).all()
+                or np.linalg.norm(quaternion) < 1e-8
+            ):
+                raise ValueError("T_world_base must be finite with a nonzero quaternion")
+            quaternion = quaternion / np.linalg.norm(quaternion)
+            self.T_world_base = dict(position=position.tolist(), quaternion_wxyz=quaternion.tolist())
+            self._base_position, self._base_quaternion = position, quaternion
+        elif T_world_base is not None:
+            raise ValueError("T_world_base only applies to eef_pose_frame='base'")
+
+    @classmethod
+    def from_dataset(cls, root):
+        """Read this RoboTwin dataset's pose convention on the simulator side."""
+        path = Path(root).expanduser() / "meta/info.json"
+        enrichment = json.loads(path.read_text()).get("custom", {}).get("eef_enrichment", {})
+        frame = enrichment.get("unified_pose_frame")
+        if enrichment.get("unified_quaternion") != "xyzw":
+            raise ValueError(f"Expected explicit unified_quaternion='xyzw' in {path}; pass --eef-config")
+        if frame in ("base", "shared ALOHA dual-arm URDF root/base frame"):
+            return cls(eef_pose_frame="base", T_world_base=enrichment.get("T_world_base"))
+        if frame == "world":
+            return cls(eef_pose_frame="world")
+        raise ValueError(f"Unknown unified EEF frame in {path}; pass --eef-config")
+
+    def _transform_pose(self, pose, *, to_world):
+        """Transform position and orientation in xyz+wxyz order."""
+        pose = np.asarray(pose, dtype=np.float64)
+        if pose.shape[-1:] != (7,):
+            raise ValueError("EEF pose must contain seven values")
+        if self.eef_pose_frame == "world":
+            return pose.astype(np.float32)
+        rotation = self._base_quaternion.copy()
+        xyz = pose[..., :3]
+        if not to_world:
+            rotation[1:] *= -1
+            xyz = xyz - self._base_position
+        uv = np.cross(rotation[1:], xyz)
+        xyz = xyz + 2 * (rotation[0] * uv + np.cross(rotation[1:], uv))
+        if to_world:
+            xyz = xyz + self._base_position
+        q = pose[..., 3:7]
+        w = rotation[:1] * q[..., :1] - (rotation[1:] * q[..., 1:]).sum(axis=-1, keepdims=True)
+        v = rotation[:1] * q[..., 1:] + q[..., :1] * rotation[1:] + np.cross(rotation[1:], q[..., 1:])
+        return np.concatenate([xyz, w, v], axis=-1).astype(np.float32)
+
+    def to_dataset(self, pose):
+        pose = self._transform_pose(pose, to_world=False)
+        return pose[..., [0, 1, 2, 4, 5, 6, 3]]
+
+    def to_world(self, pose):
+        pose = np.asarray(pose)[..., [0, 1, 2, 6, 3, 4, 5]]
+        return self._transform_pose(pose, to_world=True)
+
+    def actions_to_world(self, actions):
+        actions = np.asarray(actions, dtype=np.float32).copy()
+        for start in (0, 8):
+            actions[..., start : start + 7] = self.to_world(actions[..., start : start + 7])
+        return actions
+
+
 def camera_images(observation):
     cameras = observation["observation"]
     # Detach each frame from renderer buffers before taking the next observation.
@@ -38,7 +115,7 @@ def camera_images(observation):
     }
 
 
-def native_state(observation, env, *, state_source="command"):
+def native_state(observation, env, *, state_source="command", pose_converter=None):
     joint = dict(observation["joint_action"])
     if state_source == "measured":
         left = list(env.robot.get_left_arm_real_jointState())
@@ -52,7 +129,13 @@ def native_state(observation, env, *, state_source="command"):
         )
     elif state_source != "command":
         raise ValueError(f"Unknown state_source: {state_source}")
-    return dict(joint_action=joint, endpose=observation["endpose"])
+    pose_converter = pose_converter or RobotwinPoseConverter()
+    endpose = dict(observation["endpose"])
+    for side in ("left", "right"):
+        key = f"{side}_endpose"
+        if key in endpose:
+            endpose[key] = pose_converter.to_dataset(endpose[key])
+    return dict(joint_action=joint, endpose=endpose)
 
 
 def episode_finished(env):
@@ -82,7 +165,7 @@ class VideoRecorder(H264VideoWriter):
         super().append(frame)
 
 
-def rollout(env, client, *, state_source="command", output=None, video_fps=30):
+def rollout(env, client, *, state_source="command", pose_converter=None, output=None, video_fps=30):
     """One episode: initial frame, then exactly one frame per executed target.
 
     Predicted rows after execute_steps are discarded. If the episode finishes
@@ -90,6 +173,7 @@ def rollout(env, client, *, state_source="command", output=None, video_fps=30):
     """
     action_types = {"joint": "qpos", "eef": "ee"}
     action_type = action_types[client.control_mode]
+    pose_converter = pose_converter or RobotwinPoseConverter()
     if output is not None:
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
@@ -116,7 +200,7 @@ def rollout(env, client, *, state_source="command", output=None, video_fps=30):
             video.append(images)
             request = dict(
                 obs=images,
-                state=native_state(observation, env, state_source=state_source),
+                state=native_state(observation, env, state_source=state_source, pose_converter=pose_converter),
                 observation_step=0,
             )
             while True:
@@ -140,6 +224,8 @@ def rollout(env, client, *, state_source="command", output=None, video_fps=30):
                 if output is not None:
                     np.save(output / f"step{executed:06d}_action_{client.control_mode}.npy", actions)
                     requests[-1].update(save_prediction_video(response, output / f"step{executed:06d}_prediction.mp4"))
+                if client.control_mode == "eef":
+                    actions = pose_converter.actions_to_world(actions)
 
                 observations = []
                 block_start = executed
@@ -161,7 +247,7 @@ def rollout(env, client, *, state_source="command", output=None, video_fps=30):
                     break
                 request = dict(
                     obs=observations,
-                    state=native_state(observation, env, state_source=state_source),
+                    state=native_state(observation, env, state_source=state_source, pose_converter=pose_converter),
                     executed_steps=count,
                     observation_step=executed,
                 )
@@ -221,6 +307,9 @@ def parser():
     p.add_argument("--episodes", type=positive_int, default=1)
     p.add_argument("--control-mode", choices=["joint", "eef"], default="joint")
     p.add_argument("--state-source", choices=["command", "measured"], default="command")
+    poses = p.add_mutually_exclusive_group()
+    poses.add_argument("--eef-config", help="JSON with eef_pose_frame and optional T_world_base; default: world")
+    poses.add_argument("--eef-dataset-root", help="Read EEF frame/transform from this dataset's meta/info.json")
     p.add_argument("--max-steps", type=positive_int, help="Optional per-episode limit, capped by RoboTwin's task limit")
     p.add_argument("--render-freq", type=int, default=0)
     p.add_argument("--video-fps", type=positive_int, default=30, help="Saved observation video playback FPS")
@@ -234,6 +323,11 @@ def main():
         raise ValueError("render-freq must be nonnegative")
     if args.instruction is not None and not args.instruction.strip():
         raise ValueError("instruction override must not be empty")
+    if args.eef_dataset_root:
+        pose_converter = RobotwinPoseConverter.from_dataset(args.eef_dataset_root)
+    else:
+        pose_config = json.loads(Path(args.eef_config).expanduser().read_text()) if args.eef_config else {}
+        pose_converter = RobotwinPoseConverter(**pose_config)
     # Resolve output before load_robotwin changes cwd for simulator asset loading.
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -244,6 +338,8 @@ def main():
         server_uri=args.server_uri,
         control_mode=args.control_mode,
         state_source=args.state_source,
+        eef_pose_frame=pose_converter.eef_pose_frame,
+        T_world_base=pose_converter.T_world_base,
         video_fps=args.video_fps,
         episodes=[],
         skipped_seeds=[],
@@ -306,6 +402,7 @@ def main():
                         env,
                         client,
                         state_source=args.state_source,
+                        pose_converter=pose_converter,
                         output=output / f"seed{seed}",
                         video_fps=args.video_fps,
                     )

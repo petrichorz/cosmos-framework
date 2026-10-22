@@ -19,17 +19,17 @@ def make_adapter(*, eef=True, joint=True):
     if eef:
         mask[14:28] = True
     mask[28:30] = True
-    return RobotwinAdapter(ActionStateTemplate55(), state_mask=mask, action_mask=mask, eef_pose_frame="world")
+    return RobotwinAdapter(ActionStateTemplate55(), state_mask=mask, action_mask=mask)
 
 
 def native_state():
     return dict(
         joint_action=dict(left_arm=np.arange(6), right_arm=np.arange(6) + 10, left_gripper=0.25, right_gripper=0.75),
-        endpose=dict(left_endpose=[1, 2, 3, 0.5, 0.5, 0.5, 0.5], right_endpose=[4, 5, 6, 1, 0, 0, 0]),
+        endpose=dict(left_endpose=[1, 2, 3, 0.5, 0.5, 0.5, 0.5], right_endpose=[4, 5, 6, 0, 0, 0, 1]),
     )
 
 
-def test_native_state_packs_joints_grippers_and_wxyz_into_xyzw():
+def test_native_state_preserves_dataset_xyz_xyzw_and_packs_joints_grippers():
     adapter = make_adapter()
     state = native_state()
     packed = adapter.assemble_state(state)
@@ -53,7 +53,7 @@ def test_native_actions_use_robotwin_interleaved_gripper_order_and_quaternion_or
     assert result["joint"].shape == (32, 14)
     assert result["eef"].shape == (32, 16)
     np.testing.assert_array_equal(result["joint"][0], [0, 1, 2, 3, 4, 5, 0.25, 10, 11, 12, 13, 14, 15, 0.75])
-    np.testing.assert_array_equal(result["eef"][0], [1, 2, 3, 0.5, 0.5, 0.5, 0.5, 0.25, 4, 5, 6, 1, 0, 0, 0, 0.75])
+    np.testing.assert_array_equal(result["eef"][0], [1, 2, 3, 0.5, 0.5, 0.5, 0.5, 0.25, 4, 5, 6, 0, 0, 0, 1, 0.75])
 
 
 def test_joint_model_ignores_untrained_eef_state_and_does_not_export_zeros_as_eef_actions():
@@ -87,7 +87,7 @@ def test_statistics_source_masks_must_be_unambiguous_and_config_must_be_covered(
     adapter = make_adapter()
     q = Quantiles(torch.zeros(55), torch.ones(55), adapter.state_mask)
     mask = adapter.state_mask.tolist()
-    source = dict(state_mask=mask, action_mask=mask, eef_pose_frame="world")
+    source = dict(state_mask=mask, action_mask=mask, source="/unavailable/dataset")
     statistics = BlockStatistics(q, q, dict(sources=[source, source]))
     loaded = RobotwinAdapter.from_statistics(adapter.template, statistics)
     assert loaded.available_control_modes == ["joint", "eef"]
@@ -99,7 +99,7 @@ def test_statistics_source_masks_must_be_unambiguous_and_config_must_be_covered(
     config.write_text(json.dumps(dict(state_mask=other, action_mask=other)))
     assert RobotwinAdapter.from_statistics(adapter.template, statistics, config).available_control_modes == ["joint"]
     statistics.state.valid = torch.tensor(other)
-    config.write_text(json.dumps(dict(state_mask=mask, action_mask=mask, eef_pose_frame="world")))
+    config.write_text(json.dumps(dict(state_mask=mask, action_mask=mask)))
     with pytest.raises(ValueError, match="Statistics do not cover"):
         RobotwinAdapter.from_statistics(adapter.template, statistics, config)
 

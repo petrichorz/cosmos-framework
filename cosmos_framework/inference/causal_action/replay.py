@@ -54,8 +54,7 @@ def read_observations(reader, index, *, required=None):
     required = len(state) if required is None else required
     if len(state) < required:
         raise ValueError(f"Selected segment has {len(state)} observations; {required} required")
-    frame_config = RobotwinAdapter.eef_config_from_dataset(reader.root) if (sm | am)[14:28].any() else {}
-    adapter = RobotwinAdapter(reader.template, state_mask=sm, action_mask=am, **frame_config)
+    adapter = RobotwinAdapter(reader.template, state_mask=sm, action_mask=am)
     meta = reader._direct_meta
     cameras = {}
     for role, key in reader.video_view.cameras.items():
@@ -88,7 +87,6 @@ def read_observations(reader, index, *, required=None):
         action_target=target[: required - 1],
         state_mask=sm,
         action_mask=am,
-        eef_metadata=adapter.metadata,
     )
 
 
@@ -116,22 +114,6 @@ def main():
     print(f"Replay selected segment: {total} action steps, {rounds} prediction rounds", flush=True)
     metrics = []
     with CausalPolicyClient(args.uri, control_mode=args.control_mode) as client:
-        if (
-            client.metadata.get("unified_eef_pose_frame") is not None
-            or "eef" in client.metadata["available_control_modes"]
-        ):
-            expected = data["eef_metadata"]
-            for key in ("native_eef_pose_frame", "unified_eef_pose_frame"):
-                if client.metadata.get(key) != expected[key]:
-                    raise ValueError(f"Server and replay dataset disagree on {key}")
-            if expected["unified_eef_pose_frame"] == "base":
-                actual = client.metadata.get("T_world_base")
-                target = expected["T_world_base"]
-                if actual is None or not np.allclose(actual["position"], target["position"], atol=1e-7, rtol=0):
-                    raise ValueError("Server and replay dataset disagree on T_world_base position")
-                dot = np.dot(actual["quaternion_wxyz"], target["quaternion_wxyz"])
-                if not np.isclose(abs(dot), 1, atol=1e-7, rtol=0):
-                    raise ValueError("Server and replay dataset disagree on T_world_base rotation")
         if client.metadata["execute_steps"] != 16 or client.metadata["actions_per_block"] != 32:
             raise ValueError("Replay expects 32 predicted actions / 16 executed steps")
         if not np.isclose(client.metadata["fps"], data["fps"]):

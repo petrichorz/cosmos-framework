@@ -4,8 +4,9 @@
 `examples/action_pretrain/inference_robotwin_template.sh` 相同的 causal action checkpoint、
 Wan2.2 VAE、unified55 模板和训练 state/delta 统计。网络协议兼容 LingBot/OpenPI 的
 WebSocket + msgpack/NumPy 编码，单模型 rank、单仿真器连接。
-当前请求协议是 `cosmos-causal-action-v2`：client 发送 Robotwin 原生 state，
-server 组装 unified55 并返回拆分后的原生动作。旧版直接收发 55D 的 client 需要同步更新。
+当前请求协议是 `cosmos-causal-action-v2`：client 发送 joint/endpose 字典，
+server 组装 unified55 并返回拆分后的动作。EEF 输入和输出均为训练数据坐标系的
+`xyz+xyzw`；server 不做坐标系或四元数顺序转换，client 与 server 需要同步更新。
 首次连接先接收 metadata 字典，其中包含支持的执行模式、左右臂 DOF 和四元数顺序。
 
 ## 模板启动与数据回放
@@ -49,7 +50,8 @@ state、mask、任务描述和实际 FPS；`--dataset-index`、`--index` 可选�
 replay 与离线均根据所选片段的实际 action 数自动计算预测轮数：`轮数 = 实际 action 数 / 16`，
 自动处理完整片段，无需配置轮数。
 回放会将训练 state 转成原生 joint/endpose 字典，只发送数据里实际有效的字段，
-不会从关节目标伪造 EEF。mask 只用于本地回放转换，不发送给 server。
+不会从关节目标伪造 EEF。EEF 直接使用数据集的 `xyz+xyzw`，不转换坐标系或四元数顺序。
+mask 只用于本地字段选择，不发送给 server。
 请求观测时刻依次为 0、16、32、……，直到处理完整片段，每次返回动作保存至
 `outputs/seed42/stepXXXXXX_action_joint.npy`（以 server 采样 seed 为 42 为例），
 如果模型支持 EEF，则同时保存 `_action_eef.npy`。
@@ -201,13 +203,14 @@ server 的 `SEED` 控制模型采样，client 的 `--seed` 控制仿真场景，
    再设置 policy 的步数上限和 instruction。专家观测不发送给 server，不计入 policy 的执行步数。
    指定 `--instruction` 时直接设置该文本，跳过专家预运行和文本生成。
 3. 调用 `client.reset(prompt=env.get_instruction(), record_video=True)`，server 清空上一 episode 的缓存并记录预测 latent。
-   初次 `get_obs()` 读取当前三视角图像和 joint/endpose，发送 `observation_step=0`。
+   初次 `get_obs()` 读取当前三视角图像和 joint/endpose，client 将 EEF 从世界系
+   `xyz+wxyz` 转为训练坐标系 `xyz+xyzw`，发送 `observation_step=0`。
    server 根据自身 mask 组装 unified55、归一化、更新首帧 KV，再进行 10 次 denoise。
 4. 接收完整 32 步预测，检查 native action 的维度、有限值及 `execute_steps`，
    将动作块保存为 `.npy`。server 每轮为整段视频保留前 16 步对应的预测 latent，
    客户端仅取前 16 行按顺序执行，后 16 行不执行。
    `joint` 映射到 `env.take_action(action, action_type="qpos")`；
-   `eef` 映射到 `action_type="ee"`，每行含原生 wxyz 四元数。
+   `eef` 先由 client 转为世界系 `xyz+wxyz`，再传给 `action_type="ee"`。
 5. **每次 take_action 返回后立即 get_obs**，记录执行后的三视角图像。
    对 RGB 数组做独立拷贝，防止下一次渲染复用缓冲区覆盖旧帧。
    初始观测和每次执行后的观测都追加到同一 `video.mp4`，覆盖整个 policy episode，包含终止帧。
@@ -215,7 +218,7 @@ server 的 `SEED` 控制模型采样，client 的 `--seed` 控制仿真场景，
 6. 将这 16 组图像和最后一组对应的 joint/endpose 发给 server，同时发送
    `executed_steps=16` 和累计 `observation_step=16/32/48/...`。
    server 更新真实观测 KV，以最新 state 重新预测 32 步，继续执行前 16 步。
-   client 不生成 unified55、不发送 mask，也不做归一化、相对位姿相加或四元数换序。
+   client 负责 EEF 坐标系和四元数换序；unified55 组装、mask、归一化和绝对目标解码由 server 处理。
 7. 每次动作后检查 `env.eval_success` 和 `env.take_action_cnt >= env.step_lim`。
    成功或达到上限立即停止，即使当前 16 步尚未执行完；不足 16 帧不补齐、不提交下一次 infer。
    保存 episode 结果，通过 `finally` 关闭环境；下一 episode 使用新 seed、重新 reset。
@@ -247,7 +250,8 @@ robotwin_sim/
     ...
 ```
 
-每个 `.npy` 保存 server 返回的完整 32 步原生动作，只有前 16 步会进入正常执行循环，
+每个 `.npy` 保存 server 返回的完整 32 步动作；EEF 文件保留训练坐标系的 `xyz+xyzw`，
+在 client 转为世界系执行之前保存。只有前 16 步会进入正常执行循环，
 终止发生在块内时实际执行更少。`metrics.json` 保存任务、文本、server 地址、控制模式、
 state 来源和各 episode 的 seed、实际 instruction、文本来源/类型、状态、success、执行步数、
 policy 闭环耗时及各次请求的 server 耗时（闭环耗时不包含专家预运行及场景初始化）。
@@ -396,26 +400,23 @@ EEF 返回 `None`，不能作为动作执行；只有 action mask 同时覆盖�
 
 ### EEF 坐标系配置
 
-client 的原生 EEF state 和 server 返回的 EEF action 均使用世界系 `xyz+wxyz`。
-模型内部的 unified55 使用 `xyz+xyzw`，坐标系必须与训练数据一致。
-启用任意 EEF state/action 槽位时，adapter 必须获得 `eef_pose_frame`：
+server 直接接收训练数据坐标系的 `xyz+xyzw`，返回的 EEF action 也使用相同表示。
+server 仍执行 mask、校验、归一化、反归一化和绝对目标解码，不读取数据集坐标元信息，
+也不要求能够访问统计文件中记录的数据路径。`--robot-config` 只用于 mask 和 arm DOF；
+旧配置中的 `eef_pose_frame/T_world_base` 应移到仿真 client 的 `--eef-config`。
 
-- `base`：训练 EEF 位于共享双臂基座系，必须同时提供 `T_world_base`。
-  输入 state 做世界系到基座系转换；输出 action 在反归一化和绝对目标解码后做反向转换。
-  位置和姿态都会转换，夹爪、关节值保持原有语义。
-- `world`：训练 EEF 已处于世界系，只转换四元数顺序，不传 `T_world_base`。
+数据集 WebSocket replay 和离线执行前缀推理直接使用数据集 EEF 值。
+仿真 client 从 RoboTwin 读取世界系 `xyz+wxyz`，发送前转换为训练数据坐标系 `xyz+xyzw`；
+收到预测 EEF 后，再转换回世界系 `xyz+wxyz` 给 `env.take_action(..., action_type="ee")`。
+关节和夹爪值不参与 pose 转换。其他数据集也应由自己的 client 完成相应转换。
 
-未显式配置时，server 从统计 `provenance.sources` 的 `eef_pose_frame/T_world_base`
-字段读取，或根据各来源 `source` 路径读取 `meta/info.json` 的 `custom.eef_enrichment`。
-数据元信息必须明确记录 `unified_quaternion="xyzw"`，以及 `unified_pose_frame`
-（`world`、`base` 或当前数据的 `shared ALOHA dual-arm URDF root/base frame`）。
-所有来源的坐标系和变换必须一致；缺失、未知或不一致时报错，要求显式传入 `--robot-config`。
-server 无法访问统计中记录的数据路径时，也应使用该参数。
-未启用 EEF 的旧关节配置不需要这些字段。
+RoboTwin client 可用以下互斥参数之一配置：
 
-可以只提供坐标配置，mask 继续由训练统计加载。以下为当前 ALOHA 数据元信息对应的示例；
-实际使用时应复制目标数据的 `T_world_base`，并确保仿真机器人的基座放置与其一致。
-四元数会归一化；`base` 模式的位置 mask 必须整组启用或关闭 xyz。
+- `--eef-dataset-root /path/to/processed/task/clean`：读取该数据集 `meta/info.json` 中的
+  `custom.eef_enrichment`，要求 `unified_quaternion="xyzw"`、明确的 `unified_pose_frame`，
+  基座系还需 `T_world_base`。
+- `--eef-config /path/to/eef.json`：从独立 JSON 加载 `eef_pose_frame`（`base` 或 `world`），
+  `base` 必须同时提供 `T_world_base`。示例：
 
 ```json
 {
@@ -427,15 +428,21 @@ server 无法访问统计中记录的数据路径时，也应使用该参数。
 }
 ```
 
-将其保存为 `/path/to/robot.json` 后，把 `--robot-config /path/to/robot.json`
-追加到 server 启动命令或 `robotwin_server_template.sh` 后即可。
-这不会给旧 checkpoint 增加未训练的 EEF 能力，checkpoint、统计和 mask 仍须匹配。
+实际使用时应复制目标数据的变换，并确保仿真基座放置与其一致；变换四元数会归一化。
+省略这两个参数时，client 默认训练 pose 位于世界系，只做 `wxyz/xyzw` 换序。
+基座系训练数据需要显式传入上述任一参数，例如追加到现有 client 命令：
 
-数据回放从所选数据集元信息加载相同变换，先将基座系 state 转成世界系原生请求；
-server 再恢复为模型使用的基座系。连接后会核对 server metadata 的
-`native_eef_pose_frame`、`unified_eef_pose_frame` 和 `T_world_base`，启用 EEF 时不一致即报错。
-离线执行前缀推理也从当前数据集加载该变换，避免将基座系数据再次当成世界系转换。
-独立 `robotwin_eef_replay.py` 已自行完成基座系到世界系转换，不应再叠加一次。
+```bash
+python examples/action_pretrain/robotwin_client.py \
+  --robotwin-root /path/to/RoboTwin \
+  --eef-dataset-root /path/to/processed/task/clean \
+  --control-mode eef
+```
+
+连接 metadata 声明 `quaternion_order="xyzw"`、`eef_pose_frame="dataset"`。
+更新后的 client 会检查这两个字段，避免连接到仍转换世界系 `wxyz` 的旧 server。
+实际训练坐标系由数据集及其 client 约定，server 不推断或变换。
+独立 `robotwin_eef_replay.py` 不连接 server，仍自行将数据集目标转换成仿真世界系执行。
 
 ## 仿真器客户端协议
 
@@ -447,6 +454,7 @@ msgpack 和 websockets，不加载 Torch、VAE 或模型。也可以直接沿用
 from pathlib import Path
 
 from cosmos_framework.inference.causal_action.client import CausalPolicyClient
+from cosmos_framework.inference.causal_action.robotwin_client import RobotwinPoseConverter, native_state
 
 
 def camera_images(observation):
@@ -458,12 +466,7 @@ def camera_images(observation):
     }
 
 
-def native_state(observation):
-    return {
-        "joint_action": observation["joint_action"],
-        "endpose": observation["endpose"],
-    }
-
+poses = RobotwinPoseConverter.from_dataset("/path/to/processed/task/clean")
 
 control_mode = "joint"  # 或 "eef"，连接时会校验模型是否支持
 action_type = "qpos" if control_mode == "joint" else "ee"
@@ -472,13 +475,16 @@ with CausalPolicyClient("ws://127.0.0.1:8000", control_mode=control_mode) as cli
     client.reset(prompt=TASK_ENV.get_instruction(), record_video=True)
     observation = TASK_ENV.get_obs()
     response = client.infer(dict(
-        obs=camera_images(observation), state=native_state(observation), observation_step=0,
+        obs=camera_images(observation), state=native_state(observation, TASK_ENV, pose_converter=poses), observation_step=0,
     ))
     step = 0
     done = False
     while not done:
         observations = []
-        for action in client.actions(response)[:response["execute_steps"]]:
+        actions = client.actions(response)
+        if control_mode == "eef":
+            actions = poses.actions_to_world(actions)
+        for action in actions[:response["execute_steps"]]:
             TASK_ENV.take_action(action, action_type=action_type)
             observation = TASK_ENV.get_obs()
             observations.append(camera_images(observation))
@@ -489,7 +495,7 @@ with CausalPolicyClient("ws://127.0.0.1:8000", control_mode=control_mode) as cli
         if not done:
             # 16 张执行后新图，不重复上一轮末帧；state 与最后一张图对应。
             response = client.infer(dict(
-                obs=observations, state=native_state(observation),
+                obs=observations, state=native_state(observation, TASK_ENV, pose_converter=poses),
                 executed_steps=16, observation_step=step,
             ))
     client.save_prediction_video(output / "prediction.mp4")
@@ -498,11 +504,10 @@ with CausalPolicyClient("ws://127.0.0.1:8000", control_mode=control_mode) as cli
 `state.joint_action` 使用 `left_arm`、`right_arm`、`left_gripper`、`right_gripper`；
 关节向量长度等于 server 配置的左右臂 DOF，夹爪可为标量或长度 1 的数组。
 `state.endpose` 使用 `left_endpose`、`right_endpose`，各为
-`[x,y,z,qw,qx,qy,qz]`；夹爪也可放在 endpose 下作为 joint_action 缺失时的补充。
-若两处都提供夹爪，则以 joint_action 中的值为准。直接发送 get_obs() 的这两个字典即可。
+`[x,y,z,qx,qy,qz,qw]`，坐标系与训练数据一致；夹爪也可放在 endpose 下作为 joint_action 缺失时的补充。
+若两处都提供夹爪，则以 joint_action 中的值为准。RoboTwin get_obs() 的 endpose 需要先由 client 转换。
 server 只读取 state_mask 启用的字段；有效字段缺失、形状错误或非法值会报错。
-无效字段忽略并清零。EEF 根据配置从世界系转换到训练坐标系，
-内部四元数转换成 unified55 的 xyzw 后再进行校验和归一化。
+无效字段忽略并清零。EEF 直接按输入值组装为 unified55，再进行校验和归一化。
 
 RoboTwin 的 `get_obs().joint_action` 关节值来自 drive target，并非实际 qpos。
 如需实测关节状态，client 应明确调用 `get_*_arm_real_jointState()` 后替换对应字段，
@@ -529,7 +534,7 @@ server 将首个真实观测 latent 和每轮前 16 步对应的预测 latent �
 `action` 是含以下两个键的字典：
 
 - `joint`：`float32 [32,left_dof+right_dof+2]`，每行顺序为左关节、左夹爪、右关节、右夹爪。
-- `eef`：世界系 `float32 [32,16]`，每行顺序为左 xyz+wxyz、左夹爪、右 xyz+wxyz、右夹爪。
+- `eef`：训练数据坐标系 `float32 [32,16]`，每行顺序为左 xyz+xyzw、左夹爪、右 xyz+xyzw、右夹爪。
 
 未训练的执行模式值为 `None`；两种模式都有效时同时返回，由 client 选择。
 动作已经反归一化并恢复成绝对目标，client 不再加初始位姿，也不需要知道 unified55 槽位。

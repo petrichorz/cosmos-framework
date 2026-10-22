@@ -152,6 +152,9 @@ class CausalPolicyClient:
         if self.metadata.get("protocol") != "cosmos-causal-action-v2":
             self.close()
             raise ValueError("Expected a cosmos-causal-action-v2 server")
+        if self.metadata.get("quaternion_order") != "xyzw" or self.metadata.get("eef_pose_frame") != "dataset":
+            self.close()
+            raise ValueError("Expected dataset-frame xyz+xyzw EEF poses; update the server and clients together")
         if control_mode not in self.metadata["available_control_modes"]:
             self.close()
             raise ValueError(f"Server does not support control_mode={control_mode!r}")
@@ -182,7 +185,7 @@ class CausalPolicyClient:
         )
 
     def actions(self, response):
-        """Select server-packed native joint/EEF actions without unified55 slot logic."""
+        """Select packed joint or dataset-frame xyz+xyzw EEF actions."""
         actions = response["action"][self.control_mode]
         if actions is None:
             raise ValueError(f"Server returned no valid {self.control_mode} actions")

@@ -134,7 +134,52 @@ def test_measured_state_replaces_joint_values_without_mutating_get_obs():
     assert observation["joint_action"]["left_gripper"] == 0.0
     assert measured["joint_action"]["left_arm"] == [1.0] * 6
     np.testing.assert_array_equal(measured["joint_action"]["vector"], [1.0] * 6 + [0.25] + [2.0] * 6 + [0.75])
-    assert measured["endpose"] == observation["endpose"]
+    for side in ("left", "right"):
+        key = f"{side}_endpose"
+        np.testing.assert_array_equal(measured["endpose"][key], [0, 0, 0, 0, 0, 0, 1])
+        assert observation["endpose"][key] == [0, 0, 0, 1, 0, 0, 0]
+
+
+def test_client_converts_world_state_and_dataset_actions_with_base_rotation():
+    env = FakeEnv(success_at=3)
+    env.set_instruction(instruction="Move.")
+    client = FakeClient(control_mode="eef")
+    converter = runner.RobotwinPoseConverter(
+        eef_pose_frame="base",
+        T_world_base=dict(position=[1, 2, 3], quaternion_wxyz=[1, 0, 0, 1]),
+    )
+    # R_world_base is +90 degrees about Z; the observation is world xyz=0, q=identity.
+    runner.rollout(env, client, pose_converter=converter)
+    for side in ("left", "right"):
+        np.testing.assert_allclose(
+            client.requests[0]["state"]["endpose"][f"{side}_endpose"],
+            [-2, 1, -3, 0, 0, -np.sqrt(0.5), np.sqrt(0.5)],
+            atol=1e-6,
+        )
+    # The second predicted pose has xyz=1 and xyzw=[1,1,1,1]. Both arms must convert.
+    action = env.executed[1][0]
+    for start in (0, 8):
+        np.testing.assert_allclose(action[start : start + 7], [0, 3, 4, 0, 0, np.sqrt(2), np.sqrt(2)], atol=1e-6)
+    np.testing.assert_array_equal(action[[7, 15]], [1, 1])
+
+
+def test_client_loads_dataset_pose_metadata_and_requires_base_transform(tmp_path):
+    info = tmp_path / "meta/info.json"
+    info.parent.mkdir()
+    enrichment = dict(
+        unified_pose_frame="shared ALOHA dual-arm URDF root/base frame",
+        unified_quaternion="xyzw",
+        T_world_base=dict(position=[0, -0.65, 0], quaternion_wxyz=[0.707, 0, 0, 0.707]),
+    )
+    info.write_text(json.dumps(dict(custom=dict(eef_enrichment=enrichment))))
+    converter = runner.RobotwinPoseConverter.from_dataset(tmp_path)
+    assert converter.eef_pose_frame == "base"
+    pose = [1, 2, 3, 0.5, 0.5, 0.5, 0.5]
+    np.testing.assert_allclose(converter.to_world(converter.to_dataset(pose)), pose, atol=1e-6)
+    del enrichment["T_world_base"]
+    info.write_text(json.dumps(dict(custom=dict(eef_enrichment=enrichment))))
+    with pytest.raises(ValueError, match="T_world_base"):
+        runner.RobotwinPoseConverter.from_dataset(tmp_path)
 
 
 def test_invalid_action_chunk_is_rejected_before_simulator_execution():
