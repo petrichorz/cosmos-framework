@@ -321,29 +321,29 @@ client 环境的 `PATH` 必须能找到支持 `libx264` 的 `ffmpeg`；编码器
 手动覆盖、连续不稳定 seed 重试、MP4 编解码、视频帧顺序/颜色、提前结束和异常时录像收尾；
 未在本机运行真实 RoboTwin 仿真。
 
-## RoboTwin EEF Dataset Replay
+## RoboTwin EEF 数据集回放
 
-[`robotwin_eef_replay.py`](../examples/action_pretrain/robotwin_eef_replay.py) drives RoboTwin with the EEF targets from one training-data episode and records simulation observations. This is a standalone entry point: it reads the dataset directly and requires no policy server or model checkpoint. It reuses the existing RoboTwin client's environment-loading, camera and video helpers.
+[`robotwin_eef_replay.py`](../examples/action_pretrain/robotwin_eef_replay.py) 使用训练数据中单个 episode 的 EEF 目标驱动 RoboTwin，并记录仿真观测。这是一个独立入口，直接读取数据集，无需 policy server 或模型 checkpoint；环境加载、相机和视频处理复用现有 RoboTwin client 的辅助函数。
 
-### Data and environment requirements
+### 数据与环境要求
 
-Point `--dataset-root` to one LeRobot dataset containing `meta/info.json` and `data/`, for example `RoboTwin__adjust_bottle/clean`. Select an episode with `--episode-index`; its `frame_index` values must be contiguous and start at zero. The script reads physical, absolute `action_unified` values directly, without normalization, extra temporal shifting or video-stride sampling.
+将 `--dataset-root` 指向包含 `meta/info.json` 和 `data/` 的单个 LeRobot 数据集，例如 `RoboTwin__adjust_bottle/clean`。通过 `--episode-index` 选择 episode，其 `frame_index` 必须从零开始且连续。脚本直接读取物理量表示的绝对 `action_unified` 值，不做归一化、额外时间偏移或按视频步长采样。
 
-The dataset must contain `episode_index`, `frame_index`, `action_unified` and `mask_action`. The action and mask arrays must have width 55, with both EEFs and grippers enabled in every row:
+数据集必须包含 `episode_index`、`frame_index`、`action_unified` 和 `mask_action`。动作和 mask 数组的宽度必须为 55，且每一行都必须启用双臂 EEF 和夹爪对应的维度：
 
-| Unified slots | Meaning                   | Required representation   |
-| ------------- | ------------------------- | ------------------------- |
-| `14:21`       | Left EEF pose             | `x,y,z,qx,qy,qz,qw`       |
-| `21:28`       | Right EEF pose            | `x,y,z,qx,qy,qz,qw`       |
-| `28:30`       | Left/right gripper target | Opening values in `[0,1]` |
+| 统一维度切片 | 含义           | 要求的表示形式         |
+| ------------ | -------------- | ---------------------- |
+| `14:21`      | 左臂 EEF 位姿  | `x,y,z,qx,qy,qz,qw`    |
+| `21:28`      | 右臂 EEF 位姿  | `x,y,z,qx,qy,qz,qw`    |
+| `28:30`      | 左右夹爪目标值 | `[0,1]` 范围内的开度值 |
 
-By default, `--pose-frame base` interprets EEF poses in the shared robot base frame. The script reads `custom.eef_enrichment.T_world_base` from `meta/info.json`, using its `position` and `quaternion_wxyz` fields, and transforms both position and orientation into the world frame. To override that transform, pass `--world-from-base x y z qw qx qy qz`. If the unified EEF slots already contain world-frame poses, use `--pose-frame world` and omit `--world-from-base`. Both modes interpret the input quaternion as `xyzw` and export `wxyz` for RoboTwin.
+默认的 `--pose-frame base` 将 EEF 位姿解释为机器人共用基座坐标系中的位姿。脚本从 `meta/info.json` 读取 `custom.eef_enrichment.T_world_base`，使用其中的 `position` 和 `quaternion_wxyz` 字段，将位置和朝向一并转换到世界坐标系。可传入 `--world-from-base x y z qw qx qy qz` 覆盖该变换。如果统一动作中的 EEF 维度已存储世界坐标系位姿，则使用 `--pose-frame world`，并省略 `--world-from-base`。两种模式都按 `xyzw` 解释输入四元数，并为 RoboTwin 导出 `wxyz`。
 
-For simulation, use a working RoboTwin Python environment with NumPy, PyArrow, OpenCV and msgpack, plus FFmpeg with the `libx264` encoder on `PATH`. The RoboTwin checkout must include `scripts/eval_policy_xpolicylab.py`, which supplies the task/config helpers. The script automatically uses `--episode-index` as the simulator seed; there is no separate `--seed` option. This is a replay convention, not a recovered collection seed. The current dataset metadata does not retain that original seed mapping, so this convention does not guarantee the original scene layout. Exact scene reproduction would also require matching task configuration, robot and assets.
+执行仿真需要可正常运行的 RoboTwin Python 环境，并安装 NumPy、PyArrow、OpenCV 和 msgpack；`PATH` 中还需提供支持 `libx264` 编码器的 FFmpeg。RoboTwin 代码目录必须包含 `scripts/eval_policy_xpolicylab.py`，以提供任务和配置辅助函数。脚本自动将 `--episode-index` 用作仿真 seed，没有单独的 `--seed` 选项。这只是回放约定，并非恢复出的原始采集 seed。当前数据集元数据未保留原始 seed 映射，因此这一约定不能保证还原原始场景布局；精确复现场景还需要匹配任务配置、机器人和资产。
 
-### Export actions without starting the simulator
+### 不启动仿真器，仅导出动作
 
-Run from the Cosmos repository root and replace the paths. The example selects episode 1, uses simulator seed 1 and writes to `episode001/`. The default episode index is 0, producing `episode000/` with seed 0.
+在 Cosmos 仓库根目录运行，并替换示例路径。以下示例选择 episode 1，使用仿真 seed 1，结果写入 `episode001/`。默认 episode 索引为 0，使用 seed 0，输出目录为 `episode000/`。
 
 ```bash
 cd /path/to/cosmos-framework
@@ -356,11 +356,11 @@ python examples/action_pretrain/robotwin_eef_replay.py \
   --output outputs/robotwin_eef_replay
 ```
 
-`--prepare-only` requires NumPy, PyArrow, msgpack, OpenCV and FFmpeg but does not import RoboTwin/SAPIEN. It validates and exports the actions and dataset reference video, writing `action.npy`, `action_dataset.npy`, `video_data.mp4` and `metrics.json` under `outputs/robotwin_eef_replay/episode001/`. This checks data preparation and video extraction, not simulator execution or task success.
+`--prepare-only` 需要 NumPy、PyArrow、msgpack、OpenCV 和 FFmpeg，但不会导入 RoboTwin/SAPIEN。该模式校验并导出动作和数据集参考视频，在 `outputs/robotwin_eef_replay/episode001/` 下写入 `action.npy`、`action_dataset.npy`、`video_data.mp4` 和 `metrics.json`。这只能检查数据准备和视频提取，不能验证仿真执行或任务成功情况。
 
-### Run the replay in a RoboTwin environment
+### 在 RoboTwin 环境中运行回放
 
-Using the same dataset variable, run the following on a machine with a working RoboTwin installation:
+沿用上述数据集变量，在已正确安装 RoboTwin 的机器上运行：
 
 ```bash
 python examples/action_pretrain/robotwin_eef_replay.py \
@@ -372,9 +372,9 @@ python examples/action_pretrain/robotwin_eef_replay.py \
   --output outputs/robotwin_eef_replay
 ```
 
-Use `--task-config demo_randomized` for the corresponding randomized data. `--task-name` can be omitted when `meta/info.json` supplies `custom.source.task`. Add `--max-steps 32` to limit replay to the first 32 action rows; RoboTwin may stop earlier on task success or its task step limit. `--video-fps` sets video playback FPS and defaults to 30.
+对于对应的随机化数据，使用 `--task-config demo_randomized`。若 `meta/info.json` 提供了 `custom.source.task`，可省略 `--task-name`。添加 `--max-steps 32` 可将回放限制为前 32 行动作；RoboTwin 可能因任务成功或达到任务步数上限而提前停止。`--video-fps` 设置视频播放帧率，默认为 30。
 
-To execute all selected actions even after the task succeeds, append `--execute-all-actions`. This also temporarily extends RoboTwin's task step limit to cover the selected action count. `--max-steps` still determines which action prefix is selected; omit it to replay the entire episode. For example:
+若希望任务成功后仍执行完所有选中的动作，可添加 `--execute-all-actions`。该选项还会临时扩展 RoboTwin 的任务步数上限，使其覆盖选中的动作数量。`--max-steps` 仍用于决定选取动作序列的前多少步；省略该参数即可回放整个 episode。例如：
 
 ```bash
 python examples/action_pretrain/robotwin_eef_replay.py \
@@ -385,34 +385,34 @@ python examples/action_pretrain/robotwin_eef_replay.py \
   --output outputs/robotwin_eef_replay
 ```
 
-The option applies only to this standalone replay. During replay it temporarily wraps the environment instance's `check_success()` to record success without triggering `take_action()`'s early return, and keeps `eval_success` from blocking subsequent actions. The original checker and task limit are restored on exit, including exceptions; no RoboTwin source files are modified. `metrics.json` records `execute_all_actions`, the first successful action number in `first_success_step` (0 means success before any action, null means no success), and whether success was observed in `eval_success`. `observations.npz` success flags remain true after the first observed success. After all selected actions complete, `stop_reason` is `actions_exhausted`, even if the task succeeded earlier. Errors still terminate the run and are recorded normally.
+该选项仅作用于此独立回放脚本。回放期间，脚本临时包装环境实例的 `check_success()`，在记录成功状态的同时避免触发 `take_action()` 提前返回，并防止 `eval_success` 阻止后续动作。退出时（包括异常退出）会恢复原有的成功检查函数和任务步数上限，不修改 RoboTwin 源文件。`metrics.json` 记录 `execute_all_actions`、首次成功的动作序号 `first_success_step`（0 表示执行任何动作前已成功，null 表示未成功），以及是否观测到成功的 `eval_success`。`observations.npz` 中的成功标记在首次观测到成功后持续为 true。所有选中动作执行完毕后，即使任务此前已成功，`stop_reason` 仍为 `actions_exhausted`。发生错误时仍会终止运行并正常记录错误。
 
-Each exported action has 16 values: `[left xyz, left qw,qx,qy,qz, left gripper, right xyz, right qw,qx,qy,qz, right gripper]`. The script calls `env.take_action(action, action_type="ee")` and then `env.get_obs()` after each completed action. It saves an initial observation before the first action, so a successful recording of N executed actions contains N+1 observation frames.
+每个导出动作包含 16 个值，排列为 `[左臂 xyz, 左臂 qw,qx,qy,qz, 左夹爪, 右臂 xyz, 右臂 qw,qx,qy,qz, 右夹爪]`。脚本调用 `env.take_action(action, action_type="ee")`，并在每个动作执行完成后调用 `env.get_obs()`。首个动作前还会保存初始观测，因此正常记录 N 个已执行动作时，会得到 N+1 帧观测。
 
-### Output files
+### 输出文件
 
-All files are written directly under `--output/episode{episode_index:03d}/`, for example `outputs/robotwin_eef_replay/episode001/`. The directory is keyed by the selected dataset episode. Rerunning the same episode in the same output root overwrites files with the same names.
+所有文件直接写入 `--output/episode{episode_index:03d}/`，例如 `outputs/robotwin_eef_replay/episode001/`。目录由选中的数据集 episode 索引决定。在同一输出根目录下重新运行同一 episode 会覆盖同名文件。
 
-| File                 | Contents                                                                                                                               |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `action.npy`         | World-frame EEF/gripper control targets, shape `[T,16]`; T is the selected action count after applying `--max-steps`.                  |
-| `action_dataset.npy` | Original dataset EEF/gripper targets, shape `[T,16]`, with the same interleaved grippers and `xyz+xyzw` poses in the dataset frame.    |
-| `observations.npz`   | Initial and subsequent EEF poses, measured arm qpos, joint/gripper commands, success flags, executed actions and source frame indices. |
-| `video.mp4`          | H.264 video of simulation RGB observations: head camera on top, resized left/right wrist cameras side by side below.                   |
-| `video_data.mp4`     | H.264 reference video extracted from the selected dataset episode, using the same three-view layout and the dataset's FPS.             |
-| `metrics.json`       | Dataset/scene settings, run status, execution count, stop reason, task success and mean/max position and rotation tracking errors.     |
+| 文件                 | 内容                                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `action.npy`         | 世界坐标系中的 EEF/夹爪控制目标，形状为 `[T,16]`；T 为应用 `--max-steps` 后选中的动作数量。                    |
+| `action_dataset.npy` | 数据集原始 EEF/夹爪目标，形状为 `[T,16]`，夹爪值按相同顺序交错排列，位姿使用数据集坐标系中的 `xyz+xyzw` 表示。 |
+| `observations.npz`   | 初始及后续 EEF 位姿、实测机械臂 qpos、关节/夹爪指令、成功标记、已执行动作和源帧索引。                          |
+| `video.mp4`          | 仿真 RGB 观测的 H.264 视频：上方为头部相机，下方并排放置缩放后的左右腕部相机画面。                             |
+| `video_data.mp4`     | 从所选数据集 episode 提取的 H.264 参考视频，采用相同的三视角布局和数据集帧率。                                 |
+| `metrics.json`       | 数据集/场景设置、运行状态、执行数量、停止原因、任务成功状态，以及位置和旋转跟踪误差的均值与最大值。            |
 
-In `observations.npz`, `eef_world_wxyz` has shape `[N+1,14]` (left pose followed by right pose), `measured_arm_qpos` contains actual arm joint positions, and `joint_command` contains drive targets including commanded gripper values. `eval_success` aligns with the N+1 observations. `executed_action` and `source_frame_index` have N rows; their row i corresponds to observation row i+1. Separate RGB image files are not written.
+在 `observations.npz` 中，`eef_world_wxyz` 的形状为 `[N+1,14]`（左臂位姿在前，右臂位姿在后），`measured_arm_qpos` 保存实际机械臂关节位置，`joint_command` 保存包含夹爪指令值的驱动目标。`eval_success` 与 N+1 帧观测对齐。`executed_action` 和 `source_frame_index` 各有 N 行，其第 i 行对应第 i+1 行观测。不单独写出 RGB 图片文件。
 
-After each action, the script converts `get_obs()["endpose"]` from world `xyz+wxyz` back to the dataset frame and `xyz+xyzw`. In the default `--pose-frame base` mode this uses the inverse of the same `T_world_base` used to construct execution targets. It then compares the converted observation against the original dataset action row, without another temporal shift. `--pose-frame world` compares in the world frame instead. `metrics.json` records `tracking_error_frame`, `tracking_error_quaternion_order`, and `tracking_error_reference`; `tracking_error.left/right` report mean/max position distance in meters and rotation angle in radians, computed as `2*acos(abs(dot(q_target, q_observed)))` after quaternion normalization.
+每个动作执行后，脚本将 `get_obs()["endpose"]` 从世界坐标系的 `xyz+wxyz` 转回数据集坐标系和 `xyz+xyzw` 表示。在默认的 `--pose-frame base` 模式下，使用构造执行目标时所用 `T_world_base` 的逆变换。随后将转换后的观测与原始数据集动作行比较，不再施加额外时间偏移。`--pose-frame world` 则直接在世界坐标系中比较。`metrics.json` 记录 `tracking_error_frame`、`tracking_error_quaternion_order` 和 `tracking_error_reference`；`tracking_error.left/right` 分别报告位置距离（米）和旋转角度（弧度）的均值与最大值，旋转角度在四元数归一化后按 `2*acos(abs(dot(q_target, q_observed)))` 计算。
 
-The NPZ additionally stores `eef_dataset_xyzw [N+1,14]`, `target_eef_dataset_xyzw [N,14]`, `eef_position_error_m [N,2]`, and `eef_rotation_error_rad [N,2]`. The two error columns are left/right; error row i compares target row i with dataset-frame observation row i+1. The initial observation is retained but excluded from tracking-error statistics.
+NPZ 还保存 `eef_dataset_xyzw [N+1,14]`、`target_eef_dataset_xyzw [N,14]`、`eef_position_error_m [N,2]` 和 `eef_rotation_error_rad [N,2]`。两个误差列分别对应左臂和右臂；第 i 行误差比较第 i 行目标与数据集坐标系中的第 i+1 行观测。初始观测会保留，但不计入跟踪误差统计。
 
-Reference video extraction uses the per-camera chunk/file indices and episode timestamps in `meta/episodes/chunk-*/file-*.parquet`, together with `meta/info.json`'s `video_path`, to select this episode from the packed source videos. All three dataset camera videos must be available and have the same FPS as the dataset. Frames are streamed into the same head/wrist layout used by `video.mp4`, preserving the source head-camera resolution. `--video-fps` controls simulation-video playback only; the reference retains the dataset's FPS.
+提取参考视频时，脚本结合 `meta/episodes/chunk-*/file-*.parquet` 中各相机的 chunk/file 索引、episode 时间戳，以及 `meta/info.json` 中的 `video_path`，从打包存储的源视频中选取当前 episode。数据集的三个相机视频都必须可用，且帧率必须与数据集一致。视频帧以流式方式写入，采用与 `video.mp4` 相同的头部/腕部相机布局，并保留源头部相机的分辨率。`--video-fps` 仅控制仿真视频的播放帧率；参考视频保留数据集帧率。
 
-The reference contains the selected action prefix plus one following observation when available, capped at the episode's recorded frame count. For example, `--max-steps 32` exports up to 33 reference frames. For a full episode with L action rows and L recorded video frames, the reference has L frames; the simulation can record L+1 frames because it also observes the final executed target. Early simulation success or a task step limit does not shorten the already exported reference. `metrics.json` records `video_data_path`, `video_data_frames`, `video_data_fps`, and `seed_source="episode_index"`.
+参考视频包含所选动作前缀对应的观测，并在可用时额外包含下一帧观测，总帧数不超过该 episode 的已记录帧数。例如，`--max-steps 32` 最多导出 33 帧参考视频。对于包含 L 行动作和 L 帧已记录视频的完整 episode，参考视频有 L 帧；仿真可记录 L+1 帧，因为还会观测最后一个目标执行后的状态。仿真提前成功或达到任务步数上限不会缩短已导出的参考视频。`metrics.json` 记录 `video_data_path`、`video_data_frames`、`video_data_fps` 和 `seed_source="episode_index"`。
 
-The EEF targets in the enriched RoboTwin data are derived from the next recorded pose. RoboTwin replans a trajectory for each target, so this replay does not guarantee the original physical timing or trajectory. The video FPS controls playback only; it does not set the simulation/control frequency. A finished replay is not necessarily a successful task: check `eval_success`, `stop_reason` and the measured tracking errors in `metrics.json`.
+补充了 EEF 信息的 RoboTwin 数据以记录序列中的下一帧位姿构造 EEF 目标。RoboTwin 会为每个目标重新规划轨迹，因此此回放不能保证还原原始物理时序或轨迹。视频帧率仅控制播放，不决定仿真或控制频率。回放完成不一定意味着任务成功，应检查 `metrics.json` 中的 `eval_success`、`stop_reason` 和实测跟踪误差。
 
 ## Server 的机器人配置
 
@@ -483,56 +483,174 @@ python examples/action_pretrain/robotwin_client.py \
 msgpack 和 websockets，不加载 Torch、VAE 或模型。也可以直接沿用 LingBot
 客户端的 msgpack/NumPy 编解码。
 
+### 客户端入口与使用方式
+
+模型 server 和仿真器客户端分别运行在各自的 Python 环境中，通过 WebSocket 二进制
+MessagePack 消息交换 NumPy 图像、状态和动作。server 负责模型推理，客户端负责环境初始化、
+采集观测、执行动作和判断任务结束；两端可以部署在不同机器。
+
+- 使用现有 RoboTwin：运行
+  [`examples/action_pretrain/robotwin_client.py`](../examples/action_pretrain/robotwin_client.py)，
+  启动命令、环境依赖和参数见[联合 RoboTwin 运行真实闭环仿真](#联合-robotwin-运行真实闭环仿真)。
+  通过 `--server-uri ws://<server-host>:8000` 指定模型服务地址。
+- 接入其他仿真器或真机：复用
+  [`CausalPolicyClient`](../cosmos_framework/inference/causal_action/client.py)，
+  自行实现设备观测读取、状态/动作转换和控制执行，见下文[接入其他仿真器或真机](#接入其他仿真器或真机)。
+
+`CausalPolicyClient` 的使用顺序为：建立连接并校验 metadata → `reset()` 开始推理会话 →
+`infer()` 提交观测 → `actions()` 选择执行模式对应的动作 → 执行并反馈新观测。
+需要预测视频时，在 reset 开启 `record_video=True`，结束后调用 `save_prediction_video()`；
+退出 `with` 块会关闭连接。
+
+### 设备接口与最小闭环示例
+
+客户端分为通信层和设备适配层，仿真器与真机都通过相同的设备接口接入：
+
+- `CausalPolicyClient` 负责连接 server、发送 reset/观测请求、接收动作和保存预测视频。
+- 设备适配层负责调用仿真器或真机 SDK，读取图像与状态、转换坐标、执行动作和判断结束。
+- server 负责状态校验与归一化、模型推理和绝对动作目标解码，不直接调用设备 SDK。
+
+下面的 `Device` 是文档中约定的接口，用于说明职责边界，仓库未提供该接口的公共实现。
+调用闭环函数前，由调用方初始化场景或真机、设置任务和起始状态；结束后由调用方关闭环境或释放设备。
+`client.reset()` 只重置 server 推理会话。
+
 ```python
-from pathlib import Path
+from typing import Protocol
 
+
+class Device(Protocol):
+    def observe(self) -> tuple[dict, dict]:
+        """返回同一采样时刻的 (三相机 RGB 字典, 协议 state 字典)。"""
+        ...
+
+    def execute(self, action, *, control_mode: str) -> None:
+        """将一个协议绝对目标转换为设备命令，按约定控制周期执行后返回。"""
+        ...
+
+    def is_done(self) -> bool:
+        """判断任务成功、达到执行上限或设备要求停止。"""
+        ...
+```
+
+`observe()` 返回的图像使用 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三个键，
+各为 `[H,W,3]` RGB `uint8`，并复制可能被后续采集覆盖的缓冲区。
+state 使用下文的 `joint_action` / `endpose` 结构；EEF 已转换为训练数据坐标系的 `xyz+xyzw`。
+`execute()` 接收的动作也是协议表示，设备坐标转换和控制器插值在该方法内部完成。
+对真机而言，返回表示已到下一个动作采样时刻，不要求每个目标都达到静态收敛，
+但不能仅把异步命令入队后立即返回并采集下一帧。
+
+以下闭环函数只使用上述接口；替换设备实现时可复用同一套 client/server 交互：
+
+```python
 from cosmos_framework.inference.causal_action.client import CausalPolicyClient
-from cosmos_framework.inference.causal_action.robotwin_client import RobotwinPoseConverter, native_state
 
 
-def camera_images(observation):
-    cameras = observation["observation"]
-    return {
-        "cam_high": cameras["head_camera"]["rgb"].copy(),  # [H,W,3] RGB uint8
-        "cam_left_wrist": cameras["left_camera"]["rgb"].copy(),
-        "cam_right_wrist": cameras["right_camera"]["rgb"].copy(),
-    }
+def run_episode(
+    device: Device,
+    *,
+    prompt: str,
+    server_uri="ws://127.0.0.1:8000",
+    control_mode="joint",  # 或 "eef"，连接时校验 server 是否支持
+    prediction_path="outputs/causal_action/custom_client/prediction.mp4",
+):
+    if device.is_done():
+        return
+    with CausalPolicyClient(server_uri, control_mode=control_mode) as client:
+        # client ↔ server：开始推理会话，设置任务文本并开启预测视频记录。
+        client.reset(prompt=prompt, record_video=True)
+
+        # 设备：采集初始图像和同一时刻的状态。
+        images, state = device.observe()
+        response = client.infer(dict(obs=images, state=state, observation_step=0))
+        step = 0
+        done = False
+        while not done:
+            # client：从 server 响应选择 joint/eef 绝对目标，默认预测 32 步。
+            actions = client.actions(response)
+            observations = []
+            for action in actions[:response["execute_steps"]]:  # 默认执行前 16 步
+                # 设备：转换并执行一个目标，再采集执行后的新图像和状态。
+                device.execute(action, control_mode=control_mode)
+                images, state = device.observe()
+                observations.append(images)
+                step += 1
+                done = device.is_done()
+                if done:
+                    break
+            if not done:
+                # client ↔ server：只反馈本轮新图像，state 对应最后一张图。
+                response = client.infer(dict(
+                    obs=observations,
+                    state=state,
+                    executed_steps=len(observations),
+                    observation_step=step,
+                ))
+        # client ↔ server：请求整段预测视频；client 将返回的 MP4 写入文件。
+        client.save_prediction_video(prediction_path)
+```
+
+每轮只执行 `execute_steps` 个目标，其余预测由下一轮重新生成。
+`executed_steps` 表示上一轮执行数量，`observation_step` 表示 episode 内累计执行数量。
+任务成功或设备要求停止时直接结束，不提交不足一轮的部分反馈，也不补帧。
+`prediction.mp4` 是模型预测视频，设备观测录像由设备适配层或调用方另外记录。
+
+按初始观测为第 0 帧，默认反馈时序为：
+
+```text
+第 0 帧三相机图像 + state_0 → 预测 32 步 → 执行前 16 步
+第 1～16 帧三相机图像 + state_16 → 预测 32 步 → 执行前 16 步
+第 17～32 帧三相机图像 + state_32 → 继续预测与执行
+```
+
+### RoboTwin 设备适配示例
+
+以下适配器实现上述 `Device` 接口，将 RoboTwin API 和坐标转换集中在设备层。
+`TASK_ENV` 是调用方已经创建并完成场景初始化的任务环境；
+`RobotwinPoseConverter.from_dataset()` 只读取 EEF 坐标元信息，实际观测来自运行中的环境。
+
+```python
+from cosmos_framework.inference.causal_action.robotwin_client import (
+    RobotwinPoseConverter,
+    camera_images,
+    episode_finished,
+    native_state,
+)
+
+
+class RoboTwinDevice:
+    def __init__(self, env, poses, *, state_source="command"):
+        self.env = env
+        self.poses = poses
+        self.state_source = state_source
+
+    def observe(self):
+        observation = self.env.get_obs()
+        return camera_images(observation), native_state(
+            observation, self.env, state_source=self.state_source, pose_converter=self.poses,
+        )
+
+    def execute(self, action, *, control_mode):
+        if control_mode == "eef":
+            action = self.poses.actions_to_world(action)
+        action_type = {"joint": "qpos", "eef": "ee"}[control_mode]
+        self.env.take_action(action, action_type=action_type)
+
+    def is_done(self):
+        return episode_finished(self.env)
 
 
 poses = RobotwinPoseConverter.from_dataset("/path/to/processed/task/clean")
-
-control_mode = "joint"  # 或 "eef"，连接时会校验模型是否支持
-action_type = "qpos" if control_mode == "joint" else "ee"
-output = Path("outputs/causal_action/custom_client")
-with CausalPolicyClient("ws://127.0.0.1:8000", control_mode=control_mode) as client:
-    client.reset(prompt=TASK_ENV.get_instruction(), record_video=True)
-    observation = TASK_ENV.get_obs()
-    response = client.infer(dict(
-        obs=camera_images(observation), state=native_state(observation, TASK_ENV, pose_converter=poses), observation_step=0,
-    ))
-    step = 0
-    done = False
-    while not done:
-        observations = []
-        actions = client.actions(response)
-        if control_mode == "eef":
-            actions = poses.actions_to_world(actions)
-        for action in actions[:response["execute_steps"]]:
-            TASK_ENV.take_action(action, action_type=action_type)
-            observation = TASK_ENV.get_obs()
-            observations.append(camera_images(observation))
-            step += 1
-            done = TASK_ENV.eval_success or TASK_ENV.take_action_cnt >= TASK_ENV.step_lim
-            if done:
-                break
-        if not done:
-            # 16 张执行后新图，不重复上一轮末帧；state 与最后一张图对应。
-            response = client.infer(dict(
-                obs=observations, state=native_state(observation, TASK_ENV, pose_converter=poses),
-                executed_steps=16, observation_step=step,
-            ))
-    client.save_prediction_video(output / "prediction.mp4")
+device = RoboTwinDevice(TASK_ENV, poses)
+run_episode(device, prompt=TASK_ENV.get_instruction(), control_mode="joint")
 ```
+
+RoboTwin 的 `observe()` 将世界系 `xyz+wxyz` 转为训练数据坐标系的 `xyz+xyzw`；
+`execute()` 在 EEF 模式下完成反向转换，再调用 `take_action(..., action_type="ee")`。
+关节模式直接使用 `action_type="qpos"`。真机接入时实现另一个满足 `Device` 接口的类，
+通过真机 SDK 完成这三个方法，再将其实例传给 `run_episode()`。
+设备初始化、任务文本来源和资源释放也由调用方相应替换。
+
+### 请求、响应与视频
 
 `state.joint_action` 使用 `left_arm`、`right_arm`、`left_gripper`、`right_gripper`；
 关节向量长度等于 server 配置的左右臂 DOF，夹爪可为标量或长度 1 的数组。
@@ -582,6 +700,62 @@ server 将首个真实观测 latent 和每轮前 16 步对应的预测 latent �
 请求错误返回 `error` 和 `reset_required`。输入校验失败可以修正后重发；
 VAE/prefill/denoise/视频解码失败后必须 reset，避免继续使用部分更新的缓存。
 连接断开会自动清空 episode；第二个同时连接的客户端会被拒绝。
+
+### 接入其他仿真器或真机
+
+自定义客户端可以只导入 `CausalPolicyClient`，无需调用 RoboTwin 的环境加载和状态辅助函数。
+保留上述 `run_episode()`，实现目标设备的 `Device` 接口：
+
+| 设备接口                            | 自定义客户端需要实现的内容                                                                         |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `observe()`                         | 读取并对齐三相机 RGB 和状态，返回协议字典；将 EEF 转为训练数据坐标系，复制可能被覆盖的图像缓冲区。 |
+| `execute(action, control_mode=...)` | 将协议绝对目标转换为设备命令，匹配坐标、关节顺序、单位、零位、正方向和夹爪开度，并管理控制周期。   |
+| `is_done()`                         | 查询任务成功、执行次数上限及设备停止条件。                                                         |
+
+创建和关闭仿真环境、真机连接，以及设置任务与起始状态，由调用方在 `run_episode()` 外完成。
+
+例如，自定义状态组装函数可以返回以下结构；变量表示从设备读取并转换后的值：
+
+```python
+state = {
+    "joint_action": {
+        "left_arm": left_joint_values,
+        "right_arm": right_joint_values,
+        "left_gripper": left_gripper_value,
+        "right_gripper": right_gripper_value,
+    },
+    "endpose": {
+        "left_endpose": left_pose_dataset_xyzw,
+        "right_endpose": right_pose_dataset_xyzw,
+    },
+}
+```
+
+关节数组长度由 server 配置的左右臂 DOF 决定；EEF 各含 7 个值，夹爪为标量或长度 1 的数组。
+只需提供 `state_mask` 启用的字段，初始请求通过
+`client.infer(dict(obs=images, state=state, observation_step=0))` 发送，
+其中 `images` 为三相机数组字典。后续可以使用长度 16 的相机字典列表，
+并提供 `executed_steps=16` 和累计的 `observation_step`，state 始终对应最后一个图像时刻。
+状态应明确采用实测位置还是控制指令目标，并与训练语义匹配。
+
+EEF 状态发送前转换为训练数据坐标系的 `xyz+xyzw`；收到 EEF 动作后转换为设备控制器所需的表示。
+server 不执行设备坐标转换。动作已完成反归一化和绝对目标解码，客户端不再重复处理；
+若设备控制器只接受增量命令，则由客户端根据设备状态和返回的绝对目标完成转换。
+
+当前服务端仍使用
+[`RobotwinAdapter`](../cosmos_framework/inference/causal_action/robotwin.py)，
+支持左右臂各 1～7 个关节、双臂 EEF 和夹爪，所选执行模式的 action mask 必须覆盖双臂及夹爪。
+结构兼容时可沿用现有协议，通过 `--robot-config` 配置 DOF 和 mask，并提供匹配的训练统计文件。
+单臂、灵巧手或移动底盘等结构需要扩展 server adapter 和对应协议；相机数量或布局不同时，
+还需适配 `policy.py` 的相机字段校验与 `online.py` 的视觉预处理，并与训练输入保持一致。
+客户端连通不代表已有 checkpoint 适用于新设备；修改 mask 或 DOF 不能替代对应的训练数据和模型能力。
+
+真机客户端还需要自行管理控制周期及相机/状态时间对齐。`executed_steps` 统计模型动作目标数量，
+不统计控制器内部插值次数或仿真物理步数。默认每 16 个动作反馈一次，期间必须采集对应的新图像；
+仅下发异步控制命令不代表这些动作已经按采样时序执行完毕。
+反馈长度受 `video_stride × VAE 时间压缩倍数` 约束，不能只修改客户端循环就改为任意步数。
+上述示例同步等待每次推理结果；固定频率控制、推理等待期间的行为和设备停止处理需要客户端实现。
+server 的 `--fps` 描述模型时间网格，不会替客户端调度控制周期。
 
 ## 缓存与时间对齐
 
