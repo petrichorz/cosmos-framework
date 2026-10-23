@@ -95,7 +95,12 @@ def parser():
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--actions-per-block", type=int, default=32)
-    p.add_argument("--execute-steps", type=int, default=16)
+    p.add_argument(
+        "--execute-steps",
+        type=int,
+        default=16,
+        help="Executed prefix: a positive multiple of video-stride * VAE compression, at most actions-per-block",
+    )
     p.add_argument("--video-stride", type=int, default=4)
     p.add_argument(
         "--history", type=int, default=32, help="Capacity in training blocks (two latent frames each by default)"

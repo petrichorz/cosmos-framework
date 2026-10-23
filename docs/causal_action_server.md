@@ -30,6 +30,20 @@ bash examples/action_pretrain/robotwin_server_template.sh
 `HOST`、`PORT`、`SEED` 覆盖；其他 Python 参数可以直接追加到 shell 后面。
 `FPS` 是训练对齐后的原始 action/control FPS（默认 30），视频抽帧后 FPS=FPS/4。
 
+`--execute-steps` 支持一次反馈多个真实观测 latent：必须是
+`video_stride × VAE temporal compression` 的正整数倍，且不超过 `--actions-per-block`。
+默认 stride=4、Wan2.2 时间压缩倍率=4，所以预测 32 步时可以执行 16 或 32 步。
+例如一次执行完整 32 步后再重新规划：
+
+```bash
+bash examples/action_pretrain/robotwin_server_template.sh --execute-steps 32
+```
+
+客户端从 metadata/响应读取执行步数；首次仍发送 1 帧，随后每轮发送 32 帧新观测和
+末帧 state。server 抽取第 4、8、……、32 帧，按两个 4 帧 chunk 依次更新流式 VAE
+和 observed KV，再使用最新 state 预测下一轮。预测的 2 个 latent 不作为真实反馈。
+本机 `robotwin_server_local.sh` 也支持追加同一参数。以下未特别说明的时序示例均使用默认 16 步。
+
 终端二使用训练 Robotwin 数据假装仿真器观测，无需运行 Robotwin 仿真：
 
 ```bash
@@ -47,7 +61,7 @@ state、mask、任务描述和实际 FPS；`--dataset-index`、`--index` 可选�
 `OVERLAP_ACTION_STEPS=161`，并共用 `SAMPLE_INDEX`；replay 的 `DATASET_INDEX` 默认是 0。
 对应 Python 参数为 `--split-seed`、`--max-action-steps`、`--overlap-action-steps` 和 `--index`。
 `DATA_SPLIT_SEED` 只控制数据排序，与模型采样 seed 分开。
-replay 与离线均根据所选片段的实际 action 数自动计算预测轮数：`轮数 = 实际 action 数 / 16`，
+replay 与离线均根据所选片段的实际 action 数自动计算预测轮数：`轮数 = 实际 action 数 / execute_steps`，
 自动处理完整片段，无需配置轮数。
 回放会将训练 state 转成原生 joint/endpose 字典，只发送数据里实际有效的字段，
 不会从关节目标伪造 EEF。EEF 直接使用数据集的 `xyz+xyzw`，不转换坐标系或四元数顺序。
@@ -73,7 +87,8 @@ guidance=1、预测 32 步，并通过 `--execute-steps 16` 每轮仅保留前 1
 随后从数据集读取新的 16 组真实观测和对应 state，复用 server 的 `CausalPolicyEngine`
 更新流式 VAE / observed KV，再预测下一轮；预测视频不写入历史。
 `NUM_STEPS`、`GUIDANCE`、`EXECUTE_STEPS` 可覆盖这些默认值。
-执行步数与 server 保持相同约束，必须等于 `video_stride × VAE temporal compression`，当前为 `4 × 4 = 16`。
+执行步数与 server 保持相同约束，必须为 `video_stride × VAE temporal compression` 的正整数倍，
+且不超过预测步数；当前预测 32 步时支持 `EXECUTE_STEPS=16` 或 `EXECUTE_STEPS=32`。
 
 ```bash
 NUM_STEPS=10 GUIDANCE=1 EXECUTE_STEPS=16 \
@@ -669,16 +684,16 @@ RoboTwin 的 `get_obs().joint_action` 关节值来自 drive target，并非实�
 prompt 可在 reset 或首次观测请求中提供，随后沿用。client 不发送 mask 或 55D state。
 可选 `control_mode` 在 reset 时传 `joint` 或 `eef`，只用于支持性校验，不改变模型 mask；
 episode 内修改任务或执行模式需要 reset。`obs` 同时支持三个相机的 `[T,H,W,3]`
-数组字典，以及长度为 T 的相机字典列表。第一轮 T=1，之后严格 T=16。
+数组字典，以及长度为 T 的相机字典列表。第一轮 T=1，之后严格 T=`execute_steps`（默认 16）。
 可选 `observation_step` 用于拒绝重复或乱序反馈，建议真实 client 始终发送。
 
-响应包含 `action`、`available_control_modes`、`execute_steps=16`、`observation_step`、
+响应包含 `action`、`available_control_modes`、`execute_steps`（默认 16）、`observation_step`、
 `revision` 和 `server_timing.infer_ms`，不逐轮返回解码的 RGB 视频。
 metadata 中 `video_stride`（默认 4）和 `video_fps`（默认 7.5）描述模型采样时间网格；
 `video_decode_mode="whole_sequence"` 表示支持整段解码，`prediction_video_fps=16` 是保存的播放 FPS，
 与训练回调一致；因此保存视频的播放时长可能与 action 的控制时长不同。
 需要视频时，在 reset 中传 `record_video=True`，结束时发送 `finish_video=True`。
-server 将首个真实观测 latent 和每轮前 16 步对应的预测 latent 一次解码，并返回
+server 将首个真实观测 latent 和每轮前 `execute_steps` 步对应的预测 latent 一次解码，并返回
 `video_mp4`（已编码的 MP4 bytes）、`video_frames` 和 `video_fps`。
 `client.save_prediction_video(path)` 封装该请求并将 bytes 原样写入文件，client 不需安装 Torch 或 VAE。
 完成保存后清空记录；下一 episode 必须重新 reset 并开启记录。
@@ -769,11 +784,14 @@ server 的 `--fps` 描述模型时间网格，不会替客户端调度控制周�
 4. 执行前 16 个 action 后，取新观测的第 4、8、12、16 张（1-based），
    保留 Wan2.2 因果卷积特征，增量编码为 1 个真实观测 latent，再 prefill KV。
    这等价于全轨迹抽取 0、4、8、12、16、20……帧，边界不重复。
+   若配置执行 32 步，则继续处理第 20、24、28、32 张；每个 latent 单独编码、prefill，
+   两个 latent 均写入后再预测。latent 帧编号逐个增加，action 时间偏移使用
+   `latent 帧编号 × actions_per_latent_frame`，不乘每次请求的执行步数。
 5. 保留最近 `history * latent_frames_per_training_block` 个 observed latent KV，
    默认 64 帧。淘汰旧 KV 时保留绝对 mRoPE 时间坐标。state 只作用于当前预测，
    不进入 visual history。预测的 action/video 都不写入 observed KV。
 
-训练块是 32 action / 2 latent；在线反馈按 16 action / 1 latent 更新，并在每次预测时
+训练块是 32 action / 2 latent；在线反馈每次请求支持一个或多个 latent，并在每次预测时
 重新锚定当前 state。真实历史按单 latent 因果 prefill，因此更新时不会等待未来另一帧，
 也不会把预测帧当观测。这与离线脚本的整块真值 state 预览在历史可见性上有区别；
 真实闭环效果需要后续仿真评估。

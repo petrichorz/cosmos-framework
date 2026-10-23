@@ -73,8 +73,16 @@ class CausalPolicyEngine:
             video_stride=video_stride,
             temporal_compression_factor=model.tokenizer_vision_gen.temporal_compression_factor,
         )
-        if execute_steps != self.geometry.actions_per_latent_frame:
-            raise ValueError("Execution feedback must cover one latent: video_stride * VAE compression actions")
+        if (
+            type(execute_steps) is not int
+            or not 0 < execute_steps <= actions_per_block
+            or execute_steps % self.geometry.actions_per_latent_frame
+        ):
+            raise ValueError(
+                "Execution feedback must cover a positive whole number of latents: "
+                "execute_steps must be a multiple of video_stride * VAE compression "
+                "and no greater than actions_per_block"
+            )
         if steps < 1 or history_blocks < 1 or not np.isfinite([guidance, shift]).all():
             raise ValueError("Invalid sampling/history options")
         self.execute_steps = execute_steps
@@ -111,6 +119,9 @@ class CausalPolicyEngine:
         videos = {key: torch.from_numpy(value.copy()).permute(0, 3, 1, 2) for key, value in cameras.items()}
         video = self.views.compose(videos, len(next(iter(cameras.values()))), viewpoint="concat_view")
         first = self.frame == -1
+        expected = 1 if first else self.execute_steps
+        if video.shape[1] != expected:
+            raise ValueError(f"Expected {expected} observation frames per feedback update")
         video = video[:, :1] if first else video[:, self.geometry.video_stride - 1 :: self.geometry.video_stride]
         sample = dict(
             video=video,
@@ -128,17 +139,20 @@ class CausalPolicyEngine:
             raise ValueError("Camera resolution/layout cannot change within an episode")
         self.frame_size, self.pixel_shape = frame_size, sample["video"].shape[-2:]
         pixels = sample["video"].unsqueeze(0).to(**self.model.tensor_kwargs_fp32) / 127.5 - 1
-        latent = self.encoder.encode(pixels)
-        self.latest = self.model._remove_padding_from_latent([latent], [frame_size])[0]
-        self.frame += 1
         if self.text_tokens is None:
             self.text_tokens = self.model._get_inference_text_tokens(
                 {self.model.input_caption_key: [sample["ai_caption"]]}, False
             )
-        for name, cache in self.caches.items():
-            packed = self._pack(name, state, state_mask, action_mask)
-            with cache.forward(self.model.net, append_frame=self.frame):
-                self.model.denoise(data_batch_packed=packed)
+        # Keep both VAE convolution history and observed KV causal, one latent at a time.
+        chunk_frames = 1 if first else self.geometry.temporal_compression_factor
+        for chunk in pixels.split(chunk_frames, dim=2):
+            latent = self.encoder.encode(chunk)
+            self.latest = self.model._remove_padding_from_latent([latent], [frame_size])[0]
+            self.frame += 1
+            for name, cache in self.caches.items():
+                packed = self._pack(name, state, state_mask, action_mask)
+                with cache.forward(self.model.net, append_frame=self.frame):
+                    self.model.denoise(data_batch_packed=packed)
 
     def _pack(self, name, state, state_mask, action_mask):
         g, model = self.geometry, self.model
@@ -206,7 +220,7 @@ class CausalPolicyEngine:
         packed.position_ids[0, layout.state_indexes] += self.frame * step
         action_indexes = packed.action.sequence_indexes
         action_step = packed.position_ids[0, action_indexes[1]] - packed.position_ids[0, action_indexes[0]]
-        packed.position_ids[0, action_indexes] += self.frame * self.execute_steps * action_step
+        packed.position_ids[0, action_indexes] += self.frame * g.actions_per_latent_frame * action_step
         packed.to_cuda()
         return packed
 

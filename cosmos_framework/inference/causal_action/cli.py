@@ -53,8 +53,15 @@ def main():
             p.error("--execute-steps requires policy mode without --preview-ground-truth-states or --current-block")
         if not args.kv_cache:
             p.error("--execute-steps uses the server's observed KV cache; do not pass --no-kv-cache")
-        if args.execute_steps != args.video_stride * 4:
-            p.error("--execute-steps must equal --video-stride * Wan2.2 temporal compression (4)")
+        if (
+            args.video_stride < 1
+            or not 0 < args.execute_steps <= args.actions_per_block
+            or args.execute_steps % (args.video_stride * 4)
+        ):
+            p.error(
+                "--execute-steps must be a positive multiple of --video-stride * Wan2.2 temporal compression (4) "
+                "and no greater than --actions-per-block"
+            )
     os.environ.setdefault("COSMOS_DEVICE", "npu")
     os.environ["WAN_VAE_PATH"] = args.vae
     import torch

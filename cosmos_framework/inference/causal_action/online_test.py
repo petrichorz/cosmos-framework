@@ -19,10 +19,10 @@ from cosmos_framework.inference.causal_action.wire import packb, unpackb
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, execute_steps=16):
         self.template = ActionStateTemplate55()
         self.geometry = CausalBlockGeometry(temporal_compression_factor=4)
-        self.execute_steps = 16
+        self.execute_steps = execute_steps
         self.steps = 10
         self.seed = 42
         self.fps = 30.0
@@ -138,7 +138,8 @@ def test_server_mask_survives_reset_and_cannot_be_overridden():
     assert engine.calls[-1]["state"][0] == 2
 
 
-def test_native_websocket_roundtrip_and_reset(monkeypatch):
+@pytest.mark.parametrize("execute_steps", [16, 32])
+def test_native_websocket_roundtrip_and_reset(monkeypatch, execute_steps):
     import asyncio
     from contextlib import asynccontextmanager, suppress
 
@@ -158,7 +159,7 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch):
                 yield server
 
         monkeypatch.setattr(websockets.asyncio.server, "serve", capture)
-        policy = CausalPolicy(FakeEngine(), return_unified_action=True)
+        policy = CausalPolicy(FakeEngine(execute_steps), return_unified_action=True)
         task = asyncio.create_task(serve(policy, host="127.0.0.1", port=0))
         try:
             uri = f"ws://127.0.0.1:{await asyncio.wait_for(port, 5)}"
@@ -172,9 +173,11 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch):
                     assert client.metadata["available_control_modes"] == ["joint"]
                     for episode in range(2):
                         assert client.reset(prompt="Pick up the cube.")["reset"]
-                        for revision, count in enumerate((1, 16)):
+                        for revision, count in enumerate((1, execute_steps, execute_steps)):
                             req = dict(
-                                request(policy.engine, count, revision + episode), observation_step=revision * 16
+                                request(policy.engine, count, revision + episode),
+                                observation_step=revision * execute_steps,
+                                executed_steps=execute_steps,
                             )
                             result = client.infer(req)
                             assert client.actions(result).shape == (32, 14)
@@ -184,6 +187,7 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch):
                             assert client.metadata["video_decode_mode"] == "whole_sequence"
                             assert client.metadata["prediction_video_fps"] == 16
                             assert result["revision"] == revision + 1
+                            assert result["execute_steps"] == execute_steps
                             assert client.actions(result)[0, 0] == revision + episode
                 with pytest.raises(ValueError, match="does not support"):
                     CausalPolicyClient(uri, control_mode="eef")

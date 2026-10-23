@@ -3,7 +3,7 @@
 
 """Replay processed RoboTwin observations against a live server, without simulation.
 
-Dataset frames/state advance by 16 independently of predicted actions. This checks
+Dataset frames/state advance by execute_steps independently of predicted actions. This checks
 serving integration, not closed-loop policy success or dynamics accuracy.
 """
 
@@ -108,14 +108,16 @@ def main():
     args = p.parse_args()
     data = load_observations(args)
     total = len(data["action_target"])
-    if total % 16:
-        raise ValueError("Selected segment must contain complete 16-step execution prefixes")
-    rounds = total // 16
-    print(f"Replay selected segment: {total} action steps, {rounds} prediction rounds", flush=True)
     metrics = []
     with CausalPolicyClient(args.uri, control_mode=args.control_mode) as client:
-        if client.metadata["execute_steps"] != 16 or client.metadata["actions_per_block"] != 32:
-            raise ValueError("Replay expects 32 predicted actions / 16 executed steps")
+        count = client.metadata["execute_steps"]
+        predicted = client.metadata["actions_per_block"]
+        if type(count) is not int or not 0 < count <= predicted:
+            raise ValueError("Server execution prefix must be positive and no greater than its prediction block")
+        if total % count:
+            raise ValueError(f"Selected segment must contain complete {count}-step execution prefixes")
+        rounds = total // count
+        print(f"Replay selected segment: {total} action steps, {rounds} prediction rounds", flush=True)
         if not np.isclose(client.metadata["fps"], data["fps"]):
             raise ValueError(f"Server FPS {client.metadata['fps']} differs from dataset aligned FPS {data['fps']}")
         if client.metadata.get("video_decode_mode") != "whole_sequence":
@@ -125,15 +127,15 @@ def main():
         output.mkdir(parents=True, exist_ok=True)
         print(f"Replay output: {output}", flush=True)
         client.reset(prompt=data["prompt"], record_video=True)
-        for revision, step in enumerate(range(0, total, 16)):
-            begin = 0 if revision == 0 else step - 15
+        for revision, step in enumerate(range(0, total, count)):
+            begin = 0 if revision == 0 else step - count + 1
             request = dict(
                 obs={key: frames[begin : step + 1] for key, frames in data["cameras"].items()},
                 state=data["state"][step],
                 observation_step=step,
             )
             if revision:
-                request["executed_steps"] = 16
+                request["executed_steps"] = count
             result = client.infer(request)
             action = client.actions(result)
             width = (
@@ -141,7 +143,7 @@ def main():
                 if args.control_mode == "joint"
                 else 16
             )
-            if action.shape != (32, width) or not np.isfinite(action).all():
+            if action.shape != (predicted, width) or not np.isfinite(action).all():
                 raise RuntimeError("Invalid server action output")
             for mode, values in result["action"].items():
                 if values is not None:
@@ -167,6 +169,8 @@ def main():
                 seed=seed,
                 action_steps=total,
                 rounds=rounds,
+                actions_per_block=predicted,
+                execute_steps=count,
                 semantics="dataset observation replay; predicted actions do not drive subsequent observations",
                 requests=metrics,
                 video_decode_mode="whole_sequence",
