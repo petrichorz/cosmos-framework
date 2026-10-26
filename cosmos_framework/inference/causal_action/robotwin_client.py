@@ -409,10 +409,23 @@ def run(args, *, output, pose_converter):
         summary["instruction_type"] = instruction_type
         episode, seed = 0, args.seed
         while episode < args.episodes:
-            env = helpers.class_decorator(args.task_name)
-            env.suc, env.test_num = 0, episode
+            env = None
             record = dict(episode=episode, seed=seed)
             try:
+                info_path = output / f"seed{seed}" / "info.json"
+                info = json.loads(info_path.read_text()) if info_path.is_file() else {}
+                if isinstance(info, dict) and isinstance(info.get("success"), bool):
+                    record.update(info)
+                    record.update(episode=episode, seed=seed, status="finished", info_path=str(info_path))
+                    print(
+                        f"Episode {episode}, seed {seed}, reusing inference result: {info_path}, "
+                        f"success: {record['success']}",
+                        flush=True,
+                    )
+                    episode += 1
+                    continue
+                env = helpers.class_decorator(args.task_name)
+                env.suc, env.test_num = 0, episode
                 setup_args = dict(now_ep_num=episode, seed=seed, is_test=True, **task_args)
                 env.setup_demo(**(dict(setup_args, render_freq=0) if args.instruction is None else setup_args))
                 for side in ("left", "right"):
@@ -494,7 +507,8 @@ def run(args, *, output, pose_converter):
                 record.update(status="error", error=f"{type(error).__name__}: {error}")
                 raise
             finally:
-                helpers.safe_close_env(env)
+                if env is not None:
+                    helpers.safe_close_env(env)
                 summary[
                     "skipped_seeds" if record.get("status") in ("skipped_unstable", "skipped_expert") else "episodes"
                 ].append(record)

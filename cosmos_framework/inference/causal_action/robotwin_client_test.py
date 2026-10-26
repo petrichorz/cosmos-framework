@@ -548,6 +548,90 @@ def automatic_main(monkeypatch, tmp_path):
     return client, envs, events, helpers
 
 
+@pytest.mark.parametrize("cached_seeds", [(), (42,), (43,), (42, 43)])
+def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main, tmp_path, cached_seeds, capsys):
+    client, envs, events, helpers = automatic_main
+    make_env = helpers.class_decorator
+
+    def make_env_with_success(task):
+        env = make_env(task)
+        setup = env.setup_demo
+
+        def setup_demo(**kwargs):
+            setup(**kwargs)
+            env.success_at = 2 if kwargs["seed"] == 42 else None
+
+        env.setup_demo = setup_demo
+        return env
+
+    helpers.class_decorator = make_env_with_success
+    runner.main()
+    saved_info = {}
+    for seed in (42, 43):
+        seed_output = tmp_path / f"seed{seed}"
+        info_path = seed_output / "info.json"
+        if seed in cached_seeds:
+            saved_info[seed] = info_path.read_bytes()
+            # info.json alone is sufficient, even without the other artifacts.
+            for artifact in seed_output.iterdir():
+                if artifact != info_path:
+                    artifact.unlink()
+        else:
+            # Existing requests/actions/video without info.json must be rerun.
+            info_path.unlink()
+    envs.clear()
+    events.clear()
+    client.requests.clear()
+    client.resets.clear()
+    capsys.readouterr()
+
+    runner.main()
+
+    pending_seeds = [seed for seed in (42, 43) if seed not in cached_seeds]
+    assert [env.setup_args["seed"] for env in envs] == pending_seeds
+    assert [env.setup_args["now_ep_num"] for env in envs] == [seed - 42 for seed in pending_seeds]
+    assert len(client.requests) == len(client.resets) == len(pending_seeds)
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert [(record["episode"], record["seed"], record["success"]) for record in metrics["episodes"]] == [
+        (0, 42, True),
+        (1, 43, False),
+    ]
+    assert all(record["status"] == "finished" for record in metrics["episodes"])
+    assert metrics["completed_episodes"] == 2
+    assert metrics["successful_episodes"] == 1
+    assert metrics["success_rate"] == 0.5
+    assert not metrics["skipped_seeds"]
+    for seed, content in saved_info.items():
+        assert (tmp_path / f"seed{seed}" / "info.json").read_bytes() == content
+    stdout = capsys.readouterr().out
+    assert stdout.count("reusing inference result:") == len(cached_seeds)
+    assert '"requests":' not in stdout
+
+
+@pytest.mark.parametrize("invalid_info", [{}, {"success": None}, {"success": 0}, {"success": 1}, {"success": "false"}])
+def test_info_without_boolean_success_is_rerun(automatic_main, tmp_path, invalid_info):
+    client, envs, events, _ = automatic_main
+    runner.main()
+    info_path = tmp_path / "seed42" / "info.json"
+    info_path.write_text(json.dumps(invalid_info))
+    envs.clear()
+    events.clear()
+    client.requests.clear()
+    client.resets.clear()
+
+    runner.main()
+
+    assert [env.setup_args["seed"] for env in envs] == [42]
+    assert len(client.requests) == len(client.resets) == 1
+    assert json.loads(info_path.read_text())["success"] is False
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert [record["seed"] for record in metrics["episodes"]] == [42, 43]
+    assert all(record["status"] == "finished" for record in metrics["episodes"])
+    assert metrics["completed_episodes"] == 2
+    assert metrics["successful_episodes"] == 0
+    assert metrics["success_rate"] == 0.0
+
+
 @pytest.mark.parametrize("instruction_type", [None, "unseen"])
 def test_automatic_instruction_uses_episode_metadata_and_recreates_scene(automatic_main, tmp_path, instruction_type):
     client, envs, events, _ = automatic_main
