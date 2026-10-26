@@ -424,7 +424,19 @@ def run(args, *, output, pose_converter):
                     # RoboTwin tasks populate object/arm placeholders in play_once().
                     # Generate text before closing, then restore the initial scene;
                     # expert observations must never enter the policy's video cache.
-                    episode_info = env.play_once()
+                    try:
+                        episode_info = env.play_once()
+                        if not (env.plan_success and env.check_success()):
+                            raise RuntimeError("Expert check failed")
+                    except helpers.UnStableError:
+                        raise
+                    except Exception as error:
+                        record.update(status="skipped_expert", error=f"{type(error).__name__}: {error}")
+                        print(
+                            f"Episode {episode}, skipping expert-failed seed {seed}: {error}; retrying seed {seed + 1}",
+                            flush=True,
+                        )
+                        continue
                     instruction = helpers.build_instruction(
                         task_args, episode_info, instruction_type, args.episodes, seed
                     )
@@ -483,7 +495,9 @@ def run(args, *, output, pose_converter):
                 raise
             finally:
                 helpers.safe_close_env(env)
-                summary["skipped_seeds" if record.get("status") == "skipped_unstable" else "episodes"].append(record)
+                summary[
+                    "skipped_seeds" if record.get("status") in ("skipped_unstable", "skipped_expert") else "episodes"
+                ].append(record)
                 finished = [item for item in summary["episodes"] if item["status"] == "finished"]
                 summary["completed_episodes"] = len(finished)
                 summary["successful_episodes"] = sum(item["success"] for item in finished)

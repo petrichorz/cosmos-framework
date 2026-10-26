@@ -492,7 +492,11 @@ def automatic_main(monkeypatch, tmp_path):
         def setup_demo(self, **kwargs):
             super().setup_demo(**kwargs)
             self.take_action_cnt, self.eval_success = 0, False
+            self.plan_success, self.expert_success = True, True
             events.append(("setup", kwargs["seed"], kwargs["render_freq"]))
+
+        def check_success(self):
+            return self.expert_success
 
         def play_once(self):
             events.append(("expert", self.setup_args["seed"]))
@@ -571,6 +575,49 @@ def test_automatic_instruction_uses_episode_metadata_and_recreates_scene(automat
     assert [record["instruction"] for record in metrics["episodes"]] == client.resets
     assert all(record["instruction_source"] == "robotwin" for record in metrics["episodes"])
     assert metrics["instruction_type"] == kind
+
+
+@pytest.mark.parametrize("failure", ["assertion", "index", "plan_failed", "task_failed"])
+def test_expert_failures_are_retried_without_consuming_episodes(automatic_main, tmp_path, failure):
+    client, envs, events, helpers = automatic_main
+    make_env = helpers.class_decorator
+
+    def failing_env(task):
+        env = make_env(task)
+        expert = env.play_once
+
+        def play_once():
+            info = expert()
+            if env.setup_args["seed"] in (42, 43):
+                if failure == "assertion":
+                    raise AssertionError("target_pose cannot be None for move action.")
+                if failure == "index":
+                    raise IndexError("list index out of range")
+                if failure == "plan_failed":
+                    env.plan_success = False
+                else:
+                    env.expert_success = False
+            return info
+
+        env.play_once = play_once
+        return env
+
+    helpers.class_decorator = failing_env
+    runner.main()
+
+    assert [env.setup_args["seed"] for env in envs] == [42, 43, 44, 45]
+    assert [env.setup_args["now_ep_num"] for env in envs] == [0, 0, 0, 1]
+    assert all(("close", seed) in events for seed in (42, 43, 44, 45))
+    assert all(not env.executed for env in envs[:2])
+    assert client.resets == [f"Lift the bottle with the left arm. Seed {seed}." for seed in (44, 45)]
+    assert client.closed
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert [record["seed"] for record in metrics["skipped_seeds"]] == [42, 43]
+    assert all(record["status"] == "skipped_expert" and record["error"] for record in metrics["skipped_seeds"])
+    assert [record["seed"] for record in metrics["episodes"]] == [44, 45]
+    assert metrics["completed_episodes"] == 2
+    assert metrics["successful_episodes"] == 0
+    assert metrics["success_rate"] == 0.0
 
 
 @pytest.mark.parametrize("instruction", ["adjust_bottle", "", None])
