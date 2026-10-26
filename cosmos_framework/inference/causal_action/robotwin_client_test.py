@@ -110,8 +110,13 @@ def test_rollout_sends_post_action_history_and_discards_unexecuted_predictions(t
     assert [int(action[0]) for action, _ in env.executed] == list(range(16)) * 2 + [0, 1, 2]
     assert {kind for _, kind in env.executed} == {"qpos"}
     saved = sorted(tmp_path.glob("*.npy"))
-    assert len(saved) == 3
-    assert np.load(saved[0]).shape == (32, 14)
+    assert saved == [tmp_path / "action_joint.npy"]
+    actions = np.load(saved[0])
+    assert actions.shape == (96, 14)
+    for block in actions.reshape(3, 32, 14):
+        np.testing.assert_array_equal(block[:16, 0], np.arange(16))
+        np.testing.assert_array_equal(block[16:], 999)
+    assert result["action_path"] == str(saved[0])
 
 
 def test_eef_rollout_stops_on_success_mid_chunk():
@@ -379,7 +384,7 @@ def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(
             requests_path = output / f"seed{record['seed']}" / "requests.json"
             assert record["requests_path"] == str(requests_path)
             assert json.loads(requests_path.read_text()) == [dict(observation_step=0, infer_ms=1.0)]
-            actions = np.load(requests_path.parent / f"step000000_action_{mode}.npy")
+            actions = np.load(requests_path.parent / f"action_{mode}.npy")
             assert actions.shape == (32, 14 if mode == "joint" else 16)
             env = envs[index * 2 + episode][1]
             assert env.setup_args["seed"] == record["seed"]
@@ -637,10 +642,10 @@ def test_unstable_seeds_are_retried_without_consuming_episodes(automatic_main, t
     assert metrics["successful_episodes"] == 0
     assert metrics["success_rate"] == 0.0
     assert all("UnStableError" in record["error"] for record in metrics["skipped_seeds"])
-    assert (tmp_path / "seed44" / "step000000_action_joint.npy").is_file()
+    assert (tmp_path / "seed44" / "action_joint.npy").is_file()
     if phase == "rollout":
         # Failed attempts' predictions must not be overwritten by the retry.
-        assert (tmp_path / "seed42" / "step000000_action_joint.npy").is_file()
+        assert (tmp_path / "seed42" / "action_joint.npy").is_file()
         import cv2
 
         for seed, frames in ((42, 1), (43, 1), (44, 3), (45, 3)):

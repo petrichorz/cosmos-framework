@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from itertools import product
 from pathlib import Path
 
@@ -166,6 +167,17 @@ class VideoRecorder(H264VideoWriter):
         super().append(frame)
 
 
+@contextmanager
+def record_actions(path):
+    """Save complete prediction blocks in request order, including on rollout errors."""
+    blocks = []
+    try:
+        yield blocks
+    finally:
+        if path is not None and blocks:
+            np.save(path, np.concatenate(blocks, axis=0))
+
+
 def rollout(env, client, *, state_source="command", pose_converter=None, output=None, video_fps=30):
     """One episode: initial frame, then exactly one frame per executed target.
 
@@ -189,7 +201,9 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
 
     video_stride = client.metadata.get("video_stride", 4)
     prediction_fps = client.metadata.get("video_fps", client.metadata.get("fps", 30) / video_stride)
+    action_path = output / f"action_{client.control_mode}.npy" if output is not None else None
     with (
+        record_actions(action_path) as action_blocks,
         VideoRecorder(output, fps=video_fps) as video,
         H264VideoWriter(
             output / "prediction.mp4" if output is not None and not whole_video else None, fps=prediction_fps
@@ -223,7 +237,7 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
                     raise ValueError("Server returned an invalid native action chunk")
                 requests.append(dict(observation_step=executed, **response.get("server_timing", {})))
                 if output is not None:
-                    np.save(output / f"step{executed:06d}_action_{client.control_mode}.npy", actions)
+                    action_blocks.append(actions.copy())
                     requests[-1].update(save_prediction_video(response, output / f"step{executed:06d}_prediction.mp4"))
                 if client.control_mode == "eef":
                     actions = pose_converter.actions_to_world(actions)
@@ -265,6 +279,7 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
         executed_steps=executed,
         seconds=time.perf_counter() - started,
         requests=requests,
+        action_path=str(action_path) if action_path is not None and action_blocks else None,
         video_path=str(video.path) if video.path is not None else None,
         video_frames=video.frames,
         video_fps=video_fps,
@@ -440,6 +455,22 @@ def run(args, *, output, pose_converter):
                 requests_path.write_text(json.dumps(record.pop("requests"), ensure_ascii=False, indent=2))
                 record["requests_path"] = str(requests_path)
                 record["status"] = "finished"
+                info_path = requests_path.with_name("info.json")
+                record["info_path"] = str(info_path)
+                info = dict(
+                    task=args.task_name,
+                    task_config=args.task_config,
+                    server_uri=args.server_uri,
+                    control_mode=args.control_mode,
+                    state_source=args.state_source,
+                    eef_pose_frame=pose_converter.eef_pose_frame,
+                    T_world_base=pose_converter.T_world_base,
+                    step_limit=env.step_lim,
+                    client_args=vars(args),
+                    server_metadata=client.metadata,
+                    **record,
+                )
+                info_path.write_text(json.dumps(info, ensure_ascii=False, indent=2))
                 print(json.dumps(record, ensure_ascii=False), flush=True)
             except helpers.UnStableError as error:
                 record.update(status="skipped_unstable", error=f"{type(error).__name__}: {error}")
