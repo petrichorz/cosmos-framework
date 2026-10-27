@@ -3,6 +3,7 @@
 
 """Streaming observed-video encoding and receding-horizon causal policy sampling."""
 
+import json
 from dataclasses import replace
 
 import numpy as np
@@ -138,9 +139,10 @@ class CausalPolicyEngine:
         self.frame_size, self.pixel_shape = frame_size, sample["video"].shape[-2:]
         pixels = sample["video"].unsqueeze(0).to(**self.model.tensor_kwargs_fp32) / 127.5 - 1
         if self.text_tokens is None:
-            self.text_tokens = self.model._get_inference_text_tokens(
-                {self.model.input_caption_key: [sample["ai_caption"]]}, False
-            )
+            caption = sample["ai_caption"]
+            if isinstance(caption, dict):
+                caption = json.dumps(caption)
+            self.text_tokens = self.model._get_inference_text_tokens({self.model.input_caption_key: [caption]}, False)
         # VAE convolutions remain causal; transformer clean attention is joint within a training block.
         chunk_frames = 1 if first else self.geometry.temporal_compression_factor
         latents = []
