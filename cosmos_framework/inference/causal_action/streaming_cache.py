@@ -3,8 +3,8 @@
 
 """Episode-local observed-video KV, independent of predicted video and state.
 
-Use compact training-compatible action packs: L0 is the newly observed latent,
-L1..LB are disposable prediction slots. Only L0's clean stream is committed.
+Use compact training-compatible action packs: prefill the independent L0 or a
+complete clean training block jointly. Prediction slots are never committed.
 No historical pixels, actions or states are replayed through the transformer.
 Text and the compact pack still run projections/FFNs on each forward.
 """
@@ -54,14 +54,25 @@ class ObservedVideoCache:
         self.layers.clear()
 
     @contextmanager
-    def forward(self, net, *, append_frame=None):
-        """Stage one observed frame atomically, or read history during denoising.
+    def forward(self, net, *, append_frames=None, clean_block=-1):
+        """Stage an observed block atomically, or read history during denoising.
 
         The state query attends only to text and itself. Target queries attend
         to text, observed video, current state and current video/action targets.
         Unknown clean-video slots and duplicate condition slots are never keys.
         """
-        if append_frame is None and len(self.layers) != self.num_layers:
+        if append_frames is not None:
+            append_frames = tuple(append_frames)
+            if not append_frames or append_frames != tuple(range(append_frames[0], append_frames[-1] + 1)):
+                raise ValueError("Observed latent frame IDs must be nonempty and consecutive")
+            if clean_block == -1:
+                if append_frames != (0,):
+                    raise ValueError("Only the initial observation may prefill the independent prefix")
+            elif clean_block != 0 or append_frames[0] < 1 or (append_frames[0] - 1) % len(append_frames):
+                raise ValueError("Observed frames must form one aligned training block")
+            if len(append_frames) > self.max_frames:
+                raise ValueError("Observation block exceeds history capacity")
+        if append_frames is None and len(self.layers) != self.num_layers:
             raise RuntimeError("Denoising requires a completed observation prefill")
         staged, previous = {}, []
 
@@ -92,29 +103,35 @@ class ObservedVideoCache:
                     entry = LayerKV(k[roles == -1].clone(), v[roles == -1].clone(), attend(uq, uk, uv, causal=True))
                 gen_roles = roles[layout.gen_query_indexes]
                 out = q.new_zeros(q.shape)
-                past = (
-                    entry.video[-(self.max_frames - 1) :]
-                    if append_frame is not None and self.max_frames > 1
-                    else entry.video
-                )
-                if append_frame is not None and self.max_frames == 1:
-                    past = []
+                # A clean block reads the full old history; evict only after computing its KV.
+                past = entry.video
                 history_k = [item[1] for item in past]
                 history_v = [item[2] for item in past]
-                if append_frame is not None:
-                    if entry.video and append_frame != entry.video[-1][0] + 1:
+                if append_frames is not None:
+                    if clean_block == 0 and len(append_frames) != layout.geometry.block_sizes[0]:
+                        raise ValueError("Observation prefill requires one complete training block")
+                    expected = entry.video[-1][0] + 1 if entry.video else 0
+                    if append_frames[0] != expected:
                         raise ValueError("Observed latent frames must be appended once, in order")
-                    clean = (roles == 0) & (layout.block_ids == -1)
-                    query = (gen_roles == 0) & (layout.block_ids[layout.gen_query_indexes] == -1)
+                    clean = (roles == 0) & (layout.block_ids == clean_block)
+                    query = (gen_roles == 0) & (layout.block_ids[layout.gen_query_indexes] == clean_block)
                     ck, cv = k[clean], v[clean]
+                    if not len(ck) or len(ck) % len(append_frames):
+                        raise ValueError("Clean block tokens must split evenly across observed frames")
                     out[query] = attend(
                         q[query], torch.cat([entry.text_k, *history_k, ck]), torch.cat([entry.text_v, *history_v, cv])
                     )
+                    frames = [
+                        (frame, fk.detach().clone(), fv.detach().clone())
+                        for frame, fk, fv in zip(
+                            append_frames, ck.chunk(len(append_frames)), cv.chunk(len(append_frames)), strict=True
+                        )
+                    ]
                     staged[layer_id] = LayerKV(
                         entry.text_k,
                         entry.text_v,
                         entry.text_out,
-                        [*past, (append_frame, ck.detach().clone(), cv.detach().clone())],
+                        [*past, *frames][-self.max_frames :],
                     )
                 else:
                     state, target = roles == 3, roles == 1
@@ -139,7 +156,7 @@ class ObservedVideoCache:
                 previous.append((attn, attn.dispatch_attention_fn))
                 attn.dispatch_attention_fn = wrapper(i)
             yield
-            if append_frame is not None:
+            if append_frames is not None:
                 if len(staged) != self.num_layers:
                     raise RuntimeError("Observation prefill did not complete every transformer layer")
                 self.layers = staged

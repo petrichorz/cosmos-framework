@@ -13,15 +13,16 @@ from cosmos_framework.data.generator.action.block_state import BlockStatistics, 
 from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
 from cosmos_framework.data.generator.sequence_packing.runtime import from_mode_splits, init_sequence_pack
 from cosmos_framework.inference.causal_action import streaming_cache
+from cosmos_framework.inference.causal_action.online import CausalPolicyEngine
 from cosmos_framework.inference.causal_action.policy import CAMERA_KEYS, CausalPolicy
 from cosmos_framework.inference.causal_action.streaming_cache import ObservedVideoCache
 from cosmos_framework.inference.causal_action.wire import packb, unpackb
 
 
 class FakeEngine:
-    def __init__(self, execute_steps=16):
+    def __init__(self, execute_steps=32):
         self.template = ActionStateTemplate55()
-        self.geometry = CausalBlockGeometry(temporal_compression_factor=4)
+        self.geometry = CausalBlockGeometry(actions_per_block=execute_steps, temporal_compression_factor=4)
         self.execute_steps = execute_steps
         self.steps = 10
         self.seed = 42
@@ -46,9 +47,13 @@ class FakeEngine:
         self.calls.append(kwargs)
 
     def predict(self, **kwargs):
-        out = np.zeros((32, 55), dtype=np.float32)
+        out = np.zeros((self.geometry.actions_per_block, 55), dtype=np.float32)
         out[:, 0] = kwargs["state"][0].item()
-        return dict(action=out, video=np.zeros((8, 4, 6, 3), dtype=np.uint8), video_latents=np.zeros((1, 2, 2, 1, 1)))
+        return dict(
+            action=out,
+            video=np.zeros((8, 4, 6, 3), dtype=np.uint8),
+            video_latents=np.zeros((1, 2, self.geometry.latent_frames_per_block, 1, 1)),
+        )
 
 
 def request(engine, count=1, value=0):
@@ -72,15 +77,15 @@ def reset(policy):
     )
 
 
-def test_reset_and_half_block_feedback_use_fresh_measured_state():
+def test_reset_and_full_block_feedback_use_fresh_measured_state():
     engine = FakeEngine()
     policy = CausalPolicy(engine)
     reset(policy)
     result = policy.infer(request(engine, value=3))
-    assert result["action"]["joint"].shape == (32, 14) and result["execute_steps"] == 16
+    assert result["action"]["joint"].shape == (32, 14) and result["execute_steps"] == 32
     assert result["action"]["joint"][0, 0] == 3
     assert result["action"]["eef"] is None
-    result = policy.infer(dict(request(engine, 16, 9), executed_steps=16, observation_step=16))
+    result = policy.infer(dict(request(engine, 32, 9), executed_steps=32, observation_step=32))
     assert result["action"]["joint"][0, 0] == 9
     assert len(engine.frames) == 2
     assert result["revision"] == 2
@@ -96,10 +101,10 @@ def test_bad_or_duplicate_feedback_does_not_advance_cache():
     reset(policy)
     policy.infer(request(engine))
     for bad, match in [
-        (dict(request(engine, 16), executed_steps=32), "exactly 16"),
-        (dict(request(engine, 16), observation_step=0), "out-of-order"),
+        (dict(request(engine, 32), executed_steps=16), "exactly 32"),
+        (dict(request(engine, 32), observation_step=0), "out-of-order"),
         (request(engine, 1), "RGB uint8"),
-        (dict(request(engine, 16), prompt="Different task"), "prompt"),
+        (dict(request(engine, 32), prompt="Different task"), "prompt"),
     ]:
         with pytest.raises(ValueError, match=match):
             policy.infer(bad)
@@ -180,9 +185,9 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch, execute_steps):
                                 executed_steps=execute_steps,
                             )
                             result = client.infer(req)
-                            assert client.actions(result).shape == (32, 14)
+                            assert client.actions(result).shape == (execute_steps, 14)
                             assert result["action"]["eef"] is None
-                            assert result["action_unified"].shape == (32, 55)
+                            assert result["action_unified"].shape == (execute_steps, 55)
                             assert "video" not in result
                             assert client.metadata["video_decode_mode"] == "whole_sequence"
                             assert client.metadata["prediction_video_fps"] == 16
@@ -220,16 +225,17 @@ def cpu_attention(q, k, v, *, is_causal=False, **kwargs):
 def test_streaming_cache_attention_matches_oracle_and_is_readonly(monkeypatch, normalized_keys):
     monkeypatch.setattr(streaming_cache, "attention", cpu_attention)
     torch.manual_seed(3)
-    # UND, clean prefix, unused clean future, duplicate condition prefix, targets, state.
-    roles = torch.tensor([-1, -1, 0, 0, 2, 1, 1, 3])
+    # UND, clean prefix, two clean block frames, duplicate prefix, targets, state.
+    roles = torch.tensor([-1, -1, 0, 0, 0, 2, 1, 1, 3])
     layout = SimpleNamespace(
         stream_ids=roles,
-        block_ids=torch.tensor([-1, -1, -1, 0, -1, 0, 0, 0]),
-        gen_query_indexes=torch.arange(2, 8),
+        block_ids=torch.tensor([-1, -1, -1, 0, 0, -1, 0, 0, 0]),
+        gen_query_indexes=torch.arange(2, 9),
+        geometry=SimpleNamespace(block_sizes=(2,)),
     )
-    meta = init_sequence_pack([8], [2, 6], ["causal", "full"], torch.device("cpu"))
+    meta = init_sequence_pack([9], [2, 7], ["causal", "full"], torch.device("cpu"))
     meta["is_sharded"] = False
-    q, k, v = [torch.randn(8, 2, 3) for _ in range(3)]
+    q, k, v = [torch.randn(9, 2, 3) for _ in range(3)]
     packs = [from_mode_splits(x[:2], x[2:], meta) for x in (q, k, v)]
     gen_k = k + 0.25 if normalized_keys else k
     kwargs = {"packed_key_states_normalized": from_mode_splits(gen_k[:2], gen_k[2:], meta)} if normalized_keys else {}
@@ -241,30 +247,51 @@ def test_streaming_cache_attention_matches_oracle_and_is_readonly(monkeypatch, n
     cache = ObservedVideoCache(1, 2)
 
     with torch.no_grad():
-        for frame in range(3):
-            with cache.forward(net, append_frame=frame):
-                attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
-        assert [x[0] for x in cache.layers[0].video] == [1, 2]
+        with cache.forward(net, append_frames=(0,)):
+            attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
+        for frames, history in [((1, 2), [2]), ((3, 4), [3, 4])]:
+            with cache.forward(net, append_frames=frames, clean_block=0):
+                output, _ = attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
+            # Both clean queries read the entire old history and the entire current block.
+            keys = torch.tensor([0, 1, *history, 3, 4])
+            expected = cpu_attention(q[None, 3:5], gen_k[None, keys], v[None, keys])[0].flatten(-2)
+            torch.testing.assert_close(output["full_only_seq"][1:3], expected)
+        assert [x[0] for x in cache.layers[0].video] == [3, 4]
+        for frame, key, value in cache.layers[0].video:
+            torch.testing.assert_close(key, gen_k[frame : frame + 1])
+            torch.testing.assert_close(value, v[frame : frame + 1])
         saved = [(key.clone(), value.clone()) for _, key, value in cache.layers[0].video]
+        with pytest.raises(ValueError, match="complete training block"):
+            with cache.forward(net, append_frames=(5,), clean_block=0):
+                attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
         with cache.forward(net):
             output, _ = attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
-        # Current targets see text, the two observed prefix copies, state, targets.
-        keys = torch.tensor([0, 1, 2, 2, 7, 5, 6])
-        expected = cpu_attention(q[None, 5:7], gen_k[None, keys], v[None, keys])[0].flatten(-2)
-        torch.testing.assert_close(output["full_only_seq"][3:5], expected)
-        state_keys = torch.tensor([0, 1, 7])
-        expected_state = cpu_attention(q[None, 7:8], gen_k[None, state_keys], v[None, state_keys])[0].flatten(-2)
-        torch.testing.assert_close(output["full_only_seq"][5:6], expected_state)
+        keys = torch.tensor([0, 1, 3, 4, 8, 6, 7])
+        expected = cpu_attention(q[None, 6:8], gen_k[None, keys], v[None, keys])[0].flatten(-2)
+        torch.testing.assert_close(output["full_only_seq"][4:6], expected)
+        state_keys = torch.tensor([0, 1, 8])
+        expected_state = cpu_attention(q[None, 8:9], gen_k[None, state_keys], v[None, state_keys])[0].flatten(-2)
+        torch.testing.assert_close(output["full_only_seq"][6:7], expected_state)
         for (_, key, value), (before_k, before_v) in zip(cache.layers[0].video, saved, strict=True):
             torch.testing.assert_close(key, before_k)
             torch.testing.assert_close(value, before_v)
         with pytest.raises(RuntimeError, match="abort"):
-            with cache.forward(net, append_frame=3):
+            with cache.forward(net, append_frames=(5, 6), clean_block=0):
                 attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
                 raise RuntimeError("abort")
-        assert cache.layers[0].video[-1][0] == 2
+        assert cache.layers[0].video[-1][0] == 4
+        with pytest.raises(ValueError, match="once, in order"):
+            with cache.forward(net, append_frames=(3, 4), clean_block=0):
+                attn.dispatch_attention_fn(*packs, SimpleNamespace(layout=layout), **kwargs)
         assert attn.dispatch_attention_fn is original
         cache.clear()
         with pytest.raises(RuntimeError, match="prefill"):
             with cache.forward(net):
                 pass
+
+
+@pytest.mark.parametrize("execute_steps", [0, 16, 48, True])
+def test_engine_rejects_partial_block_feedback(execute_steps):
+    model = SimpleNamespace(tokenizer_vision_gen=SimpleNamespace(temporal_compression_factor=4))
+    with pytest.raises(ValueError, match="execute_steps == actions_per_block"):
+        CausalPolicyEngine(model, statistics=None, template=None, execute_steps=execute_steps)

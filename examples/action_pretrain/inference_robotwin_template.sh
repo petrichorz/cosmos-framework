@@ -5,10 +5,10 @@
 # 环境模板：将 /path/to 占位路径替换为实际路径，或通过环境变量覆盖。
 
 # RoboTwin policy 全段视频预测模板。
-# 每轮预测 32 步，保存前 16 步并用下一组真实观测重新预测，
+# 每轮预测 32 步，保存完整 32 步并用下一组真实观测重新预测，
 # 首个真实 latent 与所有保留的预测 latent 拼接后一次解码为 video.mp4。
 # MP4 沿用 EveryNDrawSample 的保存函数、默认质量和 16 FPS；动作写成 action.npy。
-# 使用与 server 相同的推理引擎，每 16 步接收数据集真实观测；预测画面不进入历史。
+# 使用与 server 相同的推理引擎，每 32 步接收数据集真实观测；预测画面不进入历史。
 
 set -euo pipefail
 
@@ -56,7 +56,7 @@ export GUIDANCE="${GUIDANCE:-1}"
 mkdir -p "$OUTPUT_ROOT"
 
 bash "$SCRIPT_DIR/inference_causal_action.sh" \
-    --execute-steps "${EXECUTE_STEPS:-16}" \
+    --execute-steps "${EXECUTE_STEPS:-$ACTIONS_PER_BLOCK}" \
     --decode-video \
     "$@"
 

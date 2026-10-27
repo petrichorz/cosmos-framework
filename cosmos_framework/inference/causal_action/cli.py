@@ -29,7 +29,9 @@ def main():
     p.add_argument("--guidance", type=float, default=1.0)
     p.add_argument("--actions-per-block", type=int, default=32)
     p.add_argument(
-        "--execute-steps", type=int, help="RoboTwin policy replay: predict a block, save this prefix, replan"
+        "--execute-steps",
+        type=int,
+        help="RoboTwin policy replay: execute/save one complete training block, then replan",
     )
     p.add_argument("--max-action-steps", type=int, default=96)
     p.add_argument("--overlap-action-steps", type=int, default=16)
@@ -56,12 +58,13 @@ def main():
             p.error("--execute-steps uses the server's observed KV cache; do not pass --no-kv-cache")
         if (
             args.video_stride < 1
-            or not 0 < args.execute_steps <= args.actions_per_block
+            or args.execute_steps < 1
+            or args.execute_steps != args.actions_per_block
             or args.execute_steps % (args.video_stride * 4)
         ):
             p.error(
-                "--execute-steps must be a positive multiple of --video-stride * Wan2.2 temporal compression (4) "
-                "and no greater than --actions-per-block"
+                "--execute-steps must equal --actions-per-block and be a positive multiple of "
+                "--video-stride * Wan2.2 temporal compression (4) for training-block joint prefill"
             )
     os.environ.setdefault("COSMOS_DEVICE", "npu")
     os.environ["WAN_VAE_PATH"] = args.vae

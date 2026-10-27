@@ -32,7 +32,7 @@ CMD=(torchrun --standalone --nproc_per_node=1
     -m cosmos_framework.inference.causal_action.server
     --checkpoint "$CHECKPOINT_ROOT" --processor "$COSMOS3_EDGE_PROCESSOR_PATH" --vae "$WAN_VAE_PATH"
     --statistics "$ROBOTWIN_GROUP_STATS_PATH"
-    --actions-per-block 32 --execute-steps 16 --video-stride 4
+    --actions-per-block 32 --execute-steps 32 --video-stride 4
     --steps "${NUM_STEPS:-10}" --guidance "${GUIDANCE:-1}" --history "${HISTORY_BLOCKS:-32}"
     --fps "${FPS:-30}" --seed "${SEED:-42}" --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"
     "$@")

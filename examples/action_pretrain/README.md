@@ -8,7 +8,7 @@
 - **路线 B：AgiBot + EgoSuite 混合训练。** 分别计算两份组统计，按训练片段数设置组权重，再启动 mix。
 - **路线 C：只训练 RoboTwin。** 完成公共环境准备后，直接执行路线 C，计算独立组统计并启动单组训练。
 
-训练后的在线 policy 服务、32 步预测 / 16 步执行反馈协议，以及无需仿真器的 RoboTwin 数据回放，见 [causal action 推理服务](../../docs/causal_action_server.md)。
+训练后的在线 policy 服务、32 步预测 / 32 步执行反馈协议，以及无需仿真器的 RoboTwin 数据回放，见 [causal action 推理服务](../../docs/causal_action_server.md)。
 
 ## 1. 公共准备：环境与路径
 

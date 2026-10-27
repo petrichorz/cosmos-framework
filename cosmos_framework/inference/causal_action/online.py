@@ -13,6 +13,7 @@ from cosmos_framework.data.generator.action.causal_block_geometry import CausalB
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 from cosmos_framework.data.generator.action.video_view import VideoViewConfig
 from cosmos_framework.data.generator.sequence_packing.causal_action import CausalActionGeometry, expand_action_sequence
+from cosmos_framework.data.generator.sequence_packing.mrope import get_3d_mrope_ids_vae_tokens
 from cosmos_framework.inference.causal_action.streaming_cache import ObservedVideoCache
 from cosmos_framework.model.generator.utils.data_and_condition import GenerationDataClean
 
@@ -57,7 +58,7 @@ class CausalPolicyEngine:
         statistics,
         template,
         actions_per_block=32,
-        execute_steps=16,
+        execute_steps=None,
         video_stride=4,
         history_blocks=32,
         steps=10,
@@ -73,15 +74,12 @@ class CausalPolicyEngine:
             video_stride=video_stride,
             temporal_compression_factor=model.tokenizer_vision_gen.temporal_compression_factor,
         )
-        if (
-            type(execute_steps) is not int
-            or not 0 < execute_steps <= actions_per_block
-            or execute_steps % self.geometry.actions_per_latent_frame
-        ):
+        if execute_steps is None:
+            execute_steps = actions_per_block
+        if type(execute_steps) is not int or execute_steps != actions_per_block:
             raise ValueError(
-                "Execution feedback must cover a positive whole number of latents: "
-                "execute_steps must be a multiple of video_stride * VAE compression "
-                "and no greater than actions_per_block"
+                "Training-block joint prefill requires execute_steps == actions_per_block; "
+                "partial-block execution feedback is not supported"
             )
         if steps < 1 or history_blocks < 1 or not np.isfinite([guidance, shift]).all():
             raise ValueError("Invalid sampling/history options")
@@ -143,18 +141,26 @@ class CausalPolicyEngine:
             self.text_tokens = self.model._get_inference_text_tokens(
                 {self.model.input_caption_key: [sample["ai_caption"]]}, False
             )
-        # Keep both VAE convolution history and observed KV causal, one latent at a time.
+        # VAE convolutions remain causal; transformer clean attention is joint within a training block.
         chunk_frames = 1 if first else self.geometry.temporal_compression_factor
+        latents = []
         for chunk in pixels.split(chunk_frames, dim=2):
             latent = self.encoder.encode(chunk)
-            self.latest = self.model._remove_padding_from_latent([latent], [frame_size])[0]
-            self.frame += 1
-            for name, cache in self.caches.items():
-                packed = self._pack(name, state, state_mask, action_mask)
-                with cache.forward(self.model.net, append_frame=self.frame):
-                    self.model.denoise(data_batch_packed=packed)
+            latents.append(self.model._remove_padding_from_latent([latent], [frame_size])[0])
+        observed = torch.cat(latents, dim=2)
+        start = self.frame + 1
+        self.frame += observed.shape[2]
+        self.latest = observed[:, :, -1:]
+        for name, cache in self.caches.items():
+            packed = self._pack(name, state, state_mask, action_mask, observed=None if first else observed)
+            with cache.forward(
+                self.model.net,
+                append_frames=tuple(range(start, self.frame + 1)),
+                clean_block=-1 if first else 0,
+            ):
+                self.model.denoise(data_batch_packed=packed)
 
-    def _pack(self, name, state, state_mask, action_mask):
+    def _pack(self, name, state, state_mask, action_mask, *, observed=None):
         g, model = self.geometry, self.model
         device = self.latest.device
         state = state.to(device)
@@ -187,13 +193,21 @@ class CausalPolicyEngine:
             causal_action_metadata=metadata,
             action_start_frame_offset=1,
         )
-        vision = torch.cat(
-            [
-                self.latest,
-                self.latest.new_zeros(1, self.latest.shape[1], g.latent_frames_per_block, *self.latest.shape[-2:]),
-            ],
-            dim=2,
-        )
+        if observed is None:
+            vision = torch.cat(
+                [
+                    self.latest,
+                    self.latest.new_zeros(1, self.latest.shape[1], g.latent_frames_per_block, *self.latest.shape[-2:]),
+                ],
+                dim=2,
+            )
+            frame_offset = self.frame
+        else:
+            if observed.shape[2] != g.latent_frames_per_block:
+                raise ValueError("Observation prefill requires one complete training block")
+            # The compact pack requires a prefix slot; only clean block 0 is queried/committed.
+            vision = torch.cat([observed[:, :, :1], observed], dim=2)
+            frame_offset = self.frame - g.latent_frames_per_block
         data = GenerationDataClean(
             batch_size=1,
             is_image_batch=False,
@@ -211,16 +225,41 @@ class CausalPolicyEngine:
         )
         # Keep cached RoPE coordinates absolute, even when old video KVs are evicted.
         indexes = packed.vision.sequence_indexes
-        spatial = indexes.numel() // vision.shape[2]
-        step = packed.position_ids[0, indexes[spatial]] - packed.position_ids[0, indexes[0]]
+        temporal_offset = packed.position_ids[0, indexes[0]].item()
+        config = model.config.diffusion_expert_config
+        t, h, w = packed.vision.token_shapes[0]
+        # Generate absolute positions with the training formula; subtracting two rounded
+        # FPS-scaled positions to recover a step accumulates temporal rounding errors.
+        positions, _ = get_3d_mrope_ids_vae_tokens(
+            grid_t=t,
+            grid_h=h,
+            grid_w=w,
+            temporal_offset=temporal_offset,
+            reset_spatial_indices=config.unified_3d_mrope_reset_spatial_ids,
+            fps=data.fps_vision.item() if config.enable_fps_modulation else None,
+            base_fps=config.base_fps,
+            temporal_compression_factor=g.temporal_compression_factor,
+            start_frame_offset=frame_offset,
+        )
         layout = packed.teacher_forcing.layout
         visual = layout.gen_query_indexes[layout.stream_ids[layout.gen_query_indexes] == 0]
-        packed.position_ids[0, visual] += self.frame * step
-        packed.position_ids[0, indexes] += self.frame * step
-        packed.position_ids[0, layout.state_indexes] += self.frame * step
+        packed.position_ids[:, visual] = positions.to(packed.position_ids)
+        packed.position_ids[:, indexes] = positions.to(packed.position_ids)
+        packed.position_ids[:, layout.state_indexes] = positions[:, :1].to(packed.position_ids)
         action_indexes = packed.action.sequence_indexes
-        action_step = packed.position_ids[0, action_indexes[1]] - packed.position_ids[0, action_indexes[0]]
-        packed.position_ids[0, action_indexes] += self.frame * g.actions_per_latent_frame * action_step
+        action_positions, _ = get_3d_mrope_ids_vae_tokens(
+            grid_t=g.actions_per_block,
+            grid_h=1,
+            grid_w=1,
+            temporal_offset=temporal_offset,
+            reset_spatial_indices=config.unified_3d_mrope_reset_spatial_ids,
+            fps=data.fps_action.item() if config.enable_fps_modulation else None,
+            base_fps=config.base_fps,
+            temporal_compression_factor=1,
+            base_temporal_compression_factor=g.temporal_compression_factor,
+            start_frame_offset=1 + frame_offset * g.actions_per_latent_frame,
+        )
+        packed.position_ids[:, action_indexes] = action_positions.to(packed.position_ids)
         packed.to_cuda()
         return packed
 

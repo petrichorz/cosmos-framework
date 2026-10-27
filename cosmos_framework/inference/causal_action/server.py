@@ -98,8 +98,8 @@ def parser():
     p.add_argument(
         "--execute-steps",
         type=int,
-        default=16,
-        help="Executed prefix: a positive multiple of video-stride * VAE compression, at most actions-per-block",
+        default=None,
+        help="Must equal actions-per-block for joint observation prefill (defaults to actions-per-block)",
     )
     p.add_argument("--video-stride", type=int, default=4)
     p.add_argument(
