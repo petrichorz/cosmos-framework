@@ -370,7 +370,7 @@ def main():
     for task_name, task_config, control_mode in combinations:
         run_args = argparse.Namespace(**vars(args))
         run_args.task_name, run_args.task_config, run_args.control_mode = task_name, task_config, control_mode
-        run_output = output / task_name / task_config / control_mode if len(combinations) > 1 else output
+        run_output = output / task_name / task_config / control_mode
         print(f"Task {task_name}, config {task_config}, control mode {control_mode}, output: {run_output}", flush=True)
         run(run_args, output=run_output, pose_converter=pose_converter)
 

@@ -423,6 +423,7 @@ def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(
 def test_main_loads_config_resets_each_episode_and_always_closes_env(
     monkeypatch, tmp_path, fail_setup, success_count, capsys
 ):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, closed = FakeClient(), [], []
     config = dict(camera={}, data_type={})
 
@@ -479,7 +480,7 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(
         assert not config["eval_video_log"] and config["eval_video_save_dir"] is None
     assert closed == envs
     assert client.closed
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert len(metrics["episodes"]) == (1 if fail_setup else 2)
     assert metrics["episodes"][0]["status"] == ("error" if fail_setup else "finished")
     assert metrics["completed_episodes"] == (0 if fail_setup else 2)
@@ -489,7 +490,7 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(
         assert metrics["episodes"][0]["instruction"] == "Adjust."
         assert metrics["episodes"][0]["instruction_source"] == "override"
         for record in metrics["episodes"]:
-            requests_path = tmp_path / f"seed{record['seed']}" / "requests.json"
+            requests_path = output / f"seed{record['seed']}" / "requests.json"
             assert record["requests_path"] == str(requests_path)
             assert "requests" not in record
             requests = json.loads(requests_path.read_text())
@@ -503,8 +504,8 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(
         assert '"executed_steps": 2' in stdout
         assert '"seconds":' in stdout
         assert '"video_path":' in stdout
-        assert str(tmp_path / "metrics.json") in stdout
-        assert str(tmp_path / "seed42" / "requests.json") in stdout
+        assert str(output / "metrics.json") in stdout
+        assert str(output / "seed42" / "requests.json") in stdout
 
 
 @pytest.fixture
@@ -574,6 +575,7 @@ def automatic_main(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("cached_seeds", [(), (42,), (43,), (42, 43)])
 def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main, tmp_path, cached_seeds, capsys):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, events, helpers = automatic_main
     make_env = helpers.class_decorator
 
@@ -592,7 +594,7 @@ def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main
     runner.main()
     saved_info = {}
     for seed in (42, 43):
-        seed_output = tmp_path / f"seed{seed}"
+        seed_output = output / f"seed{seed}"
         info_path = seed_output / "info.json"
         if seed in cached_seeds:
             saved_info[seed] = info_path.read_bytes()
@@ -615,7 +617,7 @@ def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main
     assert [env.setup_args["seed"] for env in envs] == pending_seeds
     assert [env.setup_args["now_ep_num"] for env in envs] == [seed - 42 for seed in pending_seeds]
     assert len(client.requests) == len(client.resets) == len(pending_seeds)
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert [(record["episode"], record["seed"], record["success"]) for record in metrics["episodes"]] == [
         (0, 42, True),
         (1, 43, False),
@@ -626,7 +628,7 @@ def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main
     assert metrics["success_rate"] == 0.5
     assert not metrics["skipped_seeds"]
     for seed, content in saved_info.items():
-        assert (tmp_path / f"seed{seed}" / "info.json").read_bytes() == content
+        assert (output / f"seed{seed}" / "info.json").read_bytes() == content
     stdout = capsys.readouterr().out
     assert stdout.count("reusing inference result:") == len(cached_seeds)
     assert '"requests":' not in stdout
@@ -634,9 +636,10 @@ def test_completed_seeds_reuse_info_and_partial_outputs_are_rerun(automatic_main
 
 @pytest.mark.parametrize("invalid_info", [{}, {"success": None}, {"success": 0}, {"success": 1}, {"success": "false"}])
 def test_info_without_boolean_success_is_rerun(automatic_main, tmp_path, invalid_info):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, events, _ = automatic_main
     runner.main()
-    info_path = tmp_path / "seed42" / "info.json"
+    info_path = output / "seed42" / "info.json"
     info_path.write_text(json.dumps(invalid_info))
     envs.clear()
     events.clear()
@@ -648,7 +651,7 @@ def test_info_without_boolean_success_is_rerun(automatic_main, tmp_path, invalid
     assert [env.setup_args["seed"] for env in envs] == [42]
     assert len(client.requests) == len(client.resets) == 1
     assert json.loads(info_path.read_text())["success"] is False
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert [record["seed"] for record in metrics["episodes"]] == [42, 43]
     assert all(record["status"] == "finished" for record in metrics["episodes"])
     assert metrics["completed_episodes"] == 2
@@ -658,6 +661,7 @@ def test_info_without_boolean_success_is_rerun(automatic_main, tmp_path, invalid
 
 @pytest.mark.parametrize("instruction_type", [None, "unseen"])
 def test_automatic_instruction_uses_episode_metadata_and_recreates_scene(automatic_main, tmp_path, instruction_type):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, events, _ = automatic_main
     if instruction_type is not None:
         sys.argv.extend(["--instruction-type", instruction_type])
@@ -679,7 +683,7 @@ def test_automatic_instruction_uses_episode_metadata_and_recreates_scene(automat
     assert len(client.requests) == 2
     assert all(request["obs"]["cam_high"][0, 0, 0] == 0 for request in client.requests)
     assert all(len(env.executed) == 2 for env in envs)
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert [record["instruction"] for record in metrics["episodes"]] == client.resets
     assert all(record["instruction_source"] == "robotwin" for record in metrics["episodes"])
     assert metrics["instruction_type"] == kind
@@ -687,6 +691,7 @@ def test_automatic_instruction_uses_episode_metadata_and_recreates_scene(automat
 
 @pytest.mark.parametrize("failure", ["assertion", "index", "plan_failed", "task_failed"])
 def test_expert_failures_are_retried_without_consuming_episodes(automatic_main, tmp_path, failure):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, events, helpers = automatic_main
     make_env = helpers.class_decorator
 
@@ -719,7 +724,7 @@ def test_expert_failures_are_retried_without_consuming_episodes(automatic_main, 
     assert all(not env.executed for env in envs[:2])
     assert client.resets == [f"Lift the bottle with the left arm. Seed {seed}." for seed in (44, 45)]
     assert client.closed
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert [record["seed"] for record in metrics["skipped_seeds"]] == [42, 43]
     assert all(record["status"] == "skipped_expert" and record["error"] for record in metrics["skipped_seeds"])
     assert [record["seed"] for record in metrics["episodes"]] == [44, 45]
@@ -730,6 +735,7 @@ def test_expert_failures_are_retried_without_consuming_episodes(automatic_main, 
 
 @pytest.mark.parametrize("instruction", ["adjust_bottle", "", None])
 def test_failed_automatic_instruction_is_recorded_and_never_sent(automatic_main, tmp_path, instruction):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, _, events, helpers = automatic_main
     helpers.build_instruction = lambda *args: instruction
     with pytest.raises(ValueError, match="instruction generation failed"):
@@ -737,7 +743,7 @@ def test_failed_automatic_instruction_is_recorded_and_never_sent(automatic_main,
     assert not client.resets and not client.requests
     assert events[-1] == ("close", 42)
     assert client.closed
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert metrics["episodes"][0]["status"] == "error"
 
 
@@ -746,6 +752,7 @@ def test_failed_automatic_instruction_is_recorded_and_never_sent(automatic_main,
     [("setup", False), ("expert", False), ("restore", False), ("rollout", False), ("setup", True), ("rollout", True)],
 )
 def test_unstable_seeds_are_retried_without_consuming_episodes(automatic_main, tmp_path, phase, override):
+    output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, events, helpers = automatic_main
     if override:
         sys.argv.extend(["--instruction", "Adjust."])
@@ -788,7 +795,7 @@ def test_unstable_seeds_are_retried_without_consuming_episodes(automatic_main, t
     assert client.resets[-2:] == prompts
     assert len(client.resets) == (4 if phase == "rollout" else 2)
     assert client.closed
-    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    metrics = json.loads((output / "metrics.json").read_text())
     assert [record["seed"] for record in metrics["episodes"]] == [44, 45]
     assert all(record["status"] == "finished" and record["executed_steps"] == 2 for record in metrics["episodes"])
     assert [record["seed"] for record in metrics["skipped_seeds"]] == [42, 43]
@@ -797,14 +804,14 @@ def test_unstable_seeds_are_retried_without_consuming_episodes(automatic_main, t
     assert metrics["successful_episodes"] == 0
     assert metrics["success_rate"] == 0.0
     assert all("UnStableError" in record["error"] for record in metrics["skipped_seeds"])
-    assert (tmp_path / "seed44" / "action_joint.npy").is_file()
+    assert (output / "seed44" / "action_joint.npy").is_file()
     if phase == "rollout":
         # Failed attempts' predictions must not be overwritten by the retry.
-        assert (tmp_path / "seed42" / "action_joint.npy").is_file()
+        assert (output / "seed42" / "action_joint.npy").is_file()
         import cv2
 
         for seed, frames in ((42, 1), (43, 1), (44, 3), (45, 3)):
-            capture = cv2.VideoCapture(str(tmp_path / f"seed{seed}" / "video.mp4"))
+            capture = cv2.VideoCapture(str(output / f"seed{seed}" / "video.mp4"))
             try:
                 assert capture.isOpened()
                 assert capture.get(cv2.CAP_PROP_FRAME_COUNT) == frames

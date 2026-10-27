@@ -53,6 +53,22 @@ export VIDEO_STRIDE="${VIDEO_STRIDE:-4}"
 export NUM_STEPS="${NUM_STEPS:-10}"
 export GUIDANCE="${GUIDANCE:-1}"
 
+# 从实际来源清单取数据集名，附路径摘要以区分不同位置的同名数据集。
+DATASET_DIR="$(python - "$REPO_ROOT" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+sources = json.loads(os.path.expandvars(Path(os.environ["ACTION_SOURCES_FILE"]).read_text()))["sources"]
+root = Path(sources[int(os.environ["SOURCE_INDEX"])]["root"])
+root = (Path(sys.argv[1]) / root).resolve()
+digest = hashlib.sha256(str(root).encode()).hexdigest()[:8]
+print(f"{root.name or 'dataset'}_{digest}")
+PY
+)"
+export OUTPUT_ROOT="${OUTPUT_ROOT%/}/${DATASET_DIR}/source${SOURCE_INDEX}_sample${SAMPLE_INDEX}"
 mkdir -p "$OUTPUT_ROOT"
 
 bash "$SCRIPT_DIR/inference_causal_action.sh" \
