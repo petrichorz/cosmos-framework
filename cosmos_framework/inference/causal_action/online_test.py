@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -41,10 +42,13 @@ class FakeEngine:
 
     def reset(self):
         self.frames = []
+        self.structured_prompt = None
 
     def observe(self, cameras, **kwargs):
         self.frames.append(cameras)
         self.calls.append(kwargs)
+        if self.structured_prompt is None:
+            self.structured_prompt = dict(actions=[dict(description=kwargs["prompt"])])
 
     def predict(self, **kwargs):
         out = np.zeros((self.geometry.actions_per_block, 55), dtype=np.float32)
@@ -144,13 +148,13 @@ def test_server_mask_survives_reset_and_cannot_be_overridden():
 
 
 @pytest.mark.parametrize("execute_steps", [16, 32])
-def test_native_websocket_roundtrip_and_reset(monkeypatch, execute_steps):
+def test_native_websocket_roundtrip_and_reset(monkeypatch, tmp_path, execute_steps):
     import asyncio
     from contextlib import asynccontextmanager, suppress
 
     import websockets.asyncio.server
 
-    from cosmos_framework.inference.causal_action.client import CausalPolicyClient
+    from cosmos_framework.inference.causal_action.client import CausalPolicyClient, save_structured_prompt
     from cosmos_framework.inference.causal_action.server import serve
 
     async def scenario():
@@ -177,7 +181,10 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch, execute_steps):
                     assert client.metadata["seed"] == policy.engine.seed
                     assert client.metadata["available_control_modes"] == ["joint"]
                     for episode in range(2):
-                        assert client.reset(prompt="Pick up the cube.")["reset"]
+                        prompt = f"Pick up cube {episode}."
+                        reset_result = client.reset(prompt=prompt)
+                        assert reset_result["reset"] and "structured_prompt" not in reset_result
+                        prompt_path = tmp_path / f"episode{episode}" / "structured_prompt.json"
                         for revision, count in enumerate((1, execute_steps, execute_steps)):
                             req = dict(
                                 request(policy.engine, count, revision + episode),
@@ -185,6 +192,9 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch, execute_steps):
                                 executed_steps=execute_steps,
                             )
                             result = client.infer(req)
+                            assert ("structured_prompt" in result) == (revision == 0)
+                            save_structured_prompt(result, prompt_path)
+                            assert json.loads(prompt_path.read_text()) == dict(actions=[dict(description=prompt)])
                             assert client.actions(result).shape == (execute_steps, 14)
                             assert result["action"]["eef"] is None
                             assert result["action_unified"].shape == (execute_steps, 55)

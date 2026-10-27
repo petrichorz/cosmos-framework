@@ -111,6 +111,7 @@ class CausalPolicyEngine:
         self.frame = -1
         self.latest = self.frame_size = self.pixel_shape = None
         self.text_tokens = None
+        self.structured_prompt = None
 
     @torch.no_grad()
     def observe(self, cameras, *, state, state_mask, action_mask, prompt):
@@ -143,6 +144,7 @@ class CausalPolicyEngine:
             if isinstance(caption, dict):
                 caption = json.dumps(caption)
             self.text_tokens = self.model._get_inference_text_tokens({self.model.input_caption_key: [caption]}, False)
+            self.structured_prompt = sample["ai_caption"]
         # VAE convolutions remain causal; transformer clean attention is joint within a training block.
         chunk_frames = 1 if first else self.geometry.temporal_compression_factor
         latents = []

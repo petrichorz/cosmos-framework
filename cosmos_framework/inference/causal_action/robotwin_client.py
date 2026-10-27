@@ -24,6 +24,7 @@ from cosmos_framework.inference.causal_action.client import (
     H264VideoWriter,
     append_prediction_video,
     save_prediction_video,
+    save_structured_prompt,
 )
 
 
@@ -220,6 +221,8 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
             )
             while True:
                 response = client.infer(request)
+                if output is not None:
+                    save_structured_prompt(response, output / "structured_prompt.json")
                 actions = np.asarray(client.actions(response), dtype=np.float32)
                 count = response["execute_steps"]
                 if type(count) is not int or count < 1 or count != client.metadata["execute_steps"]:

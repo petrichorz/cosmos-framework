@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from cosmos_framework.inference.causal_action.client import CausalPolicyClient
+from cosmos_framework.inference.causal_action.client import CausalPolicyClient, save_structured_prompt
 
 
 def load_observations(args):
@@ -137,6 +137,7 @@ def main():
             if revision:
                 request["executed_steps"] = count
             result = client.infer(request)
+            save_structured_prompt(result, output / "structured_prompt.json")
             action = client.actions(result)
             width = (
                 client.metadata["left_arm_dof"] + client.metadata["right_arm_dof"] + 2

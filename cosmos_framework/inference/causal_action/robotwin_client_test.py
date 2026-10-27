@@ -119,6 +119,30 @@ def test_rollout_sends_post_action_history_and_discards_unexecuted_predictions(t
     assert result["action_path"] == str(saved[0])
 
 
+def test_rollout_saves_full_server_prompt_once(monkeypatch, tmp_path):
+    env, client = FakeEnv(), FakeClient()
+    env.set_instruction(instruction="Adjust the bottle.")
+    structured_prompt = dict(
+        cinematography=dict(framing="头部在上，双腕在下。"),
+        actions=[dict(description="Adjust the bottle.")],
+        fps=7.5,
+        resolution=dict(H=640, W=640),
+        aspect_ratio="1,1",
+    )
+    infer = client.infer
+
+    def first_response(request):
+        response = infer(request)
+        if request["observation_step"] == 0:
+            response["structured_prompt"] = structured_prompt
+        return response
+
+    monkeypatch.setattr(client, "infer", first_response)
+    runner.rollout(env, client, output=tmp_path)
+    assert len(client.requests) == 3
+    assert json.loads((tmp_path / "structured_prompt.json").read_text()) == structured_prompt
+
+
 def test_eef_rollout_stops_on_success_mid_chunk():
     env, client = FakeEnv(success_at=3), FakeClient(control_mode="eef")
     env.set_instruction(instruction="Move.")

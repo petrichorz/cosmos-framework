@@ -149,6 +149,8 @@ class CausalPolicy:
             observation_step=step,
             revision=self.revision,
         )
+        if self.revision == 1:
+            response["structured_prompt"] = self.engine.structured_prompt
         if self.return_video_latents:
             response["video_latents"] = result["video_latents"]
         if self.return_unified_action:

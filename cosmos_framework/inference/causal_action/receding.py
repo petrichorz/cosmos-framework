@@ -80,6 +80,10 @@ def run_receding_policy(model, dataset, args):
             action_mask=adapter.action_mask,
             prompt=data["prompt"],
         )
+        if revision == 0:
+            (output / "structured_prompt.json").write_text(
+                json.dumps(engine.structured_prompt, ensure_ascii=False, indent=2)
+            )
         result = engine.predict(
             state=state, state_mask=adapter.state_mask, action_mask=adapter.action_mask, revision=revision
         )

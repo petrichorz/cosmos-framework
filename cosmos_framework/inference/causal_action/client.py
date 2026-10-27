@@ -110,6 +110,18 @@ class H264VideoWriter:
         self.close()
 
 
+def save_structured_prompt(response, path):
+    """Save the server's full prompt when included in the first inference response."""
+    if "structured_prompt" not in response:
+        return
+    import json
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(response["structured_prompt"], ensure_ascii=False, indent=2))
+
+
 def save_prediction_video(response, path):
     """Save one server RGB preview as H.264/AVC in an MP4 container."""
     if "video" not in response:
