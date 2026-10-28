@@ -322,7 +322,26 @@ def test_comma_separated_arguments_reject_empty_duplicate_and_invalid_values(fla
     assert error.value.code == 2
 
 
-def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(monkeypatch, tmp_path, capsys):
+def test_main_requires_explicit_eef_config_or_dataset_root(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["robotwin_client.py", "--robotwin-root", "/path/to/RoboTwin"])
+    with pytest.raises(SystemExit) as error:
+        runner.main()
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "当前需要 T_world_base 来将世界坐标系转为基座坐标系" in stderr
+    assert "请提供 --eef-config 或 --eef-dataset-root" in stderr
+
+
+@pytest.fixture
+def eef_config(tmp_path):
+    path = tmp_path / "eef_config.json"
+    path.write_text(json.dumps(dict(eef_pose_frame="world")))
+    return str(path)
+
+
+def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(
+    monkeypatch, tmp_path, capsys, eef_config
+):
     clients, envs, loaded, roots, closed = [], [], [], [], []
     simulator = tmp_path / "RoboTwin"
     simulator.mkdir()
@@ -364,6 +383,8 @@ def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(
             "robotwin_client.py",
             "--robotwin-root",
             "RoboTwin",
+            "--eef-config",
+            eef_config,
             "--task-name",
             "task_a, task_b",
             "--task-config",
@@ -421,7 +442,7 @@ def test_main_runs_all_combinations_with_separate_artifacts_and_restarted_seeds(
 @pytest.mark.parametrize("fail_setup", [False, True])
 @pytest.mark.parametrize("success_count", [0, 1, 2])
 def test_main_loads_config_resets_each_episode_and_always_closes_env(
-    monkeypatch, tmp_path, fail_setup, success_count, capsys
+    monkeypatch, tmp_path, fail_setup, success_count, capsys, eef_config
 ):
     output = tmp_path / "adjust_bottle" / "demo_clean" / "joint"
     client, envs, closed = FakeClient(), [], []
@@ -454,6 +475,8 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(
             "robotwin_client.py",
             "--robotwin-root",
             "/path/to/RoboTwin",
+            "--eef-config",
+            eef_config,
             "--instruction",
             "Adjust.",
             "--seed",
@@ -509,7 +532,7 @@ def test_main_loads_config_resets_each_episode_and_always_closes_env(
 
 
 @pytest.fixture
-def automatic_main(monkeypatch, tmp_path):
+def automatic_main(monkeypatch, tmp_path, eef_config):
     client, envs, events = FakeClient(), [], []
     config = dict(task_name="adjust_bottle", eval_instruction="seen", camera={}, data_type={})
 
@@ -558,6 +581,8 @@ def automatic_main(monkeypatch, tmp_path):
             "robotwin_client.py",
             "--robotwin-root",
             "/path/to/RoboTwin",
+            "--eef-config",
+            eef_config,
             "--seed",
             "42",
             "--episodes",
