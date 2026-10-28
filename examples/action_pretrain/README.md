@@ -273,6 +273,7 @@ bash examples/action_pretrain/launch_midtrain_template.sh
 | -------------------------------------------- | ------- | ------------------------------------- |
 | `[action] max_action_steps`                  | 896     | 每片段最多 896 action、897 个原始观测 |
 | `[action] overlap_action_steps`              | 161     | 相邻片段重叠的 action 步数            |
+| `[action] actions_per_block`                 | 32      | 每个 causal block 的 action 步数      |
 | `[action] mode`                              | `joint` | FD / ID / Policy 联训                 |
 | `[model] teacher_forcing_history_blocks_max` | 32      | causal 历史 block 上限                |
 | `[dataloader_train] max_sequence_length`     | 54000   | 每个 rank 的 packing token 上限       |
@@ -280,7 +281,11 @@ bash examples/action_pretrain/launch_midtrain_template.sh
 | `[trainer] max_iter`                         | 10000   | 总训练步数                            |
 | `[checkpoint] save_iter`                     | 5000    | 保存 checkpoint 的间隔                |
 
-固定 block 当前为 32 action；视频每 4 帧采样一次，最长片段进入 VAE 前有 225 帧。`lookahead_limit` 在启动脚本中默认 1，可通过 `LOOKAHEAD_LIMIT` 覆盖。数据加载 worker、统计线程和 OpenMP 线程是不同设置；脚本不主动设置 `OMP_NUM_THREADS`。
+当前配置每个 block 为 32 action；视频每 4 帧采样一次，最长片段进入 VAE 前有 225 帧。`lookahead_limit` 在启动脚本中默认 1，可通过 `LOOKAHEAD_LIMIT` 覆盖。数据加载 worker、统计线程和 OpenMP 线程是不同设置；脚本不主动设置 `OMP_NUM_THREADS`。
+
+训练默认对不足 `max_action_steps` 的 episode 保留全部有效 action，重复最后一个 state/action 和末帧视频，将 action 长度向上补齐到 `actions_per_block` 的倍数；observation 长度为补齐后的 action 长度加 1。补出的 action 也参与 action loss，有效通道仍由来源 action mask 控制；重复的视频帧参与视频目标训练。`valid_action_steps` 仅记录补齐前的真实 action 数。至少需要一个真实 action；长 episode 的重叠窗口和已标注 subtask 的切片规则不变。来源 JSON 可设置 `"pad_episode_tail": false` 恢复 episode 截尾规则；独立统计 reader 默认保留原切片行为。
+
+`actions_per_block` 可配置：它必须能被 `video_stride × VAE 时间压缩倍率` 整除，`max_action_steps` 也必须能被它整除。当前 stride 和压缩倍率均为 4，因此 block 可设为 16、32、48 等；选择 48 时需同时将 896 改为 864 等合法片段长度。
 
 临时修改训练 worker 数：
 

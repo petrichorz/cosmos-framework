@@ -125,6 +125,7 @@ def get_causal_action_dataset(
                 video_backend=source.get("video_backend", "pyav_resize"),
                 table_backend=source.get("table_backend", table_backend),
                 early_video_sampling=source.get("early_video_sampling", early_video_sampling),
+                pad_episode_tail=source.get("pad_episode_tail", True),
             )
             for root, reader in zip(roots, pool.imap(build_reader, roots)):
                 reader.template = template

@@ -59,6 +59,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         video_backend: str | None = None,
         table_backend: str = "parquet",
         early_video_sampling: bool = False,
+        pad_episode_tail: bool = False,
         video_view: VideoViewConfig | None = None,
         viewpoint: str | None = None,
     ):
@@ -67,6 +68,7 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         self.root = Path(root)
         self.table_backend = table_backend
         self.early_video_sampling = early_video_sampling
+        self.pad_episode_tail = pad_episode_tail
         meta = LeRobotDatasetMetadata(repo_id="local", root=root, revision="local", use_hf_cache=table_backend == "hf")
         self._direct_meta = meta if table_backend == "parquet" else None
         self._file_starts = build_file_starts(meta) if table_backend == "parquet" else None
@@ -263,17 +265,21 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
                 if is_subtask:
                     first, stop = self._subtask_read_bounds(training_range, count)
                 else:
-                    # episode 模式及统计保持原索引与截尾规则。
+                    # episode 模式先排除目标偏移导致的越界，再决定是否补齐。
                     first = lo + max(0, -offset)
                     stop = max(first, min(hi, hi + 1 - offset))
-                planned = self.planner.plan(
-                    stop - first,
-                    observation_start=first,
-                    source_id=str(meta.root),
-                    episode_id=episode_id,
-                    segment_id=training_range.segment_id,
-                    preserve_tail=is_subtask,
-                )
+                if self.pad_episode_tail and not is_subtask and 0 < stop - first - 1 < self.planner.max_action_steps:
+                    # 索引只记录真实 action 数；读取后补齐，不能越界读取其他 episode。
+                    planned = [(first, stop - first - 1)]
+                else:
+                    planned = self.planner.plan(
+                        stop - first,
+                        observation_start=first,
+                        source_id=str(meta.root),
+                        episode_id=episode_id,
+                        segment_id=training_range.segment_id,
+                        preserve_tail=is_subtask,
+                    )
                 for start, actions in planned:
                     self._segments.append((ds_idx, episode_id, begin + start, actions))
                 if planned:
@@ -363,6 +369,14 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         # 先用存储 FPS 检查连续采样，再将输出 FPS 切换到真实训练时间尺度。
         if not torch.allclose(times[1:] - times[:-1], torch.full_like(times[1:], 1 / self.fps), atol=1e-5, rtol=1e-4):
             raise ValueError(f"Episode {episode_id}: timestamp intervals must match meta.fps={self.fps}")
+        valid_actions = actions
+        last_video_time = times[-1]
+        padding = (-actions % self.planner.geometry.actions_per_block) if self.pad_episode_tail else 0
+        if padding:
+            state = torch.cat([state, state[-1:].expand(padding, -1)])
+            target = torch.cat([target, target[-1:].expand(padding, -1)])
+            times = torch.cat([times, times[-1] + torch.arange(1, padding + 1, dtype=times.dtype) / self.fps])
+            actions += padding
         # action 时间标记区间起点；目标实际读取时刻由 read_options 声明。
         # 当前使用默认布局；后续布局增强在此选择本次样本的 viewpoint。
         viewpoint = self._viewpoint
@@ -370,6 +384,8 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
             torch.arange(0, actions + 1, self.planner.geometry.video_stride) if self.early_video_sampling else None
         )
         video_times = times if video_indexes is None else times[video_indexes]
+        if padding:
+            video_times = video_times.clamp(max=last_video_time)
         video = self._read_video(meta, episode_id, video_times.tolist(), viewpoint=viewpoint)
         caption = self._caption_for_index(idx)
         if caption is None:
@@ -399,6 +415,9 @@ class SegmentLeRobotDataset(BaseActionLeRobotDataset):
         )
         if video is not None and video_indexes is not None:
             sample["video_observation_indexes"] = video_indexes
+        if padding:
+            sample["action_time_mask"] = torch.ones(actions, dtype=torch.bool)
+            sample["valid_action_steps"] = valid_actions
         return sample
 
     def _read_parquet_segment(self, episode_id, start, actions):

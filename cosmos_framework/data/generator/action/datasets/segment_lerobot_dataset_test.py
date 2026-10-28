@@ -18,7 +18,18 @@ from cosmos_framework.data.generator.action.segment_planner import SegmentPlanne
 
 
 def make_reader(
-    monkeypatch, *, lengths=(100, 50), offset=0, from_state=False, root="synthetic", use_subtask=False, split="full"
+    monkeypatch,
+    *,
+    lengths=(100, 50),
+    offset=0,
+    from_state=False,
+    root="synthetic",
+    use_subtask=False,
+    split="full",
+    pad_episode_tail=False,
+    actions_per_block=32,
+    max_action_steps=64,
+    early_video_sampling=False,
 ):
     template = ActionStateTemplate55()
     size = sum(lengths)
@@ -65,18 +76,25 @@ def make_reader(
         table_backend="hf",
         template=template,
         planner=SegmentPlanner(
-            max_action_steps=64, overlap_action_steps=16, geometry=CausalBlockGeometry(temporal_compression_factor=4)
+            max_action_steps=max_action_steps,
+            overlap_action_steps=16,
+            geometry=CausalBlockGeometry(actions_per_block=actions_per_block, temporal_compression_factor=4),
         ),
         read_options=ActionReadOptions(action_from_state=from_state, action_time_offset_steps=offset),
         use_subtask=use_subtask,
         split=split,
+        pad_episode_tail=pad_episode_tail,
+        early_video_sampling=early_video_sampling,
     )
     return reader, queries
 
 
 @pytest.mark.parametrize("offset", [-2, 0, 1, 3])
 @pytest.mark.parametrize("from_state", [False, True])
-def test_subtask_extension_covers_boundaries_and_keeps_targets_aligned(monkeypatch, tmp_path, offset, from_state):
+@pytest.mark.parametrize("pad_episode_tail", [False, True])
+def test_subtask_extension_covers_boundaries_and_keeps_targets_aligned(
+    monkeypatch, tmp_path, offset, from_state, pad_episode_tail
+):
     annotations = [[(0, 33), (40, 177), (177, 181)], [(0, 65)]]
     meta = tmp_path / "meta"
     meta.mkdir()
@@ -91,7 +109,13 @@ def test_subtask_extension_covers_boundaries_and_keeps_targets_aligned(monkeypat
     ]
     (meta / "episodes.jsonl").write_text("\n".join(json.dumps(ep) for ep in episodes))
     reader, _ = make_reader(
-        monkeypatch, lengths=(181, 65), offset=offset, from_state=from_state, root=tmp_path, use_subtask=True
+        monkeypatch,
+        lengths=(181, 65),
+        offset=offset,
+        from_state=from_state,
+        root=tmp_path,
+        use_subtask=True,
+        pad_episode_tail=pad_episode_tail,
     )
     for (begin_idx, size), (lo, hi, first, stop) in zip(reader.get_shuffle_blocks(), reader._range_bounds):
         covered = set()
@@ -176,6 +200,103 @@ def test_short_episode_warns_and_is_skipped(monkeypatch):
         reader, _ = make_reader(monkeypatch, lengths=(32,))
     assert len(reader) == 0
     assert reader.planner.skipped_ranges == 1
+
+
+@pytest.mark.parametrize("backend", ["hf", "parquet"])
+@pytest.mark.parametrize("early_sampling", [False, True])
+@pytest.mark.parametrize("offset", [-2, 0, 1, 3])
+@pytest.mark.parametrize("from_state", [False, True])
+@pytest.mark.parametrize("block_actions", [16, 32, 48])
+def test_episode_padding_preserves_targets_video_and_loss_mask(
+    monkeypatch, backend, early_sampling, offset, from_state, block_actions
+):
+    from cosmos_framework.data.generator.action.block_state import build_block_sample
+
+    reader, queries = make_reader(
+        monkeypatch,
+        lengths=(173,),
+        offset=offset,
+        from_state=from_state,
+        pad_episode_tail=True,
+        actions_per_block=block_actions,
+        max_action_steps=192,
+        early_video_sampling=early_sampling,
+    )
+    if backend == "parquet":
+        ds = reader._get_dataset(0)
+        reader.table_backend = "parquet"
+        reader._direct_meta = ds.meta
+        reader._file_starts = {}
+
+        def read_window(meta, episode, start, stop, columns, **kwargs):
+            assert 0 <= start < stop <= 173
+            values = ds._query_hf_dataset({key: list(range(start, stop)) for key in columns})
+            return {key: value.tolist() for key, value in values.items()}
+
+        monkeypatch.setattr(module, "read_window", read_window)
+
+    requested = []
+
+    def read_video(meta, episode, times, *, viewpoint):
+        requested.extend(times)
+        return torch.tensor(times).view(1, -1, 1, 1).expand(3, -1, -1, -1) / 10
+
+    monkeypatch.setattr(reader, "_read_video", read_video)
+    sample = reader[0]
+    assert len(reader) == 1
+    _, _, start, valid = reader._segments[0]
+    padded = len(sample["action_target"])
+    assert padded % block_actions == 0 and valid <= padded <= 192
+    assert sample["valid_action_steps"] == valid
+    assert sample["state_trajectory"].shape[0] == padded + 1
+    expected = torch.arange(start + offset, start + offset + valid).float() + (0 if from_state else 1000)
+    torch.testing.assert_close(sample["action_target"][:valid, 0], expected)
+    torch.testing.assert_close(
+        sample["action_target"][valid:], sample["action_target"][valid - 1 : valid].expand(padded - valid, -1)
+    )
+    torch.testing.assert_close(
+        sample["state_trajectory"][: valid + 1, 0], torch.arange(start, start + valid + 1).float()
+    )
+    torch.testing.assert_close(
+        sample["state_trajectory"][valid + 1 :],
+        sample["state_trajectory"][valid : valid + 1].expand(padded - valid, -1),
+    )
+    torch.testing.assert_close(
+        sample["state_timestamps"], torch.arange(start, start + padded + 1, dtype=torch.float64) / 30
+    )
+    assert sample["action_time_mask"].dtype == torch.bool
+    assert sample["action_time_mask"].all()
+    assert max(requested) == pytest.approx((start + valid) / 30)
+    indexes = list(range(0, padded + 1, 4 if early_sampling else 1))
+    assert requested == pytest.approx([min(start + i, start + valid) / 30 for i in indexes])
+    result, metadata = build_block_sample(
+        raw=sample, template=reader.template, planner=reader.planner, history_blocks=1
+    )
+    assert result["video"].shape[1] == padded // 4 + 1
+    torch.testing.assert_close(metadata.action_mask, sample["action_mask"].expand(padded, -1))
+    assert reader.planner.discarded_action_steps == reader.planner.skipped_ranges == 0
+    assert queries  # 两种后端都读取真实数据，没有凭空构造有效目标。
+
+
+@pytest.mark.parametrize("frames", [2, 32, 33, 50, 65, 100, 210])
+def test_episode_padding_handles_tiny_aligned_and_long_episodes(monkeypatch, frames):
+    reader, _ = make_reader(monkeypatch, lengths=(frames,), from_state=True, offset=1, pad_episode_tail=True)
+    covered = set()
+    for index, (_, _, start, valid) in enumerate(reader._segments):
+        sample = reader[index]
+        actions = len(sample["action_target"])
+        assert actions % 32 == 0 and actions <= 64
+        mask = sample.get("action_time_mask", torch.ones(actions, dtype=torch.bool))
+        assert mask.all()
+        assert sample.get("valid_action_steps", actions) == valid
+        covered.update(range(start, start + valid))
+    assert covered == set(range(frames - 1))
+
+
+def test_episode_padding_still_skips_ranges_without_real_actions(monkeypatch):
+    with pytest.warns(UserWarning):
+        reader, _ = make_reader(monkeypatch, lengths=(1,), pad_episode_tail=True)
+    assert len(reader) == 0
 
 
 def test_timestamp_precision_and_video_hook(monkeypatch):
@@ -319,13 +440,16 @@ def test_invalid_subtask_falls_back_only_affected_episode(monkeypatch, tmp_path,
 
 
 @pytest.mark.parametrize("metadata", [None, "", '{"episode_index": 0, "action_config": null}\n'])
-def test_missing_subtasks_match_episode_mode(monkeypatch, tmp_path, metadata):
+@pytest.mark.parametrize("pad_episode_tail", [False, True])
+def test_missing_subtasks_match_episode_mode(monkeypatch, tmp_path, metadata, pad_episode_tail):
     if metadata is not None:
         (tmp_path / "meta").mkdir()
         (tmp_path / "meta/episodes.jsonl").write_text(metadata)
-    baseline, _ = make_reader(monkeypatch, lengths=(50, 50), root=tmp_path)
+    baseline, _ = make_reader(monkeypatch, lengths=(50, 50), root=tmp_path, pad_episode_tail=pad_episode_tail)
     with pytest.warns(UserWarning, match="falling back to episode mode") as warnings:
-        reader, _ = make_reader(monkeypatch, lengths=(50, 50), root=tmp_path, use_subtask=True)
+        reader, _ = make_reader(
+            monkeypatch, lengths=(50, 50), root=tmp_path, use_subtask=True, pad_episode_tail=pad_episode_tail
+        )
     assert len(warnings) == 2
     assert reader._segments == baseline._segments
     assert reader._range_captions == baseline._range_captions
