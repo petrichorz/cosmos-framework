@@ -31,7 +31,7 @@ def main():
     p.add_argument(
         "--execute-steps",
         type=int,
-        help="RoboTwin policy replay: execute/save one complete training block, then replan",
+        help="Policy replay: execute/save one complete training block, then replan",
     )
     p.add_argument("--max-action-steps", type=int, default=96)
     p.add_argument("--overlap-action-steps", type=int, default=16)

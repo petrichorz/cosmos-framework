@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Replay processed RoboTwin observations against a live server, without simulation.
+"""Replay processed robot observations against a live server, without simulation.
 
 Dataset frames/state advance by execute_steps independently of predicted actions. This checks
 serving integration, not closed-loop policy success or dynamics accuracy.
@@ -10,6 +10,7 @@ serving integration, not closed-loop policy success or dynamics accuracy.
 import argparse
 import json
 import os
+from copy import copy
 from pathlib import Path
 
 import numpy as np
@@ -18,45 +19,91 @@ from cosmos_framework.inference.causal_action.client import CausalPolicyClient, 
 
 
 def load_observations(args):
+    from dataclasses import replace
+
     from cosmos_framework.data.generator.action.action_state_template import ActionStateTemplate55
     from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
+    from cosmos_framework.data.generator.action.datasets.cobotmagic_segment_lerobot_dataset import (
+        CobotMagicSegmentLeRobotDataset,
+    )
     from cosmos_framework.data.generator.action.datasets.robotwin_segment_lerobot_dataset import (
         RoboTwinSegmentLeRobotDataset,
     )
     from cosmos_framework.data.generator.action.lerobot_discovery import discover_dataset_roots
     from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 
-    roots = discover_dataset_roots([args.dataset_root])
+    sources_file = getattr(args, "sources_file", None)
+    options = dict(split=getattr(args, "split", "full"))
+    reader_type = RoboTwinSegmentLeRobotDataset
+    if sources_file:
+        sources = json.loads(os.path.expandvars(Path(sources_file).read_text()))["sources"]
+        source = sources[args.source_index]
+        readers = {"robotwin": RoboTwinSegmentLeRobotDataset, "cobotmagic": CobotMagicSegmentLeRobotDataset}
+        if source["reader"] not in readers or source["viewpoint"] != "concat_view":
+            raise ValueError("Replay requires a robotwin or cobotmagic concat_view source")
+        reader_type = readers[source["reader"]]
+        options.update(
+            read_options=replace(reader_type.default_read_options, **source.get("read_options", {})),
+            split_val_ratio=source.get("split_val_ratio", 0.0),
+            use_subtask=source.get("use_subtask", False),
+        )
+        roots = discover_dataset_roots([source["root"]])
+    else:
+        roots = discover_dataset_roots([args.dataset_root])
+    if args.dataset_index is not None:
+        roots = [roots[args.dataset_index]]
+    elif not sources_file:
+        roots = roots[:1]
     geometry = CausalBlockGeometry(temporal_compression_factor=4)
-    reader = RoboTwinSegmentLeRobotDataset(
-        root=roots[args.dataset_index],
-        template=ActionStateTemplate55(),
-        planner=SegmentPlanner(
-            max_action_steps=args.max_action_steps,
-            overlap_action_steps=args.overlap_action_steps,
-            geometry=geometry,
-        ),
-        video_backend="pyav_resize",
-        table_backend="parquet",
-        split="full",
-        split_seed=args.split_seed,
-    )
-    return read_observations(reader, args.index)
+    index = args.index
+    if index < 0:
+        raise ValueError("Sample index must be nonnegative")
+    for root in roots:
+        reader = reader_type(
+            root=root,
+            template=ActionStateTemplate55(),
+            planner=SegmentPlanner(
+                max_action_steps=args.max_action_steps,
+                overlap_action_steps=args.overlap_action_steps,
+                geometry=geometry,
+            ),
+            video_backend="pyav_resize",
+            table_backend="parquet",
+            split_seed=args.split_seed,
+            **options,
+        )
+        if index < len(reader):
+            return dict(
+                read_observations(reader, index),
+                split=options["split"],
+                source_index=args.source_index if sources_file else None,
+            )
+        index -= len(reader)
+    raise IndexError(f"Sample index {args.index} is outside the selected replay datasets")
 
 
 def read_observations(reader, index, *, required=None):
     """Read native cameras/state once for both WebSocket and offline policy replay."""
+    import torch
+
     from cosmos_framework.inference.causal_action.robotwin import RobotwinAdapter
     from lerobot.datasets.video_utils import decode_video_frames
 
-    _, episode_id, start, actions = reader._resolve_index(index)
-    state, target, sm, am, times, task = reader._read_parquet_segment(episode_id, start, actions)
+    _, episode_id, start, _ = reader._resolve_index(index)
+    # Keep reader alignment, padding and masks without decoding its composed video.
+    numeric_reader = copy(reader)
+    numeric_reader.video_view = None
+    sample = numeric_reader[index]
+    state, target = sample["state_trajectory"], sample["action_target"]
+    sm, am, times = sample["state_mask"], sample["action_mask"], sample["state_timestamps"]
+    valid_actions = sample.get("valid_action_steps", len(target))
     required = len(state) if required is None else required
     if len(state) < required:
         raise ValueError(f"Selected segment has {len(state)} observations; {required} required")
     adapter = RobotwinAdapter(reader.template, state_mask=sm, action_mask=am)
     meta = reader._direct_meta
     cameras = {}
+    video_times = times[:required].clamp(max=times[valid_actions])
     for role, key in reader.video_view.cameras.items():
         feature = meta.features[key]
         names, shape = feature["names"], feature["shape"]
@@ -64,7 +111,7 @@ def read_observations(reader, index, *, required=None):
         offset = meta.episodes[episode_id][f"videos/{key}/from_timestamp"]
         video = decode_video_frames(
             meta.root / meta.get_video_file_path(episode_id, key),
-            [offset + timestamp for timestamp in times[:required].tolist()],
+            [offset + timestamp for timestamp in video_times.tolist()],
             reader._tolerance_s,
             backend="pyav_resize",
             resize_h=height,
@@ -75,7 +122,7 @@ def read_observations(reader, index, *, required=None):
     return dict(
         cameras=cameras,
         state=[adapter.state_for_replay(row) for row in state[:required].numpy()],
-        prompt=reader._caption_for_index(index) or str(meta.tasks.iloc[int(task)].name),
+        prompt=sample["ai_caption"],
         fps=reader._read_source_fps(episode_id),
         root=str(reader.root),
         episode=episode_id,
@@ -85,6 +132,8 @@ def read_observations(reader, index, *, required=None):
         overlap_action_steps=reader.planner.overlap_action_steps,
         state_unified=state[:required],
         action_target=target[: required - 1],
+        action_time_mask=sample.get("action_time_mask", torch.ones(len(target), dtype=torch.bool))[: required - 1],
+        valid_action_steps=min(valid_actions, required - 1),
         state_mask=sm,
         action_mask=am,
     )
@@ -93,10 +142,13 @@ def read_observations(reader, index, *, required=None):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uri", default="ws://localhost:8000")
+    p.add_argument("--dataset-root", default=os.environ.get("ROBOTWIN_ROOT"))
+    p.add_argument("--sources-file", help="Source manifest with dataset roots and read options")
+    p.add_argument("--source-index", type=int, default=0)
     p.add_argument(
-        "--dataset-root", default=os.environ.get("ROBOTWIN_ROOT"), required="ROBOTWIN_ROOT" not in os.environ
+        "--dataset-index", type=int, help="Select one child dataset; manifests otherwise index the source group"
     )
-    p.add_argument("--dataset-index", type=int, default=0)
+    p.add_argument("--split", choices=["train", "val", "full"], default="full")
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--split-seed", type=int, default=42, help="Dataset ordering seed; separate from model sampling")
     p.add_argument("--max-action-steps", type=int, default=96, help="Match the offline segment planner")
@@ -106,6 +158,8 @@ def main():
         "--output", default="outputs", help="Output root; results are saved under seed{server sampling seed}"
     )
     args = p.parse_args()
+    if not args.dataset_root and not args.sources_file:
+        p.error("Pass --dataset-root or --sources-file")
     data = load_observations(args)
     total = len(data["action_target"])
     metrics = []
@@ -164,6 +218,9 @@ def main():
                 episode=data["episode"],
                 start=data["start"],
                 split_seed=data["split_seed"],
+                split=data["split"],
+                source_index=data["source_index"],
+                sample_index=args.index,
                 max_action_steps=data["max_action_steps"],
                 overlap_action_steps=data["overlap_action_steps"],
                 fps=data["fps"],

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: OpenMDW-1.1
-"""CobotMagic measured-state trajectories with explicit terminal padding."""
+"""CobotMagic measured-state trajectories with optional terminal padding."""
 
 from pathlib import Path
 
@@ -40,7 +40,7 @@ class CobotMagicSegmentLeRobotDataset(SegmentLeRobotDataset):
         self.full_episode = full_episode
         if kwargs.get("table_backend", "parquet") != "parquet":
             raise ValueError("CobotMagic requires the direct parquet backend")
-        if read_options != READ_OPTIONS:
+        if not read_options.action_from_state or read_options.action_time_offset_steps != 1:
             raise ValueError("CobotMagic targets must be the next measured state")
         # Resolve per-subset holdouts without splitting one mixture group into tiny sources.
         ratios = kwargs.get("split_val_ratio")
@@ -58,27 +58,29 @@ class CobotMagicSegmentLeRobotDataset(SegmentLeRobotDataset):
 
     def _iter_training_ranges(self, episode_id, episode_length):
         episode = self._direct_meta.episodes[episode_id]
-        original = int(episode["original_length"])
+        original = int(episode.get("original_length", episode_length))
         if not 2 <= original <= episode_length:
             raise ValueError("Invalid CobotMagic original episode length")
-        if self.full_episode:
+        if self.full_episode and "original_length" in episode:
             self.planner.geometry.validate_observation_frames(episode_length)
             if episode_length - 1 > self.planner.max_action_steps:
                 raise ValueError(f"Episode {episode_id} exceeds the full-episode action limit")
         yield ActionTrainingRange(0, episode_length if self.full_episode else original)
 
     def _read_video(self, meta, episode_id, timestamps, *, viewpoint):
-        last = (int(meta.episodes[episode_id]["original_length"]) - 1) / self.fps
+        episode = meta.episodes[episode_id]
+        last = (int(episode.get("original_length", episode["length"])) - 1) / self.fps
         return super()._read_video(meta, episode_id, [min(t, last) for t in timestamps], viewpoint=viewpoint)
 
     def __getitem__(self, idx):
         _, episode_id, start, actions = self._resolve_index(idx)
         episode = self._direct_meta.episodes[episode_id]
         local_start = start - int(episode["dataset_from_index"])
-        valid_actions = min(actions, int(episode["original_length"]) - 1 - local_start)
+        original = int(episode.get("original_length", episode["length"]))
+        valid_actions = min(actions, original - 1 - local_start)
         sample = super().__getitem__(idx)
         sample["cobotmagic_target"] = sample["action_target"].clone()
-        sample["action_time_mask"] = torch.arange(actions) < valid_actions
+        sample["action_time_mask"] = torch.arange(len(sample["action_target"])) < valid_actions
         sample["valid_action_steps"] = valid_actions
         sample["episode_index"] = episode_id
         return sample

@@ -14,9 +14,6 @@ import torch
 
 from cosmos_framework.data.generator.action.block_state import build_block_sample
 from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
-from cosmos_framework.data.generator.action.datasets.robotwin_segment_lerobot_dataset import (
-    RoboTwinSegmentLeRobotDataset,
-)
 from cosmos_framework.data.generator.action.segment_planner import SegmentPlanner
 from cosmos_framework.data.generator.action.transforms import build_sequence_plan_from_mode
 from cosmos_framework.inference.causal_action.online import CausalPolicyEngine
@@ -34,8 +31,6 @@ def run_receding_policy(model, dataset, args):
     offset = dataset.cumulative_sizes[child - 1] if child else 0
     source = dataset.datasets[child]
     reader = source._dataset
-    if not isinstance(reader, RoboTwinSegmentLeRobotDataset):
-        raise ValueError("--execute-steps currently supports RoboTwin policy sources")
     data = read_observations(reader, args.index - offset)
     adapter = RobotwinAdapter.from_statistics(source.template, source.statistics)
     if (adapter.state_mask & ~data["state_mask"]).any() or (adapter.action_mask & ~data["action_mask"]).any():
@@ -105,7 +100,7 @@ def run_receding_policy(model, dataset, args):
         )
         requests.append(row)
         print(json.dumps(row), flush=True)
-    action = torch.cat(actions)
+    action = torch.cat(actions)[data["action_time_mask"]]
     prediction = torch.cat(normalized)
     video_latents = torch.cat([prefixes[0], *latents], dim=2)
     video_metrics = dict(video_path=None, video_frames=0, video_fps=16)
@@ -114,6 +109,7 @@ def run_receding_policy(model, dataset, args):
     payload = dict(
         action=[action],
         action_normalized=[prediction],
+        action_time_mask=[data["action_time_mask"]],
         vision_latents=[video_latents],
         observed_prefix_latents=prefixes,
         prediction_starts=torch.arange(0, total, count),
@@ -125,6 +121,11 @@ def run_receding_policy(model, dataset, args):
         episode=data["episode"],
         start=data["start"],
         split_seed=data["split_seed"],
+        split=args.split,
+        source_index=args.source_index,
+        sample_index=args.index,
+        predicted_action_steps=total,
+        valid_action_steps=data["valid_action_steps"],
         max_action_steps=data["max_action_steps"],
         overlap_action_steps=data["overlap_action_steps"],
         checkpoint=args.checkpoint,
@@ -152,6 +153,7 @@ def run_receding_policy(model, dataset, args):
                 action_target=data["action_target"],
                 state_mask=adapter.state_mask,
                 action_mask=adapter.action_mask,
+                action_time_mask=data["action_time_mask"],
                 conditioning_fps=data["fps"],
                 source=data["root"],
             ),
