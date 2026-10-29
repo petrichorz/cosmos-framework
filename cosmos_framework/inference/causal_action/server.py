@@ -99,7 +99,7 @@ def parser():
         "--execute-steps",
         type=int,
         default=None,
-        help="Must equal actions-per-block for joint observation prefill (defaults to actions-per-block)",
+        help="Steps executed before updating observed KV and replanning (defaults to actions-per-block)",
     )
     p.add_argument("--video-stride", type=int, default=4)
     p.add_argument(

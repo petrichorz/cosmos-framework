@@ -12,8 +12,9 @@ import torch.nn.functional as F
 from cosmos_framework.data.generator.action.action_state_template import ActionStateTemplate55
 from cosmos_framework.data.generator.action.block_state import BlockStatistics, Quantiles
 from cosmos_framework.data.generator.action.causal_block_geometry import CausalBlockGeometry
+from cosmos_framework.data.generator.sequence_packing import PackedSequence, pack_input_sequence
 from cosmos_framework.data.generator.sequence_packing.runtime import from_mode_splits, init_sequence_pack
-from cosmos_framework.inference.causal_action import streaming_cache
+from cosmos_framework.inference.causal_action import online, streaming_cache
 from cosmos_framework.inference.causal_action.online import CausalPolicyEngine
 from cosmos_framework.inference.causal_action.policy import CAMERA_KEYS, CausalPolicy
 from cosmos_framework.inference.causal_action.streaming_cache import ObservedVideoCache
@@ -23,7 +24,7 @@ from cosmos_framework.inference.causal_action.wire import packb, unpackb
 class FakeEngine:
     def __init__(self, execute_steps=32):
         self.template = ActionStateTemplate55()
-        self.geometry = CausalBlockGeometry(actions_per_block=execute_steps, temporal_compression_factor=4)
+        self.geometry = CausalBlockGeometry(actions_per_block=32, temporal_compression_factor=4)
         self.execute_steps = execute_steps
         self.steps = 10
         self.seed = 42
@@ -195,9 +196,9 @@ def test_native_websocket_roundtrip_and_reset(monkeypatch, tmp_path, execute_ste
                             assert ("structured_prompt" in result) == (revision == 0)
                             save_structured_prompt(result, prompt_path)
                             assert json.loads(prompt_path.read_text()) == dict(actions=[dict(description=prompt)])
-                            assert client.actions(result).shape == (execute_steps, 14)
+                            assert client.actions(result).shape == (32, 14)
                             assert result["action"]["eef"] is None
-                            assert result["action_unified"].shape == (execute_steps, 55)
+                            assert result["action_unified"].shape == (32, 55)
                             assert "video" not in result
                             assert client.metadata["video_decode_mode"] == "whole_sequence"
                             assert client.metadata["prediction_video_fps"] == 16
@@ -300,8 +301,109 @@ def test_streaming_cache_attention_matches_oracle_and_is_readonly(monkeypatch, n
                 pass
 
 
-@pytest.mark.parametrize("execute_steps", [0, 16, 48, True])
-def test_engine_rejects_partial_block_feedback(execute_steps):
+@pytest.mark.parametrize("execute_steps", [0, 8, 17, 48, True])
+def test_engine_rejects_invalid_feedback_length(execute_steps):
     model = SimpleNamespace(tokenizer_vision_gen=SimpleNamespace(temporal_compression_factor=4))
-    with pytest.raises(ValueError, match="execute_steps == actions_per_block"):
+    with pytest.raises(ValueError, match="positive multiple"):
         CausalPolicyEngine(model, statistics=None, template=None, execute_steps=execute_steps)
+
+
+@pytest.mark.parametrize("execute_steps", [16, 32])
+@pytest.mark.parametrize("guidance", [1.0, 2.0])
+def test_engine_feedback_updates_kv_with_full_prediction_horizon(monkeypatch, execute_steps, guidance):
+    class Encoder:
+        def __init__(self, tokenizer):
+            self.reset()
+
+        def reset(self):
+            self.chunks = []
+
+        def encode(self, pixels):
+            self.chunks.append(pixels.shape[2])
+            return pixels.mean(dim=(2, 3, 4), keepdim=True)
+
+    monkeypatch.setattr(online, "StreamingObservationEncoder", Encoder)
+    monkeypatch.setattr(streaming_cache, "attention", cpu_attention)
+    monkeypatch.setattr(PackedSequence, "to_cuda", lambda self: None)
+    attn = SimpleNamespace(dispatch_attention_fn=None)
+    config = SimpleNamespace(unified_3d_mrope_reset_spatial_ids=True, enable_fps_modulation=True, base_fps=24)
+    model = SimpleNamespace(
+        tokenizer_vision_gen=SimpleNamespace(temporal_compression_factor=4),
+        net=SimpleNamespace(
+            language_model=SimpleNamespace(model=SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)]))
+        ),
+        tensor_kwargs_fp32=dict(device="cpu", dtype=torch.float32),
+        precision=torch.float32,
+        config=SimpleNamespace(diffusion_expert_config=config),
+        input_caption_key="ai_caption",
+        _get_inference_text_tokens=lambda *args: ([[1, 2]], [[3, 4]]),
+        _remove_padding_from_latent=lambda latents, sizes: latents,
+    )
+
+    def pack(plans, tokens, data, timesteps):
+        packed = pack_input_sequence(
+            plans,
+            tokens,
+            data,
+            timesteps,
+            dict(bos_token_id=0, eos_token_id=5, start_of_generation=6),
+            enable_fps_modulation=True,
+        )
+        packed.causal_action_metadata = [plan.causal_action_metadata for plan in plans]
+        return packed
+
+    def denoise(*, data_batch_packed):
+        packed = data_batch_packed
+        meta = init_sequence_pack(packed.sample_lens, packed.split_lens, packed.attn_modes, torch.device("cpu"))
+        meta["is_sharded"] = False
+        # Exercise real cache dispatch with position-dependent projected Q/K/V.
+        tokens = packed.position_ids.T[:, None].float()
+        split = packed.split_lens[0]
+        projections = [from_mode_splits(tokens[:split], tokens[split:], meta) for _ in range(3)]
+        attn.dispatch_attention_fn(*projections, SimpleNamespace(layout=packed.teacher_forcing.layout))
+
+    model._pack_input_sequence, model.denoise = pack, denoise
+    reference = FakeEngine()
+    kwargs = dict(
+        statistics=reference.statistics,
+        template=reference.template,
+        execute_steps=execute_steps,
+        history_blocks=1,
+        guidance=guidance,
+    )
+    if execute_steps == 16:
+        with pytest.warns(RuntimeWarning, match="changing clean attention grouping"):
+            engine = CausalPolicyEngine(model, **kwargs)
+    else:
+        engine = CausalPolicyEngine(model, **kwargs)
+    engine.transform = lambda sample, resolution: dict(sample, image_size=torch.tensor([6, 6, 6, 6]))
+    masks = dict(state=torch.zeros(55), state_mask=reference.mask, action_mask=reference.mask)
+    prefix_positions = []
+    with torch.no_grad():
+        for step in range(0, 65, execute_steps):
+            count = execute_steps if step else 1
+            engine.observe(request(reference, count, step)["obs"], prompt="Pick up the cube.", **masks)
+            frame = step // 16
+            assert engine.frame == frame
+            for name, cache in engine.caches.items():
+                assert [item[0] for item in cache.layers[0].video] == list(range(max(0, frame - 1), frame + 1))
+                before = cache.layers
+                prediction = engine._pack(name, **masks)
+                assert prediction.action.tokens[0].shape == (32, 55)
+                assert prediction.teacher_forcing.layout.geometry.block_sizes == (2,)
+                assert prediction.vision.token_shapes[0][0] == 3
+                indexes = prediction.vision.sequence_indexes
+                expected_start = prefix_positions[-1] if prefix_positions else None
+                if expected_start is not None:
+                    torch.testing.assert_close(prediction.position_ids[:, indexes[:1]], expected_start)
+                with cache.forward(model.net):
+                    model.denoise(data_batch_packed=prediction)
+                assert cache.layers is before
+            # The next 16-step update must start prediction at the first previously predicted latent.
+            prefix_positions.append(prediction.position_ids[:, indexes[1:2]].clone())
+            if execute_steps == 32:
+                prefix_positions[-1] = prediction.position_ids[:, indexes[2:3]].clone()
+        assert engine.encoder.chunks == [1] + [4] * 4
+        engine.reset()
+        assert engine.frame == -1 and not engine.encoder.chunks
+        assert all(not cache.layers for cache in engine.caches.values())

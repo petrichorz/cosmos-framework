@@ -4,6 +4,7 @@
 """Streaming observed-video encoding and receding-horizon causal policy sampling."""
 
 import json
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -77,10 +78,22 @@ class CausalPolicyEngine:
         )
         if execute_steps is None:
             execute_steps = actions_per_block
-        if type(execute_steps) is not int or execute_steps != actions_per_block:
+        if (
+            type(execute_steps) is not int
+            or not 0 < execute_steps <= actions_per_block
+            or execute_steps % self.geometry.actions_per_latent_frame
+        ):
             raise ValueError(
-                "Training-block joint prefill requires execute_steps == actions_per_block; "
-                "partial-block execution feedback is not supported"
+                "execute_steps must be a positive multiple of video_stride * temporal_compression_factor "
+                "and must not exceed actions_per_block"
+            )
+        if execute_steps != actions_per_block:
+            warnings.warn(
+                f"execute_steps={execute_steps} differs from actions_per_block={actions_per_block}; "
+                "observed KV will update per execution prefix, changing clean attention grouping "
+                "from full training-block joint prefill",
+                RuntimeWarning,
+                stacklevel=2,
             )
         if steps < 1 or history_blocks < 1 or not np.isfinite([guidance, shift]).all():
             raise ValueError("Invalid sampling/history options")
@@ -145,7 +158,7 @@ class CausalPolicyEngine:
                 caption = json.dumps(caption)
             self.text_tokens = self.model._get_inference_text_tokens({self.model.input_caption_key: [caption]}, False)
             self.structured_prompt = sample["ai_caption"]
-        # VAE convolutions remain causal; transformer clean attention is joint within a training block.
+        # VAE convolutions remain causal; transformer clean attention is joint within each feedback update.
         chunk_frames = 1 if first else self.geometry.temporal_compression_factor
         latents = []
         for chunk in pixels.split(chunk_frames, dim=2):
@@ -166,6 +179,9 @@ class CausalPolicyEngine:
 
     def _pack(self, name, state, state_mask, action_mask, *, observed=None):
         g, model = self.geometry, self.model
+        if observed is not None:
+            # Prefill only the executed prefix; prediction keeps the full block geometry.
+            g = replace(g, actions_per_block=self.execute_steps)
         device = self.latest.device
         state = state.to(device)
         state_mask, action_mask = state_mask.to(device), action_mask.to(device)
@@ -208,7 +224,7 @@ class CausalPolicyEngine:
             frame_offset = self.frame
         else:
             if observed.shape[2] != g.latent_frames_per_block:
-                raise ValueError("Observation prefill requires one complete training block")
+                raise ValueError("Observation prefill requires one complete execution prefix")
             # The compact pack requires a prefix slot; only clean block 0 is queried/committed.
             vision = torch.cat([observed[:, :, :1], observed], dim=2)
             frame_offset = self.frame - g.latent_frames_per_block

@@ -31,7 +31,7 @@ def main():
     p.add_argument(
         "--execute-steps",
         type=int,
-        help="Policy replay: execute/save one complete training block, then replan",
+        help="Policy replay: execute/save this many steps, update observed KV, then replan",
     )
     p.add_argument("--max-action-steps", type=int, default=96)
     p.add_argument("--overlap-action-steps", type=int, default=16)
@@ -59,12 +59,12 @@ def main():
         if (
             args.video_stride < 1
             or args.execute_steps < 1
-            or args.execute_steps != args.actions_per_block
+            or args.execute_steps > args.actions_per_block
             or args.execute_steps % (args.video_stride * 4)
         ):
             p.error(
-                "--execute-steps must equal --actions-per-block and be a positive multiple of "
-                "--video-stride * Wan2.2 temporal compression (4) for training-block joint prefill"
+                "--execute-steps must not exceed --actions-per-block and must be a positive multiple of "
+                "--video-stride * Wan2.2 temporal compression (4)"
             )
     os.environ.setdefault("COSMOS_DEVICE", "npu")
     os.environ["WAN_VAE_PATH"] = args.vae
