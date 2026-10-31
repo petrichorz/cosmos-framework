@@ -194,6 +194,7 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
     started = time.perf_counter()
     executed = 0
     requests = []
+    active_failure = None
     whole_video = client.metadata.get("video_decode_mode") == "whole_sequence"
     if whole_video:
         client.reset(prompt=env.get_instruction(), record_video=output is not None)
@@ -243,6 +244,23 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
                     action_blocks.append(actions.copy())
                     requests[-1].update(save_prediction_video(response, output / f"step{executed:06d}_prediction.mp4"))
                 if client.control_mode == "eef":
+                    # Compare the full prediction with its first frame in dataset coordinates.
+                    poses = actions.astype(np.float64).reshape(-1, 2, 8)
+                    position = np.linalg.norm(poses[..., :3] - poses[0, :, :3], axis=-1).max(axis=0)
+                    quaternion = poses[..., 3:7]
+                    norms = np.linalg.norm(quaternion, axis=-1, keepdims=True)
+                    quaternion = np.divide(quaternion, norms, out=np.zeros_like(quaternion), where=norms > 0)
+                    cosine = np.abs((quaternion * quaternion[0]).sum(axis=-1))
+                    rotation = np.rad2deg(2 * np.arccos(np.clip(cosine, 0, 1))).max(axis=0)
+                    gripper = np.abs(poses[..., 7] - poses[0, :, 7]).max(axis=0)
+                    if (position < 0.05).all() and (rotation < 5.0).all() and (gripper < 0.1).all():
+                        active_failure = dict(
+                            observation_step=executed,
+                            max_position_deviation_m=position.tolist(),
+                            max_rotation_deviation_deg=rotation.tolist(),
+                            max_gripper_deviation=gripper.tolist(),
+                        )
+                        break
                     actions = pose_converter.actions_to_world(actions)
 
                 observations = []
@@ -278,7 +296,10 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
     if whole_video and output is not None and requests:
         prediction_metrics = client.save_prediction_video(output / "prediction.mp4")
     return dict(
-        success=bool(env.eval_success),
+        success=bool(env.eval_success) and active_failure is None,
+        active_failure=active_failure is not None,
+        failure_reason="eef_low_motion" if active_failure is not None else None,
+        failure_details=active_failure,
         executed_steps=executed,
         seconds=time.perf_counter() - started,
         requests=requests,
