@@ -10,6 +10,30 @@
 
 训练后的在线 policy 服务、32 步预测 / 16 步执行反馈协议，以及无需仿真器的 RoboTwin 数据回放，见 [causal action 推理服务](../../docs/causal_action_server.md)。
 
+## Edge / Nano 配方选择
+
+`launch_midtrain_local.sh` 和 `launch_midtrain_template.sh` 默认使用 `MODEL_VARIANT=edge`。
+设置 `MODEL_VARIANT=nano` 会选择独立的 `action_midtrain_nano_causal_tnd.toml`、
+`action_causal_midtrain_nano` experiment 和 Qwen tokenizer 参数，并将默认输出目录设为
+`$RUN_DIR/train_nano_$SOURCE_SET`。Nano 继续使用 480 分辨率的 action 数据配置。
+
+```bash
+MODEL_VARIANT=nano \
+BASE_CHECKPOINT_PATH=/path/to/Cosmos3-Nano-DCP \
+NANO_TOKENIZER_PATH=/path/to/Cosmos3-Nano/text_tokenizer \
+bash examples/action_pretrain/launch_midtrain_local.sh
+```
+
+`BASE_CHECKPOINT_PATH` 指向包含 `model/.metadata` 和 DCP 分片的目录；
+`NANO_TOKENIZER_PATH` 可以使用 Nano 原始权重附带的 `text_tokenizer/`。
+本机 local 脚本已提供这两个路径的默认值，Nano 默认使用 `cosmos-framework-py313`；
+通用 template 脚本使用占位路径，需按机器设置 `CONDA_ENV`。
+Nano 的 NPU 启动默认设置 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`，
+以减少长片段反向传播的显存碎片；显式设置的同名环境变量优先。
+显式设置的 `TOML_PATH`、checkpoint、tokenizer 和输出目录仍优先于默认值，切换模型时需同步检查。
+新的 Nano 实验保留 action/state 参数跳过加载策略；复用已有输出目录会触发自动续训。
+可先设置 `PRINT_ONLY=1` 查看完整命令，或设置 `DRY_RUN=1` 仅验证配置。
+
 ## 1. 公共准备：环境与路径
 
 ```bash

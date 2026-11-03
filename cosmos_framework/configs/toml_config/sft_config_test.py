@@ -296,6 +296,7 @@ def _dummy_recipe_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestEndToEndLoader:
+    @pytest.mark.parametrize("variant", ["edge", "nano"])
     @pytest.mark.parametrize(
         "steps,stride,maximum,overlap,block,durations",
         [
@@ -304,12 +305,12 @@ class TestEndToEndLoader:
         ],
     )
     def test_template_action_recipe_geometry(
-        self, _dummy_recipe_env, monkeypatch, steps, stride, maximum, overlap, block, durations
+        self, _dummy_recipe_env, monkeypatch, variant, steps, stride, maximum, overlap, block, durations
     ):
         from cosmos_framework.data.generator.action.action_state_template import resolve_action_template
 
         monkeypatch.setenv("ACTION_SOURCES_FILE", "/tmp/sources.json")
-        path = Path(__file__).parents[3] / "examples/action_pretrain/action_midtrain_edge_causal_tnd.toml"
+        path = Path(__file__).parents[3] / f"examples/action_pretrain/action_midtrain_{variant}_causal_tnd.toml"
         config = _load_or_skip(
             path,
             extra_overrides=[
@@ -321,6 +322,11 @@ class TestEndToEndLoader:
         )
         source = config.dataloader_train.dataloader.datasets.robots.dataset
         model = config.model.config
+        assert config.job.name == f"action_causal_midtrain_{variant}"
+        backbone = str(model.vlm_config.model_instance._target_)
+        assert ("Qwen3VLTextForCausalLM" if variant == "nano" else "Nemotron3DenseVLTextForCausalLM") in backbone
+        assert model.vlm_config.model_instance.config.qk_norm_for_text is (variant == "nano")
+        assert model.rectified_flow_training_config.loss_scale == (1.0 if variant == "nano" else 10.0)
         assert model.max_action_dim == resolve_action_template(config.data_setting.action.template).width
         assert model.teacher_forcing_block_size_min == model.teacher_forcing_block_size_max == block
         assert list(model.tokenizer.encode_exact_durations) == durations

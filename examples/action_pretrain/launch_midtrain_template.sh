@@ -15,13 +15,18 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # 数据来源：agibot / egosuite / mixed；显式 ACTION_SOURCES_FILE 优先。
 # 自定义 mixed 权重时，将 ACTION_SOURCES_FILE 指向更新后的来源清单。
 export SOURCE_SET="${SOURCE_SET:-mixed}"
+export MODEL_VARIANT="${MODEL_VARIANT:-edge}"
 export ACTION_SOURCES_FILE="${ACTION_SOURCES_FILE:-$SCRIPT_DIR/sources/$SOURCE_SET.json}"
 # 与 README 中统计命令使用同一个 RUN_DIR；新实验请换目录。
 export RUN_DIR="${RUN_DIR:-${REPO_ROOT}/outputs/my_action_run}"
 export AGIBOT_GROUP_STATS_PATH="${AGIBOT_GROUP_STATS_PATH:-$RUN_DIR/stats/agibot_group_stats.json}"
 export EGOSUITE_GROUP_STATS_PATH="${EGOSUITE_GROUP_STATS_PATH:-$RUN_DIR/stats/egosuite_group_stats.json}"
-export OUTPUT_ROOT="${OUTPUT_ROOT:-$RUN_DIR/train_$SOURCE_SET}"
-export TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/action_midtrain_edge_causal_tnd.toml}"
+if [[ "$MODEL_VARIANT" == nano ]]; then
+    export OUTPUT_ROOT="${OUTPUT_ROOT:-$RUN_DIR/train_nano_$SOURCE_SET}"
+else
+    export OUTPUT_ROOT="${OUTPUT_ROOT:-$RUN_DIR/train_$SOURCE_SET}"
+fi
+export TOML_PATH="${TOML_PATH:-$SCRIPT_DIR/action_midtrain_${MODEL_VARIANT}_causal_tnd.toml}"
 # joint 为 FD / ID / Policy 联训；与数据来源的 mixed 是两个独立设置。
 export MODE="${MODE:-joint}"
 export ALLOW_MOCK_STATISTICS="${ALLOW_MOCK_STATISTICS:-false}"
@@ -47,8 +52,13 @@ export MASTER_PORT="${MASTER_PORT:-50142}"
 
 export AGIBOT_ROOT="${AGIBOT_ROOT:-/path/to/agibot_processed}"
 export EGOSUITE_ROOT="${EGOSUITE_ROOT:-/path/to/egosuite_processed}"
-export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-/path/to/Cosmos3-Edge-DCP}"
+if [[ "$MODEL_VARIANT" == nano ]]; then
+    export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-/path/to/Cosmos3-Nano-DCP}"
+else
+    export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-/path/to/Cosmos3-Edge-DCP}"
+fi
 export COSMOS3_EDGE_PROCESSOR_PATH="${COSMOS3_EDGE_PROCESSOR_PATH:-/path/to/Cosmos3-Edge}"
+export NANO_TOKENIZER_PATH="${NANO_TOKENIZER_PATH:-/path/to/Qwen3-VL-8B-Instruct}"
 export WAN_VAE_PATH="${WAN_VAE_PATH:-/path/to/Wan2.2_VAE.pth}"
 export MROPE_BASE_FPS="${MROPE_BASE_FPS:-24}"
 
