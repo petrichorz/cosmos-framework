@@ -50,6 +50,7 @@ export OVERLAP_ACTION_STEPS="${OVERLAP_ACTION_STEPS:-161}"
 export HISTORY_BLOCKS="${HISTORY_BLOCKS:-32}"
 export ACTIONS_PER_BLOCK="${ACTIONS_PER_BLOCK:-32}"
 export VIDEO_STRIDE="${VIDEO_STRIDE:-4}"
+export RESOLUTION="${RESOLUTION:-480}"
 export NUM_STEPS="${NUM_STEPS:-10}"
 export GUIDANCE="${GUIDANCE:-1}"
 
@@ -72,6 +73,7 @@ export OUTPUT_ROOT="${OUTPUT_ROOT%/}/${DATASET_DIR}/source${SOURCE_INDEX}_sample
 mkdir -p "$OUTPUT_ROOT"
 
 bash "$SCRIPT_DIR/inference_causal_action.sh" \
+    --resolution "$RESOLUTION" \
     --execute-steps "${EXECUTE_STEPS:-$ACTIONS_PER_BLOCK}" \
     --decode-video \
     "$@"
