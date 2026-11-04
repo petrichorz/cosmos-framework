@@ -154,6 +154,27 @@ def test_eef_rollout_stops_on_success_mid_chunk():
     assert all(action.shape == (16,) for action, _ in env.executed)
 
 
+def test_eef_stationary_actions_execute_and_convert_when_active_failure_is_disabled(monkeypatch):
+    env, client = FakeEnv(limit=2), FakeClient(control_mode="eef")
+    env.set_instruction(instruction="Move.")
+    actions = np.zeros((32, 16), dtype=np.float32)
+    actions[:, [6, 14]] = 1
+    monkeypatch.setattr(client, "actions", lambda response: actions)
+    converter = runner.RobotwinPoseConverter(
+        eef_pose_frame="base", T_world_base=dict(position=[1, 2, 3], quaternion_wxyz=[1, 0, 0, 0])
+    )
+
+    result = runner.rollout(env, client, pose_converter=converter)
+
+    assert not result["active_failure"]
+    assert result["failure_reason"] is None
+    assert result["failure_details"] is None
+    assert result["executed_steps"] == len(env.executed) == 2
+    for action, kind in env.executed:
+        assert kind == "ee"
+        np.testing.assert_array_equal(action, [1, 2, 3, 1, 0, 0, 0, 0] * 2)
+
+
 @pytest.mark.parametrize("side", [0, 8])
 @pytest.mark.parametrize(
     "motion, value, active_failure",
@@ -186,7 +207,7 @@ def test_eef_active_failure_requires_all_motion_limits(monkeypatch, side, motion
         actions[-1, side + 6] = -2  # Quaternion sign and scale do not change orientation.
     monkeypatch.setattr(client, "actions", lambda response: actions)
 
-    result = runner.rollout(env, client)
+    result = runner.rollout(env, client, enable_active_failure=True)
 
     assert result["active_failure"] is active_failure
     assert not result["success"]
@@ -207,7 +228,7 @@ def test_eef_active_failure_stops_later_chunk(monkeypatch):
     blocks = iter([moving, actions])
     monkeypatch.setattr(client, "actions", lambda response: next(blocks))
 
-    result = runner.rollout(env, client)
+    result = runner.rollout(env, client, enable_active_failure=True)
 
     assert result["active_failure"] and not result["success"]
     assert result["executed_steps"] == len(env.executed) == 16
@@ -220,7 +241,7 @@ def test_joint_stationary_actions_do_not_trigger_active_failure(monkeypatch):
     env.set_instruction(instruction="Move.")
     monkeypatch.setattr(client, "actions", lambda response: np.zeros((32, 14), dtype=np.float32))
 
-    result = runner.rollout(env, client)
+    result = runner.rollout(env, client, enable_active_failure=True)
 
     assert not result["active_failure"]
     assert result["executed_steps"] == 2
@@ -673,7 +694,7 @@ def automatic_main(monkeypatch, tmp_path, eef_config):
 def test_active_failure_is_saved_and_counted_as_failed_episode(automatic_main, monkeypatch, tmp_path):
     client, envs, _, _ = automatic_main
     client.control_mode = "eef"
-    monkeypatch.setattr(sys, "argv", [*sys.argv, "--control-mode", "eef"])
+    monkeypatch.setattr(sys, "argv", [*sys.argv, "--control-mode", "eef", "--enable-active-failure"])
     actions = np.zeros((32, 16), dtype=np.float32)
     actions[:, [6, 14]] = 1
     monkeypatch.setattr(client, "actions", lambda response: actions)
@@ -689,6 +710,7 @@ def test_active_failure_is_saved_and_counted_as_failed_episode(automatic_main, m
     assert all(not env.executed for env in envs)
     for record in metrics["episodes"]:
         info = json.loads((output / f"seed{record['seed']}" / "info.json").read_text())
+        assert info["client_args"]["enable_active_failure"] is True
         for result in (record, info):
             assert result["status"] == "finished"
             assert result["active_failure"] and not result["success"]

@@ -179,7 +179,9 @@ def record_actions(path):
             np.save(path, np.concatenate(blocks, axis=0))
 
 
-def rollout(env, client, *, state_source="command", pose_converter=None, output=None, video_fps=30):
+def rollout(
+    env, client, *, state_source="command", pose_converter=None, output=None, video_fps=30, enable_active_failure=False
+):
     """One episode: initial frame, then exactly one frame per executed target.
 
     Predicted rows after execute_steps are discarded. If the episode finishes
@@ -243,7 +245,7 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
                 if output is not None:
                     action_blocks.append(actions.copy())
                     requests[-1].update(save_prediction_video(response, output / f"step{executed:06d}_prediction.mp4"))
-                if client.control_mode == "eef":
+                if client.control_mode == "eef" and enable_active_failure:
                     # Compare the full prediction with its first frame in dataset coordinates.
                     poses = actions.astype(np.float64).reshape(-1, 2, 8)
                     position = np.linalg.norm(poses[..., :3] - poses[0, :, :3], axis=-1).max(axis=0)
@@ -261,6 +263,7 @@ def rollout(env, client, *, state_source="command", pose_converter=None, output=
                             max_gripper_deviation=gripper.tolist(),
                         )
                         break
+                if client.control_mode == "eef":
                     actions = pose_converter.actions_to_world(actions)
 
                 observations = []
@@ -363,6 +366,9 @@ def parser():
     p.add_argument("--episodes", type=positive_int, default=1, help="Episodes per task/config/control-mode combination")
     p.add_argument("--control-mode", type=control_modes, default="joint", help="Comma-separated modes: joint, eef")
     p.add_argument("--state-source", choices=["command", "measured"], default="command")
+    p.add_argument(
+        "--enable-active-failure", action="store_true", help="Stop EEF episodes when predicted actions have low motion"
+    )
     poses = p.add_mutually_exclusive_group()
     poses.add_argument("--eef-config", help="JSON with eef_pose_frame and optional T_world_base")
     poses.add_argument("--eef-dataset-root", help="Read EEF frame/transform from this dataset's meta/info.json")
@@ -501,6 +507,7 @@ def run(args, *, output, pose_converter):
                         pose_converter=pose_converter,
                         output=output / f"seed{seed}",
                         video_fps=args.video_fps,
+                        enable_active_failure=args.enable_active_failure,
                     )
                 )
                 requests_path = output / f"seed{seed}" / "requests.json"
