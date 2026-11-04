@@ -255,7 +255,7 @@ def rollout(
                     cosine = np.abs((quaternion * quaternion[0]).sum(axis=-1))
                     rotation = np.rad2deg(2 * np.arccos(np.clip(cosine, 0, 1))).max(axis=0)
                     gripper = np.abs(poses[..., 7] - poses[0, :, 7]).max(axis=0)
-                    if (position < 0.05).all() and (rotation < 5.0).all() and (gripper < 0.1).all():
+                    if (position < 0.01).all() and (rotation < 3.0).all() and (gripper < 0.1).all():
                         active_failure = dict(
                             observation_step=executed,
                             max_position_deviation_m=position.tolist(),

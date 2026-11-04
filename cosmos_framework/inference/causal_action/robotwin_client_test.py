@@ -179,13 +179,13 @@ def test_eef_stationary_actions_execute_and_convert_when_active_failure_is_disab
 @pytest.mark.parametrize(
     "motion, value, active_failure",
     [
-        ("position", 0.049, True),
-        ("position", 0.05, False),
-        ("rotation", 4.9, True),
-        ("rotation", 5.1, False),
+        ("position", 0.0099, True),
+        ("position", 0.0101, False),
+        ("rotation", 1.9, True),
+        ("rotation", 2.1, False),
         ("gripper", 0.099, True),
         ("gripper", 0.1, False),
-        ("diagonal", 0.04, False),
+        ("diagonal", 0.008, False),
         ("quaternion_sign", 0, True),
     ],
 )
