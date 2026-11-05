@@ -33,10 +33,12 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 export CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/path/to/trained/checkpoint}"
+export MODEL_VARIANT="${MODEL_VARIANT:-edge}"
 export ACTION_SOURCES_FILE="${ACTION_SOURCES_FILE:-$SCRIPT_DIR/sources/robotwin.json}"
 export ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-/path/to/robotwin_processed}"
 export ROBOTWIN_GROUP_STATS_PATH="${ROBOTWIN_GROUP_STATS_PATH:-/path/to/robotwin_group_stats.json}"
 export COSMOS3_EDGE_PROCESSOR_PATH="${COSMOS3_EDGE_PROCESSOR_PATH:-/path/to/Cosmos3-Edge}"
+export NANO_TOKENIZER_PATH="${NANO_TOKENIZER_PATH:-/path/to/Qwen3-VL-8B-Instruct}"
 export WAN_VAE_PATH="${WAN_VAE_PATH:-/path/to/Wan2.2_VAE.pth}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/outputs/causal_action/inference_robotwin}"
 

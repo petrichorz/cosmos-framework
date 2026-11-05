@@ -8,6 +8,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+MODEL_VARIANT="${MODEL_VARIANT:-edge}"
+case "$MODEL_VARIANT" in
+    edge|nano) ;;
+    *) printf 'Unsupported MODEL_VARIANT: %s (expected edge or nano)\n' "$MODEL_VARIANT" >&2; exit 1 ;;
+esac
 ASCEND_ENV="${ASCEND_ENV:-/path/to/ascend-toolkit/set_env.sh}"
 CONDA_ROOT="${CONDA_ROOT:-/path/to/miniforge3}"
 CONDA_ENV="${CONDA_ENV:-cosmos-framework}"
@@ -26,11 +31,18 @@ export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export ROBOTWIN_GROUP_STATS_PATH="${ROBOTWIN_GROUP_STATS_PATH:-/path/to/robotwin_group_stats.json}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/path/to/trained/checkpoint}"
 COSMOS3_EDGE_PROCESSOR_PATH="${COSMOS3_EDGE_PROCESSOR_PATH:-/path/to/Cosmos3-Edge}"
+NANO_TOKENIZER_PATH="${NANO_TOKENIZER_PATH:-/path/to/Qwen3-VL-8B-Instruct}"
 WAN_VAE_PATH="${WAN_VAE_PATH:-/path/to/Wan2.2_VAE.pth}"
+if [[ "$MODEL_VARIANT" == nano ]]; then
+    PROCESSOR_PATH="$NANO_TOKENIZER_PATH"
+else
+    PROCESSOR_PATH="$COSMOS3_EDGE_PROCESSOR_PATH"
+fi
 
 CMD=(torchrun --standalone --nproc_per_node=1
     -m cosmos_framework.inference.causal_action.server
-    --checkpoint "$CHECKPOINT_ROOT" --processor "$COSMOS3_EDGE_PROCESSOR_PATH" --vae "$WAN_VAE_PATH"
+    --model-variant "$MODEL_VARIANT"
+    --checkpoint "$CHECKPOINT_ROOT" --processor "$PROCESSOR_PATH" --vae "$WAN_VAE_PATH"
     --statistics "$ROBOTWIN_GROUP_STATS_PATH"
     --actions-per-block 32 --execute-steps 32 --video-stride 4
     --steps "${NUM_STEPS:-10}" --guidance "${GUIDANCE:-1}" --history "${HISTORY_BLOCKS:-32}"

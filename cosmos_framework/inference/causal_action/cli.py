@@ -11,12 +11,13 @@ from pathlib import Path
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
+    p.add_argument("--model-variant", choices=["edge", "nano"], default="edge")
     p.add_argument("--sources-file", required=True)
     p.add_argument("--source-index", type=int, default=0)
     p.add_argument(
         "--template", default="cosmos_framework.data.generator.action.action_state_template.ActionStateTemplate55"
     )
-    p.add_argument("--processor", required=True)
+    p.add_argument("--processor", required=True, help="Edge processor or Nano Qwen tokenizer directory")
     p.add_argument("--vae", required=True)
     p.add_argument("--mode", choices=["policy", "forward_dynamics", "inverse_dynamics"], default="policy")
     p.add_argument("--video-stride", type=int, default=4)
@@ -83,19 +84,28 @@ def main():
     # Initialize the same device compatibility layer as the standard entry point.
     distributed.init()
     block_size = latent_block_size(args.actions_per_block, args.video_stride)
+    if args.model_variant == "nano":
+        tokenizer_overrides = [
+            "model.config.vlm_config.tokenizer.config_variant=hf",
+            f"model.config.vlm_config.tokenizer.pretrained_model_name={args.processor}",
+        ]
+    else:
+        tokenizer_overrides = [
+            "model.config.vlm_config.tokenizer.repository=null",
+            "model.config.vlm_config.tokenizer.revision=null",
+            f"+model.config.vlm_config.tokenizer.tokenizer_type={args.processor}",
+        ]
     overrides = [
         f"data_setting.action.template={args.template}",
         f"data_setting.action.actions_per_block={args.actions_per_block}",
         f"data_setting.action.video_stride={args.video_stride}",
         f"data_setting.action.max_action_steps={args.max_action_steps}",
-        "model.config.vlm_config.tokenizer.repository=null",
-        "model.config.vlm_config.tokenizer.revision=null",
-        f"+model.config.vlm_config.tokenizer.tokenizer_type={args.processor}",
+        *tokenizer_overrides,
         f"model.config.tokenizer.vae_path={args.vae}",
         *args.override,
     ]
     model, _ = load_model_from_checkpoint(
-        "action_causal_midtrain_edge",
+        f"action_causal_midtrain_{args.model_variant}",
         checkpoint_path=args.checkpoint,
         parallelism_config=dict(
             data_parallel_shard_degree=1,

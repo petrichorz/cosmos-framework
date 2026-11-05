@@ -81,7 +81,8 @@ async def serve(policy, *, host="0.0.0.0", port=8000):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--processor", required=True)
+    p.add_argument("--model-variant", choices=["edge", "nano"], default="edge")
+    p.add_argument("--processor", required=True, help="Edge processor or Nano Qwen tokenizer directory")
     p.add_argument("--vae", required=True)
     p.add_argument("--statistics", help="Training state/delta quantiles; otherwise read from --sources-file")
     p.add_argument("--sources-file")
@@ -148,8 +149,19 @@ def main():
     adapter = RobotwinAdapter.from_statistics(template, statistics, args.robot_config)
     distributed.init()
     try:
+        if args.model_variant == "nano":
+            tokenizer_overrides = [
+                "model.config.vlm_config.tokenizer.config_variant=hf",
+                f"model.config.vlm_config.tokenizer.pretrained_model_name={args.processor}",
+            ]
+        else:
+            tokenizer_overrides = [
+                "model.config.vlm_config.tokenizer.repository=null",
+                "model.config.vlm_config.tokenizer.revision=null",
+                f"+model.config.vlm_config.tokenizer.tokenizer_type={args.processor}",
+            ]
         model, _ = load_model_from_checkpoint(
-            "action_causal_midtrain_edge",
+            f"action_causal_midtrain_{args.model_variant}",
             checkpoint_path=args.checkpoint,
             parallelism_config=dict(
                 data_parallel_shard_degree=1,
@@ -163,9 +175,7 @@ def main():
                 f"data_setting.action.template={args.template}",
                 f"data_setting.action.actions_per_block={args.actions_per_block}",
                 f"data_setting.action.video_stride={args.video_stride}",
-                "model.config.vlm_config.tokenizer.repository=null",
-                "model.config.vlm_config.tokenizer.revision=null",
-                f"+model.config.vlm_config.tokenizer.tokenizer_type={args.processor}",
+                *tokenizer_overrides,
                 f"model.config.tokenizer.vae_path={args.vae}",
                 *args.override,
             ],
